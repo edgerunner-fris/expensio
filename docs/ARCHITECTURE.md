@@ -131,7 +131,7 @@ report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
 | M1 | identity、gateway、RLS、集成测试 | 完成 |
 | M2 | expense、审批状态机、预算预占 | 完成 |
 | M3 | Kafka、outbox、报表读模型 | 完成 |
-| M4 | billing、订阅与支付回调幂等 | 未开始 |
+| M4 | billing、订阅与支付回调幂等 | 进行中 |
 | M5 | 前端、通知 | 未开始 |
 | M6 | Dockerfile、K8s、Helm、GitHub Actions | 未开始 |
 | M7 | 指标、trace、压测与告警 | 未开始 |
@@ -143,3 +143,4 @@ report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
 - [ADR-0002：持久化与依赖装配方式](adr/0002-persistence-and-wiring.md)
 - [ADR-0003：预算归属与预占生命周期](adr/0003-budget-ownership-and-reservation.md)
 - [ADR-0004：事务内 outbox 与报表读模型](adr/0004-event-driven-read-model.md)
+- [ADR-0005：订阅计费、出账与支付回调](adr/0005-billing-subscriptions-and-payment-callbacks.md)

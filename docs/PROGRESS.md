@@ -813,11 +813,61 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## 下一步：M4
+## M4 进行中（1/7）
 
-M3 已闭环。按顺序进入 billing：订阅与账单模型、支付回调幂等（同一回调重复到达
-只生效一次）、租户边界与 identity 一致。先给 M4 设计与批次拆分（ADR-0005 与迁移
-草案），确认后再写实现，避免把"支付状态"与"订阅状态"两套状态机混在一起。
+设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
+回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
+事件继续走事务内 outbox。
+
+| 批次 | 内容 | 状态 |
+| --- | --- | --- |
+| M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
+| M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 未开始 |
+| M4-3 | 套餐与订阅 service/repository/HTTP | 未开始 |
+| M4-4 | 出账（同周期幂等）与账单查询 API | 未开始 |
+| M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 未开始 |
+| M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 未开始 |
+| M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 未开始 |
+
+### M4-1 实际执行的验证（2026-10-26）
+
+```text
+$ gofmt -l internal/billing        # 无输出
+$ go vet ./internal/billing        # 无输出
+$ go build ./... && go vet ./...
+ALL-OK
+
+$ go test ./internal/billing -count=1 -v -timeout=10m
+--- PASS: TestBillingSchemaApplies (3.17s)
+    --- PASS: 套餐不可写 / 账单不可删 / 支付流水不可改
+    --- PASS: 回调记录不可删 / 映射表不可直读 / 租户反查函数可执行
+--- PASS: TestBillingRLSIsolatesTenants (0.03s)
+--- PASS: TestSubscriptionConstraints (0.03s)
+--- PASS: TestInvoiceConstraintsAndLookup (0.03s)
+    --- PASS: 金额不可改 / 币种不可改 / 周期不可改
+--- PASS: TestPaymentsWebhooksAndOutbox (0.03s)
+--- PASS: TestBillingMigrationDownAndUp (0.11s)
+ok  github.com/edgerunner-fris/expensio/internal/billing  3.861s
+```
+
+本轮验证到的事实：
+
+- 四张租户表（订阅、账单、支付流水、回调记录）全部 `ENABLE + FORCE RLS`；
+  无租户上下文查不到行，跨租户写入 SQLSTATE 42501，跨租户按 ID 更新 0 行。
+- 同一租户第二条未取消订阅被部分唯一索引拒绝（23505）；取消后可以重新订阅。
+  订阅状态只能走 `active ↔ past_due → canceled`，取消是终态。
+- 同一订阅周期重复出账被唯一约束拒绝（23505）；金额、币种、周期与账单号
+  出账后不可改（23514）；`paid` 必须有 `paid_at`，且不能回到 `open`。
+- 支付流水与回调记录只追加：运行时角色的 UPDATE/DELETE 都是 42501；
+  同一 `(provider, provider_event_id)` 与同一 `(provider, payment_id)` 只能写一次。
+- 账单插入时由触发器同事务写 `invoice_lookup`；运行时角色不能直接读它，
+  只能调用 `app.invoice_tenant(uuid)` 得到租户，未知账单返回 NULL。
+- 迁移 down/up 后套餐种子仍在、业务表为空，说明 down SQL 可执行。
+
+## 下一步：M4-2
+
+billing 领域模型与单元测试：套餐读取、订阅状态机、账单金额（单价 × 席位）
+与周期计算；不接数据库，先把规则固定下来。
 
 
 
