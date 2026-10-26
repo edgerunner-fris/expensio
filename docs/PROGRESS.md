@@ -352,6 +352,21 @@ $ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run 'Test(CreateAndGetDr
 ok  internal/expense  6.559s
 ```
 
+### M2-6 实际执行的验证（2026-10-26）
+
+`cmd/expense` 已从空壳改为真实装配：`NeedsDB` + `NeedsJWT`，启动即建立连接池、
+注册 `/healthz` 的 db 检查、挂载 `/api/v1/expenses` 路由。
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run TestHTTP -race -count=1 -v
+--- PASS: TestHTTPExpenseLifecycle     （201→列表→读取→更新 v2→旧版本 409→删除 204→再读 404）
+--- PASS: TestHTTPAuthAndVisibility    （无令牌/伪造令牌 401；viewer 403；他人单 404；管理员可见；scope=all 403/200）
+--- PASS: TestHTTPBadRequests          （非法 ID、非对象 JSON、缺 version、零金额、非法状态、删除缺 version）
+ok  internal/expense  6.700s
+```
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -439,8 +454,8 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-3 | `platform/money`：int64 最小单位、币种与金额校验 | 完成 |
 | M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 完成 |
 | M2-5 | 费用仓储与草稿 CRUD | 完成 |
-| M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 进行中 |
-| M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 待开始 |
+| M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 完成 |
+| M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 进行中 |
 | M2-8 | 审批工作流与同事务预占/释放/结转 | 待开始 |
 | M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
 
