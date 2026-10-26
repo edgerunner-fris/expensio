@@ -176,6 +176,34 @@ func (p *Postgres) dsn(service, user, password, scheme string) string {
 	return u.String()
 }
 
+// MigrateDownUp 将某个服务的迁移回滚 steps 步，再重新执行到最新。
+// 仅用于验证 down SQL；测试共享同一个实例，调用后该库的表会被重建。
+func (p *Postgres) MigrateDownUp(t *testing.T, service string, steps int) {
+	t.Helper()
+	dir := filepath.Join(repoRoot(), "migrations", service)
+	src, err := iofs.New(os.DirFS(dir), ".")
+	if err != nil {
+		t.Fatalf("读取迁移目录 %s 失败: %v", dir, err)
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", src,
+		p.dsn(service, service+"_migrator", migratorPassword, "pgx5"))
+	if err != nil {
+		t.Fatalf("初始化迁移失败: %v", err)
+	}
+	if err := m.Steps(-steps); err != nil {
+		_, _ = m.Close()
+		t.Fatalf("回滚 %d 步失败: %v", steps, err)
+	}
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		_, _ = m.Close()
+		t.Fatalf("重新迁移失败: %v", err)
+	}
+	srcErr, dbErr := m.Close()
+	if srcErr != nil || dbErr != nil {
+		t.Fatalf("关闭迁移失败: %v / %v", srcErr, dbErr)
+	}
+}
+
 func migrateUp(service, dsn string) error {
 	dir := filepath.Join(repoRoot(), "migrations", service)
 	src, err := iofs.New(os.DirFS(dir), ".")

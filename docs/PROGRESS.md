@@ -288,12 +288,41 @@ $ make preflight
   OK compose   5.1.4
 ```
 
+### M2-1 / M2-2 实际执行的验证（2026-10-26）
+
+迁移 `migrations/expense/000002_expense_core.{up,down}.sql` 在真实 PostgreSQL 16
+容器中执行，应用角色为 `expense_app`（NOBYPASSRLS）：
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -count=1 -v
+--- PASS: TestMigrationDownAndUp          （down 删表 → up 重建，RLS 与种子仍在）
+--- PASS: TestSchemaApplies               （btree_gist、三表 FORCE RLS、排斥约束、5 条状态边）
+--- PASS: TestRLSIsolation                （跨租户 INSERT 42501；无上下文 0 行；跨租户 UPDATE 0 行）
+--- PASS: TestStatusTransitionGuard       （非 draft 插入、跳步、提交后改金额、缺审批人、终态出边 → 23514）
+--- PASS: TestSoftDeleteRules             （草稿可软删、不可恢复；已提交不可软删）
+--- PASS: TestApprovalStepsAreAppendOnly  （UPDATE/DELETE 42501；白名单写操作 42501；动作/理由校验 23514）
+--- PASS: TestBudgetPeriodOverlap         （重叠 23P01；相邻期间/不同类别允许；软删后可重建）
+--- PASS: TestBudgetGuards                （超占 23514；有占用不可删；软删不可恢复）
+--- PASS: TestBudgetFKIsTenantScoped      （跨租户预算引用 23503）
+ok  github.com/edgerunner-fris/expensio/internal/expense  5.116s
+```
+
+随后跑全量竞态回归：
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout=15m
+ok  internal/expense   8.737s
+ok  internal/gateway   4.373s
+ok  internal/identity  13.226s
+其余平台包全部 ok；gofmt、go vet 均无输出
+```
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
 | --- | --- | --- | --- |
 | 1 | MinIO 官方镜像下架（Docker Hub 仓库 404，quay 需鉴权，ghcr 403） | **已解决** | 改用 `bitnamilegacy/minio`，其中是真实 MinIO 构建（DEVELOPMENT.2025-05-24），并用 digest 固定：`sha256:451fe685...`。代价是依赖第三方命名空间的镜像，已在 compose 注释与 ADR 中说明 |
-| 2 | 原记录称保留 google/wire，但项目实际从未引入 | **未解决（口径偏差）** | 核对 `go.mod` 与源码：没有 `google/wire`，identity 与 expense 都是手写装配。原记录与事实不符，不再沿用"已保留 v0.7.0"的表述；与 sqlc 一并见风险 28 |
+| 2 | 原记录称保留 google/wire，但项目实际从未引入 | **已解决（偏差已记录）** | 核对 `go.mod` 与源码：没有 `google/wire`，identity 与 expense 都是手写装配。原记录与事实不符，已删除该表述；决策与后续评估时点写入 ADR-0002 |
 | 3 | Makefile 在不同平台使用错误的 shell | **已解决** | Windows 需要 bash.exe 全路径；Linux/WSL 的 `/bin/sh` 是 dash，不支持 `.SHELLFLAGS` 里的 `-o pipefail`，会导致所有目标启动即失败。现按平台固定 bash，并补 `scripts/preflight.sh`；`make help/preflight` 已在 WSL2 实测 |
 | 4 | Go 模块代理在本机不可直连 | **已解决（WSL2 已固化）** | `~/.config/go/env` 写入 `GOPROXY=https://goproxy.cn,direct`、`GOTOOLCHAIN=local`；Go 1.27.0 位于 `/usr/local/go`，PATH 由 `~/.bashrc` 追加。换机器需重做 |
 | 5 | Docker 拉取镜像受网络代理影响 | **已解决（WSL2 环境已复核）** | Docker Desktop WSL 集成可用，daemon 29.5.3；测试镜像已本地缓存。Ryuk 默认关闭，见风险 25。网络或代理变化时仍需复核 |
@@ -319,7 +348,7 @@ $ make preflight
 | 25 | Ryuk 回收器需要额外拉取镜像，代理不通时集成测试直接失败 | **已解决（明示取舍）** | 测试改为显式 `Terminate`，默认设置 `TESTCONTAINERS_RYUK_DISABLED=true`；CI 想启用 Ryuk 可显式改回。代价：测试进程被强杀时可能残留容器 |
 | 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | WSL2 本机（Linux 内核）已通过；GitHub Actions 尚未配置，M6 落地时以 runner 结果为准 |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
-| 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **未解决（口径偏差）** | M1 使用手写 pgx 与手工装配；M2 沿用同一风格，避免中途切换。M2 文档记录该偏差，并在 M6 前决定"补引入"或"从简历口径删除" |
+| 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -370,14 +399,15 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | 批次 | 内容 | 状态 |
 | --- | --- | --- |
 | M2-0 | Linux Makefile、Docker 门禁、仓库清理、环境记录 | 完成 |
-| M2-1 | ADR-0003、ARCHITECTURE、expense 核心迁移 | 进行中 |
-| M2-2 | Schema 集成测试（RLS / 触发器 / 只追加 / 重叠约束） | 待开始 |
-| M2-3 | int64 金额与领域模型（状态机、角色规则） | 待开始 |
-| M2-4 | 费用仓储与草稿 CRUD | 待开始 |
-| M2-5 | 费用 HTTP 层与 `cmd/expense` 装配 | 待开始 |
-| M2-6 | 预算仓储/服务/HTTP 与匹配规则 | 待开始 |
-| M2-7 | 审批工作流与同事务预占/释放/结转 | 待开始 |
-| M2-8 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
+| M2-1 | ADR-0001/0002/0003、ARCHITECTURE、expense 核心迁移 | 完成 |
+| M2-2 | Schema 集成测试（RLS / 触发器 / 只追加 / 重叠约束 / down-up） | 完成 |
+| M2-3 | `platform/money`：int64 最小单位、币种与金额校验 | 进行中 |
+| M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 待开始 |
+| M2-5 | 费用仓储与草稿 CRUD | 待开始 |
+| M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 待开始 |
+| M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 待开始 |
+| M2-8 | 审批工作流与同事务预占/释放/结转 | 待开始 |
+| M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
 
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
