@@ -75,13 +75,15 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
 
 ## 事件与异步（M3）
 
-当前没有 Kafka 生产者。M3 引入时采用事务内 outbox：
+M3 采用事务内 outbox（ADR-0004），当前已完成事件契约与 outbox 存储：
 
-1. 业务事务内写 `outbox_events`；
-2. 提交后由后台投递器发送到 Kafka；
-3. 消费端按事件 ID 幂等。
+1. 业务事务内写 `app.outbox_events`（`internal/platform/outbox`）；
+2. 提交后由后台投递器发送到 Kafka（M3-2）；
+3. 消费端按事件 ID 幂等，报表读模型最终一致。
 
 **禁止在数据库事务内直接发 Kafka 消息**，否则回滚后消息无法撤回。
+事件信封与费用快照定义在 `internal/platform/events`；主题为
+`expensio.expense.events.v1`，分区键固定为 `tenant_id`。
 
 ## 可观测性与运维
 
@@ -113,7 +115,7 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
 | M0 | 骨架、配置、日志、健康检查、编排、迁移基线 | 完成 |
 | M1 | identity、gateway、RLS、集成测试 | 完成 |
 | M2 | expense、审批状态机、预算预占 | 完成 |
-| M3 | Kafka、outbox、报表读模型 | 未开始 |
+| M3 | Kafka、outbox、报表读模型 | 进行中 |
 | M4 | billing、订阅与支付回调幂等 | 未开始 |
 | M5 | 前端、通知 | 未开始 |
 | M6 | Dockerfile、K8s、Helm、GitHub Actions | 未开始 |
@@ -125,3 +127,4 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
 - [ADR-0001：共享 schema + RLS 多租户隔离](adr/0001-multi-tenancy-and-rls.md)
 - [ADR-0002：持久化与依赖装配方式](adr/0002-persistence-and-wiring.md)
 - [ADR-0003：预算归属与预占生命周期](adr/0003-budget-ownership-and-reservation.md)
+- [ADR-0004：事务内 outbox 与报表读模型](adr/0004-event-driven-read-model.md)

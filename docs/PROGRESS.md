@@ -561,9 +561,63 @@ M2 已全部完成，全量 `-race` 与 `-count=5` 通过，网关联调见上�
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
 
-## 下一步：M3（Kafka、outbox、报表读模型）
+## M3 进行中（1/7）
 
-尚未开始。按约定先给出设计与批次拆分，确认后再写代码。
-已知约束：事务内只写 outbox，由独立投递器发 Kafka；事件键必须带 `tenant_id`；
-消费端按事件 ID 幂等；report 服务只读自己的库，不跨库 JOIN。
+设计已锁定在 ADR-0004：事务内 outbox、事务外投递、全量快照 + `aggregate_version`、
+`tenant_id` 作为分区键、消费端按事件 ID 幂等。
+
+| 批次 | 内容 | 状态 |
+| --- | --- | --- |
+| M3-1 | ADR-0004、事件契约、outbox 迁移与仓储 | 完成 |
+| M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 未开始 |
+| M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 未开始 |
+| M3-4 | report 迁移：幂等表、读模型、RLS | 未开始 |
+| M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 未开始 |
+| M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 未开始 |
+| M3-7 | 全量回归、联调、PROGRESS 收尾 | 未开始 |
+
+### M3-1 实际执行的验证（2026-10-26）
+
+```text
+$ gofmt -l .                       # 无输出
+gofmt_exit=0
+$ go vet ./...
+vet_exit=0
+$ go build ./...
+build_exit=0
+
+$ go test ./internal/platform/events/... -count=1
+ok  github.com/edgerunner-fris/expensio/internal/platform/events  0.003s
+
+$ go test ./internal/platform/outbox/... -count=1 -v
+--- PASS: TestInsertAndClaim (3.31s)
+--- PASS: TestAppRoleCannotDeleteOutboxRows (0.02s)
+--- PASS: TestLeaseExpiresSoCrashedDispatcherDoesNotStrandEvents (0.23s)
+--- PASS: TestMarkFailedRecordsRetry (0.02s)
+--- PASS: TestConcurrentClaimersDoNotBlockOrDuplicate (0.03s)
+--- PASS: TestInsertIsPartOfCallerTransaction (0.02s)
+--- PASS: TestInsertRejectsInvalidEnvelope (0.01s)
+--- PASS: TestClaimValidatesArguments (0.01s)
+ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  4.301s
+
+$ go test ./internal/expense/ -run TestMigrationDownAndUp -count=1 -v
+--- PASS: TestMigrationDownAndUp (3.14s)
+ok  github.com/edgerunner-fris/expensio/internal/expense  3.804s
+```
+
+本轮验证到的事实：
+
+- 领取使用 `FOR UPDATE SKIP LOCKED`：持有事务与行锁的投递器不会阻塞第二个投递器，
+  第二个只会拿到剩余事件（`TestConcurrentClaimersDoNotBlockOrDuplicate`）。
+- 租约到期后事件可以被重新领取；进程崩溃（未走 `MarkFailed`）不会把事件永久卡死。
+- 失败重试会累加 `attempts`，超长错误截断到 480 个字符，未到 `available_at` 不可领取。
+- 业务事务返回错误时 outbox 行一起回滚——这是 M3 最重要的不变量。
+- `expense_app` 对 outbox 的 `DELETE` 被拒绝：投递成功只标记，不删行（审计）。
+- 迁移 down 3 步再 up 成功，重建后 `outbox_events` 存在、为空且未启用 RLS。
+
+## 下一步：M3-2
+
+outbox 投递器与 Kafka 生产者：`franz-go`、按 `tenant_id` 分区、指数退避
+（1s → 2s → 4s … 上限 1m）、Kafka 不可用时不阻塞费用提交。
+
 
