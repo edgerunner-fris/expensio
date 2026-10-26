@@ -317,6 +317,27 @@ ok  internal/identity  13.226s
 其余平台包全部 ok；gofmt、go vet 均无输出
 ```
 
+### M2-3 / M2-4 实际执行的验证（2026-10-26）
+
+```text
+$ go test ./internal/platform/money -race -count=5
+ok  internal/platform/money  1.020s
+  ParseCurrency：归一化大小写/空白，拒绝 ""、"US"、"USDD"、"U1D"、"人民币"
+  Validate：1..1e12 边界；0、负数、MinInt64、超上限均被拒
+  Format：USD/JPY(0 位)/KWD(3 位)/负数/MinInt64 不溢出；不引入浮点
+
+$ go test ./internal/expense -run 'Test(StatusValid|Transitions|ActionValid|ParseCategory|Authorize|CanView|ResolveScope|BudgetAvailable)' -race -count=5
+ok  internal/expense  1.073s
+  状态机：6x6 全矩阵比对 5 条边，与迁移种子数据一致
+  禁止自审：owner/admin 审批自己提交的单 → 403 expense.self_approval_forbidden
+  角色：viewer 只读；member 只能提交/撤销自己的单；审批与报销仅 admin/owner
+  可见性：admin/owner 全部，其余仅本人；已软删一律 404/不可见
+  scope=all 对非管理岗返回 403，不静默降级
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -race -count=1
+ok  internal/expense  7.417s（含 M2-1/M2-2 集成用例）
+```
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -401,9 +422,9 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-0 | Linux Makefile、Docker 门禁、仓库清理、环境记录 | 完成 |
 | M2-1 | ADR-0001/0002/0003、ARCHITECTURE、expense 核心迁移 | 完成 |
 | M2-2 | Schema 集成测试（RLS / 触发器 / 只追加 / 重叠约束 / down-up） | 完成 |
-| M2-3 | `platform/money`：int64 最小单位、币种与金额校验 | 进行中 |
-| M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 待开始 |
-| M2-5 | 费用仓储与草稿 CRUD | 待开始 |
+| M2-3 | `platform/money`：int64 最小单位、币种与金额校验 | 完成 |
+| M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 完成 |
+| M2-5 | 费用仓储与草稿 CRUD | 进行中 |
 | M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 待开始 |
 | M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 待开始 |
 | M2-8 | 审批工作流与同事务预占/释放/结转 | 待开始 |
