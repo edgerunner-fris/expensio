@@ -109,6 +109,14 @@ func (r *Repository) GetLiveSubscription(ctx context.Context, tx pgx.Tx) (*Subsc
 	return scanSubscription(tx.QueryRow(ctx, q))
 }
 
+// LockLiveSubscription 用于支付回调推动订阅状态：先锁住再判断状态，
+// 避免两个并发回调一个读到 active、一个读到 past_due 后互相覆盖。
+func (r *Repository) LockLiveSubscription(ctx context.Context, tx pgx.Tx) (*Subscription, error) {
+	const q = `SELECT ` + subscriptionColumns + ` FROM app.subscriptions
+	 WHERE status <> 'canceled' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`
+	return scanSubscription(tx.QueryRow(ctx, q))
+}
+
 func (r *Repository) ListSubscriptions(ctx context.Context, tx pgx.Tx, limit, offset int) ([]Subscription, int64, error) {
 	var total int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM app.subscriptions`).Scan(&total); err != nil {
@@ -135,6 +143,75 @@ func (r *Repository) ListSubscriptions(ctx context.Context, tx pgx.Tx, limit, of
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+// LockInvoice 在回调处理中锁住账单行：支付流水、账单状态与 outbox 必须
+// 在同一个事务里落库，锁住的是"这一张账单"，不影响其他租户。
+func (r *Repository) LockInvoice(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Invoice, error) {
+	return scanInvoice(tx.QueryRow(ctx,
+		`SELECT `+invoiceColumns+` FROM app.invoices WHERE id = $1 FOR UPDATE`, id))
+}
+
+// MarkInvoicePaid 只允许 open → paid；返回 0 行说明账单已被其他回调处理。
+func (r *Repository) MarkInvoicePaid(ctx context.Context, tx pgx.Tx, inv *Invoice, paidAt time.Time) error {
+	const q = `UPDATE app.invoices
+	 SET status = 'paid', paid_at = $1
+	 WHERE id = $2 AND tenant_id = $3 AND status = 'open'
+	 RETURNING version`
+	if err := tx.QueryRow(ctx, q, paidAt, inv.ID, inv.TenantID).Scan(&inv.Version); err != nil {
+		return err
+	}
+	inv.Status = InvoicePaid
+	inv.PaidAt = &paidAt
+	return nil
+}
+
+func (r *Repository) InsertPayment(ctx context.Context, tx pgx.Tx, p *Payment) error {
+	const q = `INSERT INTO app.payments
+	    (id, tenant_id, invoice_id, provider, provider_payment_id,
+	     amount_minor, currency, paid_at)
+	 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	_, err := tx.Exec(ctx, q,
+		p.ID, p.TenantID, p.InvoiceID, p.Provider, p.ProviderPaymentID,
+		p.AmountMinor, string(p.Currency), p.PaidAt)
+	return err
+}
+
+func (r *Repository) PaymentExists(ctx context.Context, tx pgx.Tx, provider, providerPaymentID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM app.payments
+		 WHERE provider = $1 AND provider_payment_id = $2)`,
+		provider, providerPaymentID).Scan(&exists)
+	return exists, err
+}
+
+// InsertWebhookEvent 插入回调幂等记录；同一 (provider, event_id) 重复到达时
+// 唯一约束会拒绝，调用方据此返回成功而不是重复处理。
+func (r *Repository) InsertWebhookEvent(ctx context.Context, tx pgx.Tx, e *WebhookEvent) error {
+	const q = `INSERT INTO app.webhook_events
+	    (id, tenant_id, provider, provider_event_id, event_type, invoice_id, payload_sha256)
+	 VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := tx.Exec(ctx, q,
+		e.ID, e.TenantID, e.Provider, e.ProviderEventID, string(e.EventType),
+		e.InvoiceID, e.PayloadSHA256)
+	return err
+}
+
+// SetSubscriptionStatus 用于支付失败/成功推动订阅状态。
+// updated_by 用零 UUID 表示"系统回调"，不伪造一个用户身份。
+func (r *Repository) SetSubscriptionStatus(ctx context.Context, tx pgx.Tx, sub *Subscription, to SubscriptionStatus) error {
+	const q = `UPDATE app.subscriptions
+	 SET status = $1, updated_by = $2
+	 WHERE id = $3 AND tenant_id = $4 AND version = $5
+	 RETURNING version, updated_at`
+	if err := tx.QueryRow(ctx, q,
+		string(to), uuid.Nil, sub.ID, sub.TenantID, sub.Version,
+	).Scan(&sub.Version, &sub.UpdatedAt); err != nil {
+		return err
+	}
+	sub.Status = to
+	return nil
 }
 
 // CancelSubscription 把订阅置为终态。状态白名单由数据库触发器再校验一次。

@@ -37,7 +37,10 @@ type Service struct {
 	repo     *Repository
 	// outbox 只在业务事务内追加事件，实际投递由 M4-6 装配的 dispatcher 完成。
 	outbox *outbox.Store
-	now    func() time.Time
+	// 支付回调的密钥与渠道：只由 main 从环境变量注入，测试显式启用。
+	webhookSecret   []byte
+	webhookProvider string
+	now             func() time.Time
 }
 
 func NewService(database *db.DB) *Service {
@@ -326,7 +329,7 @@ func (s *Service) generateInvoiceOnce(ctx context.Context, subscriptionID uuid.U
 		if err := s.repo.CreateInvoice(ctx, tx, inv); err != nil {
 			return err
 		}
-		env, err := newInvoiceEvent(events.TypeInvoiceCreated, inv)
+		env, err := newInvoiceEvent(events.TypeInvoiceCreated, inv, inv.IssuedAt)
 		if err != nil {
 			return err
 		}

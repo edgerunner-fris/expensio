@@ -29,4 +29,8 @@ func RegisterRoutes(r gin.IRouter, h *Handler, parser middleware.AccessParser) {
 	admin.POST("/billing/subscriptions", h.CreateSubscription)
 	admin.POST("/billing/subscriptions/:subscriptionID/cancel", h.CancelSubscription)
 	admin.POST("/billing/subscriptions/:subscriptionID/invoices", h.GenerateInvoice)
+
+	// 支付回调没有 JWT：不经过 Auth 中间件，信任来自 HMAC 验签。
+	// 它也不接受 tenant_id，租户由账单映射反查（ADR-0005）。
+	v1.POST("/billing/webhooks/payments", h.PaymentWebhook)
 }

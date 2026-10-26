@@ -3,6 +3,7 @@ package billing
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -44,7 +45,7 @@ func newSubscriptionEvent(t events.Type, s *Subscription) (events.Envelope, erro
 	}, nil
 }
 
-func newInvoiceEvent(t events.Type, inv *Invoice) (events.Envelope, error) {
+func newInvoiceEvent(t events.Type, inv *Invoice, occurredAt time.Time) (events.Envelope, error) {
 	snap := events.InvoiceSnapshot{
 		ID:             inv.ID,
 		TenantID:       inv.TenantID,
@@ -74,7 +75,7 @@ func newInvoiceEvent(t events.Type, inv *Invoice) (events.Envelope, error) {
 		TenantID:         inv.TenantID,
 		AggregateID:      inv.ID,
 		AggregateVersion: inv.Version,
-		OccurredAt:       inv.IssuedAt,
+		OccurredAt:       occurredAt,
 		Payload:          payload,
 	}, nil
 }

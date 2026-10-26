@@ -21,6 +21,11 @@ import (
 
 const testJWTSecret = "billing-test-secret-at-least-32-bytes!"
 
+const (
+	testWebhookSecret   = "billing-test-webhook-secret-32-bytes!!"
+	testWebhookProvider = "mockpay"
+)
+
 // billingTestNow 固定时钟：周期断言不能依赖跑测试的那一天。
 var billingTestNow = time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
 
@@ -39,6 +44,7 @@ func newBillingHTTPTestServer(t *testing.T, database *db.DB) (*gin.Engine, *auth
 
 	svc := NewService(database)
 	svc.now = func() time.Time { return billingTestNow }
+	require.NoError(t, svc.EnableWebhooks([]byte(testWebhookSecret), testWebhookProvider))
 	engine := gin.New()
 	RegisterRoutes(engine, NewHandler(svc), issuer)
 	return engine, issuer

@@ -813,7 +813,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（4/7）
+## M4 进行中（5/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -825,7 +825,7 @@ exit=0
 | M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
 | M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
 | M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
-| M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 未开始 |
+| M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 完成 |
 | M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 未开始 |
 | M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 未开始 |
 
@@ -975,12 +975,47 @@ ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  4.450s
   同包用例共享一个容器，断言必须显式按 `tenant_id` 过滤，否则会读到别的
   用例产生的事件。已按租户过滤。
 
-## 下一步：M4-5
+### M4-5 实际执行的验证（2026-10-26）
 
-支付回调：`X-Billing-Signature` HMAC-SHA256 验签（常量时间比较）、
-5 分钟时间窗防重放、按 `invoice_id` 经 `app.invoice_tenant` 反查租户，
-在单事务内写支付流水、回调记录、账单 paid 与 outbox 事件；
-重复回调靠唯一约束幂等。
+```text
+$ gofmt -l internal/billing && go vet ./internal/billing && go build ./...
+BUILD-OK
+
+$ go test ./internal/billing -count=1 -timeout=15m
+ok  github.com/edgerunner-fris/expensio/internal/billing  4.389s
+
+$ go test ./internal/billing -race -count=5 -timeout=25m
+ok  github.com/edgerunner-fris/expensio/internal/billing  7.437s
+```
+
+本轮验证到的事实：
+
+- 验签基于原始请求体：`HMAC-SHA256(secret, "<timestamp>.<body>")`，十六进制比较用
+  `hmac.Equal`（常量时间）；签名错误、时间戳超出 ±5 分钟、渠道名不匹配、
+  请求体不是合法 JSON 分别得到 401/401/401/400，且都不写任何数据库记录。
+- 租户不从请求体读取：回调只带 `invoice_id`，服务先执行 `app.invoice_tenant(uuid)`
+  反查可信租户，再以 `db.WithinTenantID` 建立 RLS 上下文。未知账单返回 404，
+  不可能借回调写入任意租户的行。
+- `payment.failed`：账单保持 `open`，生效订阅 `active → past_due`（version 2），
+  写回调记录与 `invoice.payment_failed` 事件；`payment.succeeded`：
+  账单 `open → paid`（version 2、`paid_at` 非空），订阅 `past_due → active`（version 3），
+  写一条支付流水与 `invoice.paid` 事件。四类写入在同一事务内完成。
+- 幂等完全由唯一约束承担：同一 `(provider, provider_event_id)` 重投返回 HTTP 200
+  `status=duplicate`，支付流水、回调记录、账单版本与 outbox 行数都不变；
+  不同事件 ID 但同一 `payment_id` 同样判定为已处理；已支付账单收到另一笔支付返回
+  409 `billing.invoice_already_paid`。
+- 金额或币种与账单不符返回 409 `billing.payment_mismatch`，状态不变，
+  之后合法的失败/成功回调仍可正常处理（顺序为 mismatch → failed → succeeded）。
+- 重复回调用哨兵错误触发事务回滚，而不是"插到一半返回 nil"——后者会在提交时
+  因事务已中止而失败，重投会变成 500。已用重投用例固定这一行为。
+- 时区：账单周期与到期日是 UTC 日期；回调中金额用 `int64` 最小单位，
+  不使用浮点。测试时钟固定为 2026-10-26 09:00 UTC。
+
+## 下一步：M4-6
+
+网关 billing 路由与 `cmd/billing` 真实装配：数据库连接池、JWT、outbox 投递器、
+`EnableWebhooks` 从环境变量读取 `BILLING_WEBHOOK_SECRET` 与渠道名，
+启动即校验密钥长度与渠道格式；随后用真实 HTTP 端口联调订阅、出账与回调。
 
 
 

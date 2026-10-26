@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -324,4 +326,40 @@ func (h *Handler) ListInvoices(c *gin.Context) {
 		views = append(views, newInvoiceView(&items[i]))
 	}
 	httpx.OK(c, httpx.NewPage(views, total, page))
+}
+
+// PaymentWebhook 是支付渠道的入站回调：没有 JWT，信任完全来自签名。
+// 原始字节直接交给 service 验签，handler 不做任何状态判断。
+func (h *Handler) PaymentWebhook(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxWebhookBody)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		httpx.Error(c, apperr.InvalidArgument("回调请求体读取失败"))
+		return
+	}
+	res, err := h.svc.HandlePaymentWebhook(c.Request.Context(), PaymentWebhookInput{
+		Provider:  c.GetHeader("X-Billing-Provider"),
+		Timestamp: c.GetHeader("X-Billing-Timestamp"),
+		Signature: c.GetHeader("X-Billing-Signature"),
+		Body:      raw,
+	})
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	status := "processed"
+	if res.Duplicate {
+		status = "duplicate"
+	}
+	httpx.OK(c, struct {
+		Status    string    `json:"status"`
+		EventType string    `json:"event_type"`
+		InvoiceID uuid.UUID `json:"invoice_id"`
+		Duplicate bool      `json:"duplicate"`
+	}{
+		Status:    status,
+		EventType: string(res.EventType),
+		InvoiceID: res.InvoiceID,
+		Duplicate: res.Duplicate,
+	})
 }

@@ -213,3 +213,28 @@ func InvoiceAmount(plan Plan, seats int) (int64, error) {
 func CanManageBilling(role tenantctx.Role) bool {
 	return role.CanManageMembers()
 }
+
+// Payment 是一条成功的支付流水，只追加；冲正需要后续贷项单，不能改写历史。
+type Payment struct {
+	ID                uuid.UUID
+	TenantID          uuid.UUID
+	InvoiceID         uuid.UUID
+	Provider          string
+	ProviderPaymentID string
+	AmountMinor       int64
+	Currency          money.Currency
+	PaidAt            time.Time
+}
+
+// WebhookEvent 是已处理回调的幂等记录，同样只追加。
+// PayloadSHA256 保存原始请求体的摘要，便于事后核对"我们收到的就是它"。
+type WebhookEvent struct {
+	ID              uuid.UUID
+	TenantID        uuid.UUID
+	Provider        string
+	ProviderEventID string
+	EventType       WebhookEventType
+	InvoiceID       uuid.UUID
+	PayloadSHA256   []byte
+	ReceivedAt      time.Time
+}
