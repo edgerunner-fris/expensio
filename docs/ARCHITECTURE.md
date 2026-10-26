@@ -120,6 +120,8 @@ report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
 - 本地没有 Docker 时允许跳过；CI 设置 `EXPENSIO_REQUIRE_DOCKER=1`，
   此时 Docker 不可用即失败，跳过不算通过。
 - 关键回归：RLS 隔离、令牌轮换与重放、RBAC 矩阵、状态机、预算并发与回滚。
+- 跨服务链路在 `internal/e2e` 单独回归：expense 真实写 outbox → 投递器发到
+  真实 Kafka → report 消费者落读模型 → 报表 HTTP API 返回聚合，全程无假实现。
 
 ## 里程碑
 
@@ -128,7 +130,7 @@ report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
 | M0 | 骨架、配置、日志、健康检查、编排、迁移基线 | 完成 |
 | M1 | identity、gateway、RLS、集成测试 | 完成 |
 | M2 | expense、审批状态机、预算预占 | 完成 |
-| M3 | Kafka、outbox、报表读模型 | 进行中 |
+| M3 | Kafka、outbox、报表读模型 | 完成 |
 | M4 | billing、订阅与支付回调幂等 | 未开始 |
 | M5 | 前端、通知 | 未开始 |
 | M6 | Dockerfile、K8s、Helm、GitHub Actions | 未开始 |

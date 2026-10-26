@@ -499,7 +499,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | WSL2 本机（Linux 内核）已通过；GitHub Actions 尚未配置，M6 落地时以 runner 结果为准 |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
-| 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。服务间的完整联调仍留到 M3-7 |
+| 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。M3-7 又在 `internal/e2e` 用真实费用 API → outbox → Kafka → report 消费者 → 报表 API 跑通完整链路 |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -562,7 +562,7 @@ M2 已全部完成，全量 `-race` 与 `-count=5` 通过，网关联调见上�
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
 
-## M3 进行中（6/7）
+## M3 完成情况（7/7）
 
 设计已锁定在 ADR-0004：事务内 outbox、事务外投递、全量快照 + `aggregate_version`、
 `tenant_id` 作为分区键、消费端按事件 ID 幂等。
@@ -575,7 +575,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | M3-4 | report 迁移：幂等表、读模型、RLS | 完成 |
 | M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 完成 |
 | M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 完成 |
-| M3-7 | 全量回归、联调、PROGRESS 收尾 | 未开始 |
+| M3-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 完成 |
 
 ### M3-1 实际执行的验证（2026-10-26）
 
@@ -768,10 +768,56 @@ ok  github.com/edgerunner-fris/expensio/internal/report  21.466s
 - 非法参数（缺 from、格式错误、from > to、超范围、未知分组/状态/类别/scope）
   统一返回 400 `common.invalid_argument`。
 
-## 下一步：M3-7
+### M3-7 实际执行的验证（2026-10-26）
 
-全量回归：`go test ./... -race -count=5`、真实依赖联调（expense → outbox →
-Kafka → report 读模型 → 报表 API），PROGRESS / ARCHITECTURE 收尾后提交推送。
+先在 `internal/e2e` 增加跨服务链路用例：费用服务写业务数据与 outbox → 投递器发到
+真实 Kafka → report 消费者写读模型 → 报表 HTTP API 返回聚合。没有 fake publisher、
+没有内存队列、没有直接插事实表。
+
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/e2e -run TestExpenseEventsReachReportSummary -v -count=1
+--- PASS: TestExpenseEventsReachReportSummary (9.52s)
+ok  github.com/edgerunner-fris/expensio/internal/e2e  11.765s
+（postgres:16.15-alpine 与 apache/kafka:3.9.2 均为容器实际启动）
+```
+
+随后跑里程碑收尾回归：
+
+```text
+$ go test ./... -race -count=5 -timeout=25m
+ok  github.com/edgerunner-fris/expensio/internal/e2e        38.706s
+ok  github.com/edgerunner-fris/expensio/internal/expense    23.008s
+ok  github.com/edgerunner-fris/expensio/internal/gateway     5.482s
+ok  github.com/edgerunner-fris/expensio/internal/identity   39.538s
+ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  15.878s
+ok  github.com/edgerunner-fris/expensio/internal/report     72.955s
+ok  github.com/edgerunner-fris/expensio/internal/platform/*（其余全部通过）
+exit=0
+```
+
+本轮验证到的事实：
+
+- 端到端产生了 5 条事件（提交/批准/报销 ×2 + 提交/批准 ×1），投递器返回后
+  `outbox_events.published_at` 全部非空；没有任何事件停留在待发状态。
+- 两个费用单分别收敛到 `reimbursed`/v4 与 `approved`/v3；`processed_events`
+  恰好 5 行，证明每个事件只被消费一次。
+- 报表 API 在同一响应里返回 USD 12345 与 EUR 6000 两行总计、以及
+  `travel|USD` 与 `meals|EUR` 两行分组，币种没有相加，租户上下文来自 JWT。
+- e2e 用例是异步断言：轮询事实行直到最终状态，而不是假定发完消息就立刻可查。
+- 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
+  与其他包的 Kafka/PostgreSQL 数据互相污染。
+
+## 下一步：M4
+
+M3 已闭环。按顺序进入 billing：订阅与账单模型、支付回调幂等（同一回调重复到达
+只生效一次）、租户边界与 identity 一致。先给 M4 设计与批次拆分（ADR-0005 与迁移
+草案），确认后再写实现，避免把"支付状态"与"订阅状态"两套状态机混在一起。
 
 
 
