@@ -813,7 +813,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（1/7）
+## M4 进行中（2/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -822,7 +822,7 @@ exit=0
 | 批次 | 内容 | 状态 |
 | --- | --- | --- |
 | M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
-| M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 未开始 |
+| M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
 | M4-3 | 套餐与订阅 service/repository/HTTP | 未开始 |
 | M4-4 | 出账（同周期幂等）与账单查询 API | 未开始 |
 | M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 未开始 |
@@ -864,10 +864,49 @@ ok  github.com/edgerunner-fris/expensio/internal/billing  3.861s
   只能调用 `app.invoice_tenant(uuid)` 得到租户，未知账单返回 NULL。
 - 迁移 down/up 后套餐种子仍在、业务表为空，说明 down SQL 可执行。
 
-## 下一步：M4-2
+### M4-2 实际执行的验证（2026-10-26）
 
-billing 领域模型与单元测试：套餐读取、订阅状态机、账单金额（单价 × 席位）
-与周期计算；不接数据库，先把规则固定下来。
+```text
+$ gofmt -l internal/billing        # 无输出
+$ go vet ./... && go build ./...
+BUILD-OK
+
+$ go test ./internal/billing -count=1 -v \
+    -run '^(TestPlanValidate|TestSubscriptionTransitions|TestInvoiceTransitions|TestWebhookEventType|TestInvoiceAmount|TestCanManageBilling|TestPeriodEnd|TestPeriodEndIsDateOnly|TestPeriodEndRejectsUnknownInterval)$'
+--- PASS: TestPlanValidate (0.00s)          # 12 个子用例全部 PASS
+--- PASS: TestSubscriptionTransitions (0.00s)
+--- PASS: TestPeriodEnd (0.00s)             # 8 个子用例全部 PASS
+--- PASS: TestInvoiceTransitions (0.00s)
+--- PASS: TestWebhookEventType (0.00s)
+--- PASS: TestInvoiceAmount (0.00s)
+--- PASS: TestCanManageBilling (0.00s)
+--- PASS: TestPeriodEndIsDateOnly (0.00s)
+--- PASS: TestPeriodEndRejectsUnknownInterval (0.00s)
+ok  github.com/edgerunner-fris/expensio/internal/billing  0.023s
+```
+
+（M4-2 只跑单元测试；集成用例仍然真实跑容器，随 M4-7 全量回归一起复跑。）
+
+本轮验证到的事实：
+
+- 订阅状态机按 3×3 全矩阵逐一断言：合法的只有 `active ↔ past_due`、
+  `active → canceled`、`past_due → canceled`；`canceled` 没有出边，
+  未知状态的向前/向后转换都是 false。账单只有 `open → paid`。
+- 套餐校验覆盖：首位必须是字母、允许字符集、2–41 位长度、名称去空白后 1–80 字符、
+  单价 1..`money.MaxMinor`、三位大写币种、monthly/yearly 周期。
+- 金额计算先做 `MaxMinor / seats` 再比较：`price=MaxMinor, seats=2` 被拒绝，
+  `price=MaxMinor/2, seats=2` 恰好等于上限并通过，说明 int64 回绕被挡在乘法之前。
+- 周期计算：月付 2026-01-31 结束于 2026-02-27；闰年 2024-01-31 结束于 2024-02-28；
+  年付闰日 2024-02-29 结束于 2025-02-27；跨年与 12 月 31 日按同一规则推进。
+  输入带时区与时分秒时先归一到 UTC 日期，输出恒为 00:00 UTC。
+- 写测试时用了名为 `strings` 的辅助函数，`go vet` 报与 `model.go` 的 `strings`
+  导入冲突（package 级声明与文件级导入同名），已改名为 `repeatA`。
+
+## 下一步：M4-3
+
+套餐与订阅的 service/repository/HTTP：套餐目录只读；订阅创建走“同一租户最多一条
+未取消订阅”的唯一约束，冲突映射为 409；状态变更按白名单校验并递增 version；
+写操作只允许 owner/admin，读允许成员与查看者。
 
 
 
