@@ -572,7 +572,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | M3-1 | ADR-0004、事件契约、outbox 迁移与仓储 | 完成 |
 | M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 完成 |
 | M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 完成 |
-| M3-4 | report 迁移：幂等表、读模型、RLS | 未开始 |
+| M3-4 | report 迁移：幂等表、读模型、RLS | 完成 |
 | M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 未开始 |
 | M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 未开始 |
 | M3-7 | 全量回归、联调、PROGRESS 收尾 | 未开始 |
@@ -672,10 +672,34 @@ ok  github.com/edgerunner-fris/expensio/internal/expense  3.985s
   失败动作不可能留下待投递事件，更不可能发出消息。
 - 事件租户、提交人、预算 ID、审批人字段与费用行一致；信封版本等于快照版本。
 
-## 下一步：M3-4
+### M3-4 实际执行的验证（2026-10-26）
 
-report 数据库迁移：`processed_events` 幂等表、`expense_facts` 读模型、RLS，
-以及读模型的 down/up 验证。
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/report/... -count=1 -v
+--- PASS: TestReadModelRLSIsolatesTenants (2.71s)
+--- PASS: TestProcessedEventsIsAppendOnly (0.01s)
+--- PASS: TestReadModelMigrationDownAndUp (0.05s)
+ok  github.com/edgerunner-fris/expensio/internal/report  3.209s
+```
+
+本轮验证到的事实：
+
+- `report_app` 在未设置 `app.tenant_id` 时读 `expense_facts` 得到零行；
+  设置租户 A 后能看到自己的行，租户 B 看不到。
+- `processed_events` 主键为 `(tenant_id, consumer, event_id)`，
+  重复插入返回 SQLSTATE 23505；`report_app` 删除幂等记录返回 42501。
+- 迁移 down 1 步再 up 成功，两张表重建且为空，`expense_facts` 仍为 FORCE RLS。
+
+## 下一步：M3-5
+
+report 消费者：真实 Kafka 上的至少一次投递、幂等表去重、旧版本忽略、
+永久错误进 DLQ。该批次才会消除风险 29（生产者未对真实 broker 验证）。
 
 
 
