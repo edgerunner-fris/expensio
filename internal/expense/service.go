@@ -256,19 +256,11 @@ func (s *Service) List(ctx context.Context, actor Actor, q ListQuery) ([]Expense
 		}
 	}
 
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 20
+	filter := ListFilter{
+		Status: status,
+		Limit:  clampLimit(q.Limit),
+		Offset: clampOffset(q.Offset),
 	}
-	if limit > 100 {
-		limit = 100
-	}
-	offset := q.Offset
-	if offset < 0 {
-		offset = 0
-	}
-
-	filter := ListFilter{Status: status, Limit: limit, Offset: offset}
 	if scope == ScopeMine {
 		filter.SubmitterID = actor.UserID
 	}
@@ -285,6 +277,24 @@ func (s *Service) List(ctx context.Context, actor Actor, q ListQuery) ([]Expense
 		return nil, 0, mapDBError(err)
 	}
 	return items, total, nil
+}
+
+// clampLimit 把分页大小收敛到 1..100。service 不假设 handler 已经 Normalize。
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return 20
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
+}
+
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
 }
 
 // mapDBError 把数据库错误翻译成对外错误。已经是业务错误的原样返回，

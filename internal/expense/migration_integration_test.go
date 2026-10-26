@@ -14,8 +14,9 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/testenv"
 )
 
-// TestMigrationDownAndUp 验证 000002 的 down SQL 真的能回滚，
+// TestMigrationDownAndUp 验证 000002/000003 的 down SQL 真的能回滚，
 // 而不是只写了一个永远没人执行的 down 文件。
+// 回滚 2 步才会删掉业务表；只回滚 1 步仅移除预算的 version 列。
 func TestMigrationDownAndUp(t *testing.T) {
 	database := newDB(t)
 	pg := testenv.StartPostgres(t, "expense")
@@ -25,7 +26,7 @@ func TestMigrationDownAndUp(t *testing.T) {
 	insertBudget(t, database, ctx, "travel", day("2026-10-01"), day("2026-10-31"))
 	require.Equal(t, 1, countRows(t, database, ctx, `SELECT count(*) FROM app.budgets`))
 
-	pg.MigrateDownUp(t, "expense", 1)
+	pg.MigrateDownUp(t, "expense", 2)
 
 	// DDL 会重建表，换一个新连接池，避免复用可能已失效的 prepared statement。
 	fresh, err := db.Open(context.Background(), pg.AppDSN("expense"), 5)

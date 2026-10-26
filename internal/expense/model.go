@@ -23,6 +23,11 @@ const (
 	CodeVersionConflict   = "expense.version_conflict"
 	CodeBudgetNotMatched  = "expense.budget_not_matched"
 	CodeBudgetUnavailable = "expense.budget_unavailable"
+
+	CodeBudgetOverlap          = "budget.period_overlap"
+	CodeBudgetInUse            = "budget.in_use"
+	CodeBudgetAmountBelowSpent = "budget.amount_below_committed"
+	CodeBudgetVersionConflict  = "budget.version_conflict"
 )
 
 // Status 是费用单状态。取值与数据库 CHECK 完全一致。
@@ -155,6 +160,7 @@ type Budget struct {
 	AmountMinor   int64
 	ReservedMinor int64
 	SpentMinor    int64
+	Version       int
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	CreatedBy     uuid.UUID

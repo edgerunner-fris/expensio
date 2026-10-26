@@ -4,6 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/httpx/middleware"
+	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
 
 // RegisterRoutes 注册 expense 的对外端点。
@@ -22,4 +23,15 @@ func RegisterRoutes(r gin.IRouter, h *Handler, parser middleware.AccessParser) {
 	authed.GET("/expenses/:expenseID", h.GetExpense)
 	authed.PUT("/expenses/:expenseID", h.UpdateExpense)
 	authed.DELETE("/expenses/:expenseID", h.DeleteExpense)
+
+	// 预算对全租户可读（提交费用时要知道有哪些预算），
+	// 写操作只允许 owner/admin：在网关与中间件各挡一次，service 里还有第三次判断。
+	authed.GET("/budgets", h.ListBudgets)
+	authed.GET("/budgets/:budgetID", h.GetBudget)
+
+	admin := authed.Group("")
+	admin.Use(middleware.RequireRole(tenantctx.RoleAdmin))
+	admin.POST("/budgets", h.CreateBudget)
+	admin.PUT("/budgets/:budgetID", h.UpdateBudget)
+	admin.DELETE("/budgets/:budgetID", h.DeleteBudget)
 }

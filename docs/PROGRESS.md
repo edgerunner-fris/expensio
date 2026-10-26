@@ -367,6 +367,28 @@ $ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run TestHTTP -race -coun
 ok  internal/expense  6.700s
 ```
 
+### M2-7 实际执行的验证（2026-10-26）
+
+新增迁移 `000003_budget_version`：预算增加 `version` 列，触发器在任何 UPDATE 时自增，
+用于并发编辑的乐观锁；down 会先恢复 000002 的函数体再删列。
+`TestMigrationDownAndUp` 相应改为回滚 2 步（000003 + 000002）。
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run 'TestBudget|TestResolveBudget|TestMigrationDownAndUp' -race -count=1 -v
+--- PASS: TestBudgetCRUDAndRoles                  （成员建预算 403；管理员建/改/删；旧版本 409；成员只读）
+--- PASS: TestBudgetOverlapAndDeleteThenRecreate   （重叠 409 budget.period_overlap；相邻/异类/异币种允许；软删后重建）
+--- PASS: TestBudgetCommittedMoneyProtection      （金额低于 reserved+spent 409；仍有占用不可删；清空后可删）
+--- PASS: TestBudgetPeriodChangeBlockedWhenReferenced（已被费用引用时禁止改期间；改名称仍可）
+--- PASS: TestResolveBudget                       （无预算租户允许 NULL；自动/显式匹配；类别/日期不符 409；跨租户预算不可见）
+--- PASS: TestMigrationDownAndUp                  （回滚 2 步后表重建、RLS 与种子仍在）
+--- PASS: TestBudgetHTTP                          （201→读→PUT v2→旧版本 409→成员删 403→管理员删 204→404）
+--- PASS: TestBudgetHTTPBadRequests               （非法 ID、日期格式、期间倒置、零金额、缺 version、非对象体）
+ok  internal/expense  6.823s（全包）
+```
+
+预算写操作权限：owner/admin；成员与 viewer 只读。期间按 UTC 日期解释，
+避免同一张单因服务器时区不同匹配到不同预算。
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -455,8 +477,8 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 完成 |
 | M2-5 | 费用仓储与草稿 CRUD | 完成 |
 | M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 完成 |
-| M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 进行中 |
-| M2-8 | 审批工作流与同事务预占/释放/结转 | 待开始 |
+| M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 完成 |
+| M2-8 | 审批工作流与同事务预占/释放/结转 | 进行中 |
 | M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
 
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
