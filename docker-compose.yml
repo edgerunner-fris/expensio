@@ -1,0 +1,199 @@
+# Expensio 本地依赖编排。
+#
+# 只跑基础设施；六个服务在 M0–M5 期间以宿主进程方式运行（make run-<service>），
+# 容器化在 M6 用同一个多阶段 Dockerfile 完成。这样本地调试不需要反复重建镜像。
+#
+# profile 划分：
+#   core —— 服务运行必须依赖：postgres / redis / kafka / minio
+#   obs  —— 可观测性：otel-collector / prometheus / grafana
+#   mail —— 本地邮件收件箱：mailpit
+# 默认 `make up` 会同时起三组；只想跑单测时用 --profile core。
+#
+# 所有端口绑定 127.0.0.1，不暴露到局域网。
+name: expensio
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL：五个服务共用实例、各自独立数据库。
+  # 首次创建数据卷时由 deploy/local/postgres/init 建库、建角色；
+  # 之后表结构变化一律走 migrations/，不在这里改。
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *default-restart
+    image: postgres:16.15-alpine
+    profiles: ["core"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-expensio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-expensio_local_only}
+      POSTGRES_DB: postgres
+      # 初始化脚本用这两个口令创建 {service}_app / {service}_migrator。
+      EXPENSIO_DB_APP_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:-expensio_local_only}
+      EXPENSIO_DB_MIGRATOR_PASSWORD: ${EXPENSIO_DB_MIGRATOR_PASSWORD:-expensio_local_only}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/local/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-expensio} -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+  redis:
+    <<: *default-restart
+    image: redis:7.4.11-alpine
+    profiles: ["core"]
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Kafka 3.9（KRaft，无 ZooKeeper）。
+  # 双 listener 是必须的：容器内用 kafka:9092，宿主进程用 localhost:29092。
+  # 只配一个 advertised listener 会导致"容器里能连、宿主连不上"或反之。
+  # ---------------------------------------------------------------------------
+  kafka:
+    <<: *default-restart
+    image: apache/kafka:3.9.2
+    profiles: ["core"]
+    hostname: kafka
+    ports:
+      - "127.0.0.1:29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 分区数等于 6 个服务共享时的默认并行度；分区键用 tenant_id，
+      # 保证同一租户的事件落在同一分区、消费有序。
+      KAFKA_NUM_PARTITIONS: 6
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # MinIO：官方镜像已从 Docker Hub 下架（仓库返回 404），quay 需要鉴权。
+  # 这里用 Bitnami legacy 镜像，它打包的是真实 MinIO 构建
+  # （DEVELOPMENT.2025-05-24T17-08-30Z），并用 digest 固定，标签漂移不影响复现。
+  # 见 docs/PROGRESS.md 的风险记录。
+  # ---------------------------------------------------------------------------
+  minio:
+    <<: *default-restart
+    image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+    profiles: ["core"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-expensio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-expensio_local_only}
+      MINIO_DEFAULT_BUCKETS: ${EXPENSIO_MINIO_BUCKET:-expensio-invoices}
+      MINIO_API_PORT_NUMBER: "9000"
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 可观测性。配置全部放在 deploy/local/ 下，随代码一起版本化。
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    <<: *default-restart
+    image: otel/opentelemetry-collector-contrib:0.140.0
+    profiles: ["obs"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    volumes:
+      - ./deploy/local/otel/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    logging: *default-logging
+
+  prometheus:
+    <<: *default-restart
+    image: prom/prometheus:v3.5.0
+    profiles: ["obs"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./deploy/local/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    logging: *default-logging
+
+  grafana:
+    <<: *default-restart
+    image: grafana/grafana:12.2.0
+    profiles: ["obs"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana_local_only}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 本地邮件收件箱：SMTP 1025，Web UI 8025。
+  # 用 Mailpit 而不是 MailHog：后者自 2020 年起无维护，Mailpit 是其官方替代。
+  # ---------------------------------------------------------------------------
+  mailpit:
+    <<: *default-restart
+    image: axllent/mailpit:v1.27
+    profiles: ["mail"]
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:
+  miniodata:
+  promdata:
+  grafanadata:

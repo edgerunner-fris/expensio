@@ -1,0 +1,14 @@
+.env
+.env.local
+bin/
+dist/
+node_modules/
+web/node_modules/
+coverage.out
+*.log
+*.exe
+tmp/
+.tmp/
+*.tar.gz
+.DS_Store
+.idea/

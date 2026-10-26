@@ -1,0 +1,16 @@
+BEGIN;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE report_migrator IN SCHEMA app
+  REVOKE ALL ON SEQUENCES FROM report_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE report_migrator IN SCHEMA app
+  REVOKE ALL ON TABLES FROM report_app;
+
+DO $do$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I RESET search_path', current_database());
+END
+$do$;
+
+DROP SCHEMA IF EXISTS app CASCADE;
+
+COMMIT;

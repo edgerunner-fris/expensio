@@ -1,0 +1,16 @@
+# Prometheus 本地抓取配置。
+#
+# 服务的 /metrics 端点在 M7 落地，届时在 expensio-services 下补 6 个目标；
+# 现在先抓 Collector，保证指标链路（服务 → Collector → Prometheus）是通的。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

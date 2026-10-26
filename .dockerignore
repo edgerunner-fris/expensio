@@ -1,0 +1,10 @@
+.git
+.env
+bin
+tmp
+.tmp
+*.tar.gz
+node_modules
+web/node_modules
+**/*.log
+**/*_test.go

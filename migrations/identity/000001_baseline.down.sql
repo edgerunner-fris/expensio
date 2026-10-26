@@ -1,0 +1,16 @@
+BEGIN;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE identity_migrator IN SCHEMA app
+  REVOKE ALL ON SEQUENCES FROM identity_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE identity_migrator IN SCHEMA app
+  REVOKE ALL ON TABLES FROM identity_app;
+
+DO $do$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I RESET search_path', current_database());
+END
+$do$;
+
+DROP SCHEMA IF EXISTS app CASCADE;
+
+COMMIT;
