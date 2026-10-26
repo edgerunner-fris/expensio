@@ -427,6 +427,46 @@ ok  internal/expense  5.200s（定向）；全包 -race 7.020s
 并发用例依赖 `UPDATE ... WHERE reserved + spent + amount <= amount` 的行锁语义：
 两个事务先后锁同一预算行，后到者在 READ COMMITTED 下重新求值 WHERE，命中 0 行即失败。
 
+### M2-9 实际执行的验证（2026-10-26）
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout 15m
+ok  internal/expense   7.492s
+ok  internal/gateway   3.756s
+ok  internal/identity  10.590s
+ok  internal/platform/*（全部通过）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -count=5 -timeout 15m
+ok  internal/expense   10.391s
+ok  internal/gateway   3.647s
+ok  internal/identity  13.856s
+ok  internal/platform/*（全部通过）
+```
+
+网关联调：真实 PostgreSQL 16 + Redis 7；identity :8081、expense :8082、gateway :8080，
+请求全部经过网关。联调前迁移版本为 identity=2、expense=3、其余=1。
+
+```text
+POST /auth/register                 201
+GET  /me                            200
+POST /budgets                       201
+POST /expenses                      201
+POST /expenses/:id/submit           200 status=submitted budget=206d1523-…
+GET  /budgets/:id                   200 reserved=12345 available=87655
+POST /expenses/:id/approve (self)   403 expense.self_approval_forbidden
+GET  /expenses/:id (other tenant)   404
+GET  /budgets/:id (other tenant)    404
+GET  /expenses?scope=all (B)        200 total=0
+POST submit without token           401
+POST submit twice                   409 expense.state_conflict
+```
+
+M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved → spent`，
+驳回/撤销释放预占，报销不改预算；五个动作均留下只追加轨迹。
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -501,10 +541,9 @@ WSL2 环境迁移后发现：
 - 大文件（Go 安装包、Windows 构建产物）已移出仓库到 `~/expensio-artifacts/`，
   `.gitignore`/`.dockerignore` 同时加入 `.tmp/` 与 `*.tar.gz`。
 
-## 下一步：M2（expense 服务、审批状态机与预算预占）
+## M2 完成情况（10/10）
 
-M1 已全部完成（6/6），WSL2 下 `-race -count=5` 通过。
-M2 设计与批次已于 2026-10-26 确认，剩余工作：
+M2 已全部完成，全量 `-race` 与 `-count=5` 通过，网关联调见上文。
 
 | 批次 | 内容 | 状态 |
 | --- | --- | --- |
@@ -517,8 +556,14 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 完成 |
 | M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 完成 |
 | M2-8 | 审批工作流与同事务预占/释放/结转 | 完成 |
-| M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 进行中 |
+| M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 完成 |
 
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
+
+## 下一步：M3（Kafka、outbox、报表读模型）
+
+尚未开始。按约定先给出设计与批次拆分，确认后再写代码。
+已知约束：事务内只写 outbox，由独立投递器发 Kafka；事件键必须带 `tenant_id`；
+消费端按事件 ID 幂等；report 服务只读自己的库，不跨库 JOIN。
 
