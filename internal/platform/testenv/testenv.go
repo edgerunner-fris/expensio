@@ -1,4 +1,4 @@
-// Package testenv 为集成测试提供真实依赖：PostgreSQL 与 Redis。
+// Package testenv 为集成测试提供真实依赖：PostgreSQL、Redis 与 Kafka。
 //
 // 只被 *_test.go 引用，任何服务的二进制都不会链接它。
 //
@@ -258,6 +258,9 @@ func startRedis() (*redis.RedisContainer, string, error) {
 func Cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if kafkaInstance != nil {
+		_ = kafkaInstance.container.Terminate(ctx)
+	}
 	if redisInstance != nil {
 		_ = redisInstance.Terminate(ctx)
 	}

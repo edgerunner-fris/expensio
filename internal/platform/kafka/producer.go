@@ -55,12 +55,17 @@ func (p *Producer) Ping(ctx context.Context) error {
 // Publish 同步等待 broker 确认。返回 nil 表示事件已经进入 ISR，
 // 此时 outbox 才能标记为已发布。
 func (p *Producer) Publish(ctx context.Context, topic, key string, value []byte) error {
-	results := p.client.ProduceSync(ctx, &kgo.Record{
+	return p.PublishRecord(ctx, &kgo.Record{
 		Topic: topic,
 		Key:   []byte(key),
 		Value: value,
 	})
-	return results.FirstErr()
+}
+
+// PublishRecord 发送完整记录（含 headers）。消费端写 DLQ 时用它保留
+// 原始字节与来源信息；outbox 投递仍然走 Publish。
+func (p *Producer) PublishRecord(ctx context.Context, rec *kgo.Record) error {
+	return p.client.ProduceSync(ctx, rec).FirstErr()
 }
 
 func (p *Producer) Close() { p.client.Close() }

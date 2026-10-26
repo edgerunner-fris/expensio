@@ -75,11 +75,14 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
 
 ## 事件与异步（M3）
 
-M3 采用事务内 outbox（ADR-0004），当前已完成事件契约、outbox 存储与投递器：
+M3 采用事务内 outbox（ADR-0004），当前已完成事件契约、outbox 存储、投递器与报表消费者：
 
 1. 业务事务内写 `app.outbox_events`（`internal/platform/outbox`）；
 2. 提交后由后台投递器同步发送到 Kafka（`expense` 进程内，Kafka 故障不影响 HTTP）；
-3. 消费端按事件 ID 幂等，报表读模型最终一致（M3-4 起）。
+3. report 消费组用 `DisableAutoCommit` 手动提交：业务事务提交后才提交位点，
+   瞬时错误原地退避重试，永久错误原字节转 DLQ 后再提交位点；
+4. 消费端按 `(tenant_id, consumer, event_id)` 幂等，事实行只接受
+   `version >= 当前版本` 的更新，乱序旧事件不会回滚状态。
 
 **禁止在数据库事务内直接发 Kafka 消息**，否则回滚后消息无法撤回。
 事件信封与费用快照定义在 `internal/platform/events`；主题为
@@ -102,8 +105,10 @@ M3 采用事务内 outbox（ADR-0004），当前已完成事件契约、outbox �
 ## 测试
 
 - 单元测试不依赖 Docker。
-- 集成测试用 testcontainers 启动真实 PostgreSQL 16 / Redis 7，
+- 集成测试用 testcontainers 启动真实 PostgreSQL 16 / Redis 7 / Kafka 3.9，
   复用仓库里的初始化脚本与迁移文件，应用代码用 `{service}_app` 连库。
+  Kafka 用与 compose 相同的 `apache/kafka` 镜像（官方模块只支持 confluent 镜像），
+  宿主端口随机分配并写入 advertised listener；测试显式建主题，不依赖 auto-create。
 - 本地没有 Docker 时允许跳过；CI 设置 `EXPENSIO_REQUIRE_DOCKER=1`，
   此时 Docker 不可用即失败，跳过不算通过。
 - 关键回归：RLS 隔离、令牌轮换与重放、RBAC 矩阵、状态机、预算并发与回滚。

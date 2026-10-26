@@ -479,7 +479,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 6 | 优雅关闭偶发耗时 5 秒 | **已解决** | 根因是 net/http 把"已连接但未发请求"的连接（StateNew）视作活跃直到满 5 秒（golang/go#22682）。已在 `server.Run` 中关闭 keep-alive、超时后强制 Close，并在配置校验里禁止 `shutdown_timeout <= 5s`。测试改用禁用 keep-alive 的专用 client，40 次重复稳定 |
 | 7 | 本机无法运行 `-race` | **已解决** | WSL2 具备 cgo/gcc。2026-10-26 实测 `go test ./... -race -count=5 -timeout=15m` 全部通过（identity 31.461s、gateway 4.109s），并用临时竞争用例做过 `DATA RACE` 反向验证 |
 | 8 | RLS 是否真的隔离了两个租户 | **已解决** | 两租户 + 真实 HTTP 验证：acme token 见 2 名成员 / beta token 见 1 名，审计同样按租户分割；无上下文时 `current_setting` 为 NULL，策略判定不通过，查到 0 行；跨租户 INSERT 被 `WITH CHECK` 拒绝。自动化回归在 M1-6/6 补齐 |
-| 9 | Kafka 端到端（生产 → 消费 → 幂等） | **待验证** | 容器健康只证明 broker 起来了。M3 用真实事件验证分区键与租户顺序 |
+| 9 | Kafka 端到端（生产 → 消费 → 幂等） | **已解决** | M3-5 用真实 `apache/kafka:3.9.2` broker + 真实 PostgreSQL 验证：生产者同步发送 → 消费组消费 → 幂等去重 → 乱序旧版本忽略 → 永久错误进 DLQ，全部通过。分区键为 `tenant_id`，同一租户的事件保持顺序 |
 | 10 | 前端依赖版本兼容（Vue/Pinia/Router/ECharts/TS） | **待验证** | 版本表已核对，但未真正装过一次。M5 落地时以 `npm ls` 与构建结果为准 |
 | 11 | 迁移中途失败会让库进入 dirty 状态 | **已解决（有操作手册）** | 本次踩到过：基线在事务内失败 → `schema_migrations` 标记 dirty。恢复方式：修好 SQL 后重建该库（本地），生产环境只允许向前修复并手工 `force`。`make migrate` 会明确报错，不会静默跳过 |
 | 12 | 并发刷新导致同一令牌被轮换两次 | **已解决** | 轮换用条件更新 `UPDATE … WHERE id=$1 AND revoked_at IS NULL` + `RowsAffected()`；抢输的一方被判为重放并撤销整族。撤销放在独立事务里提交——放在同一事务里会被随后返回的错误一起回滚 |
@@ -499,7 +499,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | WSL2 本机（Linux 内核）已通过；GitHub Actions 尚未配置，M6 落地时以 runner 结果为准 |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
-| 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **待验证（M3-5）** | 投递器的领取/重试/标记已用真实 PostgreSQL + fake publisher 验证；真实 broker 的发送、消费、重复投递与乱序在 M3-5 集成测试中验证，M3-5 完成前不宣称链路可用 |
+| 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。服务间的完整联调仍留到 M3-7 |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -562,7 +562,7 @@ M2 已全部完成，全量 `-race` 与 `-count=5` 通过，网关联调见上�
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
 
-## M3 进行中（1/7）
+## M3 进行中（5/7）
 
 设计已锁定在 ADR-0004：事务内 outbox、事务外投递、全量快照 + `aggregate_version`、
 `tenant_id` 作为分区键、消费端按事件 ID 幂等。
@@ -573,7 +573,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 完成 |
 | M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 完成 |
 | M3-4 | report 迁移：幂等表、读模型、RLS | 完成 |
-| M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 未开始 |
+| M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 完成 |
 | M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 未开始 |
 | M3-7 | 全量回归、联调、PROGRESS 收尾 | 未开始 |
 
@@ -696,10 +696,50 @@ ok  github.com/edgerunner-fris/expensio/internal/report  3.209s
   重复插入返回 SQLSTATE 23505；`report_app` 删除幂等记录返回 42501。
 - 迁移 down 1 步再 up 成功，两张表重建且为空，`expense_facts` 仍为 FORCE RLS。
 
-## 下一步：M3-5
+### M3-5 实际执行的验证（2026-10-26）
 
-report 消费者：真实 Kafka 上的至少一次投递、幂等表去重、旧版本忽略、
-永久错误进 DLQ。该批次才会消除风险 29（生产者未对真实 broker 验证）。
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/platform/kafka/... -count=1
+ok  github.com/edgerunner-fris/expensio/internal/platform/kafka  0.005s
+
+$ go test ./internal/report/... -count=1 -v
+--- PASS: TestConsumerAppliesEventsAndDeduplicates (9.91s)
+--- PASS: TestConsumerIgnoresOlderVersionsArrivingLate (0.33s)
+--- PASS: TestConsumerRoutesPermanentErrorsToDLQ (5.28s)
+--- PASS: TestReadModelRLSIsolatesTenants (0.02s)
+--- PASS: TestProcessedEventsIsAppendOnly (0.01s)
+--- PASS: TestReadModelMigrationDownAndUp (0.09s)
+ok  github.com/edgerunner-fris/expensio/internal/report  18.018s
+```
+
+本轮验证到的事实：
+
+- 消费端是至少一次语义：业务事务提交之后才 `CommitRecords`；提交失败只记录日志，
+  下次重放由幂等表吸收。测试里同一信封投递两次，`expense_facts` 只有一行、
+  `processed_events` 只有一条。
+- 乱序到达的旧版本被忽略：先写 v3，再写 v2，事实行保持 v3/approved，
+  但两条事件都记入幂等表（幂等的是事件，不是聚合状态）。
+- 永久错误（信封无法解码）原字节进 DLQ，header 带上
+  `x-original-topic/partition/offset` 与 `x-error`；之后的有效事件照常处理，
+  证明坏消息不会卡住分区。
+- 测试 Kafka 用 `apache/kafka:3.9.2`（与 compose 同一镜像）的通用容器启动，
+  没有使用官方模块——该模块只支持 confluent 镜像，测的就不是生产会跑的 broker。
+  宿主端口在启动前随机分配并写进 advertised listener；测试关闭 auto-create，
+  主题由 `kmsg.CreateTopicsRequest` 显式创建。
+- `cmd/report` 现在装配数据库、生产者与消费者；Kafka 启动探测失败只告警，
+  消费循环后台重连，readiness 仍只依赖数据库。
+
+## 下一步：M3-6
+
+报表查询 API：按 `(group, currency)` 聚合，禁止混合币种求和；
+owner/admin 默认 `scope=all`，member/viewer 只能用 `mine`，
+越权请求返回 403；补 HTTP 集成测试与网关路由联调。
 
 
 
