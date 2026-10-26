@@ -500,6 +500,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
 | 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。M3-7 又在 `internal/e2e` 用真实费用 API → outbox → Kafka → report 消费者 → 报表 API 跑通完整链路 |
+| 30 | 业务事件主题未在 broker 上预先创建 | **待验证（集群侧留到 M6）** | franz-go 先取元数据，broker 的 `auto.create.topics.enable=true` 不会对这类请求生效；缺主题时投递器会持续退避重试且不丢事件（M4-6 实测）。本地新增 `scripts/topics.sh`，`make up` 会自动幂等创建四个主题并已实测；K8s 中需要同等的 init Job / 部署清单，随 M6 落地并验证 |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -813,7 +814,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（5/7）
+## M4 进行中（6/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -826,7 +827,7 @@ exit=0
 | M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
 | M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
 | M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 完成 |
-| M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 未开始 |
+| M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 完成 |
 | M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 未开始 |
 
 ### M4-1 实际执行的验证（2026-10-26）
@@ -1011,11 +1012,80 @@ ok  github.com/edgerunner-fris/expensio/internal/billing  7.437s
 - 时区：账单周期与到期日是 UTC 日期；回调中金额用 `int64` 最小单位，
   不使用浮点。测试时钟固定为 2026-10-26 09:00 UTC。
 
-## 下一步：M4-6
+### M4-6 实际执行的验证（2026-10-26）
 
-网关 billing 路由与 `cmd/billing` 真实装配：数据库连接池、JWT、outbox 投递器、
-`EnableWebhooks` 从环境变量读取 `BILLING_WEBHOOK_SECRET` 与渠道名，
-启动即校验密钥长度与渠道格式；随后用真实 HTTP 端口联调订阅、出账与回调。
+`cmd/billing` 从空壳改为真实装配：`NeedsDB` + `NeedsJWT` + `NeedsKafka` +
+`NeedsBillingWebhook`，启动即建连接池、注册 `/healthz` 的 db 检查、注入回调密钥、
+挂载路由并启动 outbox 投递器。`config` 新增 `billing.webhook_secret` /
+`billing.webhook_provider`，密钥无默认值。
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ go test ./internal/platform/config ./internal/gateway ./internal/billing -race -count=5 -timeout=25m
+ok  internal/platform/config  1.035s
+ok  internal/gateway          4.543s
+ok  internal/billing          8.380s
+```
+
+真实进程联调（PostgreSQL 16 + Kafka 3.9.2 均为容器；identity :8081、billing :8083、
+gateway :8080，所有业务请求从 8080 进入）：
+
+```text
+POST /api/v1/auth/register                                  201
+POST /api/v1/billing/subscriptions                          201
+     growth-monthly × 5，active，周期 2026-10-26..2026-11-25
+POST /api/v1/billing/subscriptions/{id}/invoices            201
+     INV-202610-C2D118A2，open，49500 USD，到期 2026-11-09
+POST /api/v1/webhooks/payments（正确签名）                   200 status=processed
+POST /api/v1/webhooks/payments（同一事件重投）                200 status=duplicate
+POST /api/v1/webhooks/payments（错误签名）                    401 auth.unauthorized
+GET  /api/v1/billing/invoices/{id}                           200 status=paid version=2
+GET  /api/v1/billing/subscription                            200 status=active
+```
+
+数据库与 broker 侧核对：
+
+```text
+invoices: INV-202610-C2D118A2  paid  49500  version=2
+payments: mockpay / pay_live_m4live… 49500
+webhook_events: 1 行（重投没有新增）
+outbox_events: subscription.created / invoice.created / invoice.paid   published=t（3/3）
+
+$ kafka-console-consumer --topic expensio.billing.events.v1 --from-beginning --max-messages 3
+{"event_type":"subscription.created", "aggregate_version":1, …}
+{"event_type":"invoice.created",      "aggregate_version":1, "payload":{"status":"open", …}}
+{"event_type":"invoice.paid",         "aggregate_version":2, "payload":{"status":"paid", …}}
+```
+
+启动期拒绝无密钥/短密钥（实测退出码非 0）：
+
+```text
+$ EXPENSIO_BILLING_WEBHOOK_SECRET=short /tmp/expensio-billing
+exit=1
+billing 启动失败: billing.webhook_secret 至少需要 32 字节（EXPENSIO_BILLING_WEBHOOK_SECRET）
+```
+
+本轮验证到的事实：
+
+- 网关的公开回调路由是 `/api/v1/webhooks/payments`（`Auth=false`、按 IP 限流），
+  与 billing 的注册路径一致；新增用例断言该请求只到 billing，不会落到 identity。
+  之前 billing 把回调挂在 `/api/v1/billing/...` 下，会被网关的受保护前缀挡成 401，
+  联调前已改正。
+- 回调经网关全程无 JWT：租户来自 `invoice_lookup` 反查，HTTP 层只校验签名与时间窗。
+- 出账、支付、回调记录与 outbox 在同一事务内提交；`outbox_events.published_at`
+  在投递器运行后变为非空，重复回调没有产生第四条事件。
+- Kafka 主题不会因为客户端元数据请求自动创建：首次联调三条事件一直失败
+  （`UNKNOWN_TOPIC_OR_PARTITION`），投递器按退避重试且没有丢事件；补
+  `scripts/topics.sh`（幂等，`make up` 后自动执行）并重启投递器后 3/3 发布成功。
+- `billing.webhook_secret` 缺失或短于 32 字节时进程拒绝启动，而不是带病运行；
+  `Config.String` 对该字段打码，日志不会带出密钥。
+
+## 下一步：M4-7
+
+M4 收尾回归：全量 `-race -count=5`、billing 与 gateway 的跨服务链路、
+PROGRESS 与 ARCHITECTURE 的 M4 状态收尾；确认没有以 `t.Skip` 冒充通过。
 
 
 

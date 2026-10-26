@@ -75,17 +75,31 @@ func TestShortJWTSecretIsRejected(t *testing.T) {
 
 func TestValidationAggregatesAllProblems(t *testing.T) {
 	_, err := config.Load(config.Options{
-		Service:     "billing-service",
-		DefaultAddr: ":8083",
-		NeedsDB:     true,
-		NeedsKafka:  true,
-		NeedsJWT:    true,
+		Service:             "billing-service",
+		DefaultAddr:         ":8083",
+		NeedsDB:             true,
+		NeedsKafka:          true,
+		NeedsJWT:            true,
+		NeedsBillingWebhook: true,
 	})
 	require.Error(t, err)
 
 	msg := err.Error()
 	assert.Contains(t, msg, "EXPENSIO_DB_NAME")
 	assert.Contains(t, msg, "EXPENSIO_JWT_SECRET")
+	assert.Contains(t, msg, "EXPENSIO_BILLING_WEBHOOK_SECRET")
+}
+
+func TestShortBillingWebhookSecretIsRejected(t *testing.T) {
+	t.Setenv("EXPENSIO_BILLING_WEBHOOK_SECRET", "too-short")
+
+	_, err := config.Load(config.Options{
+		Service:             "billing",
+		DefaultAddr:         ":8083",
+		NeedsBillingWebhook: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "EXPENSIO_BILLING_WEBHOOK_SECRET")
 }
 
 func TestDSNEscapesSpecialCharacters(t *testing.T) {
@@ -113,9 +127,11 @@ func TestStringRedactsSecrets(t *testing.T) {
 	require.NoError(t, err)
 	cfg.DB.Password = "super-secret-password"
 	cfg.JWT.Secret = "super-secret-jwt"
+	cfg.Billing.WebhookSecret = "super-secret-webhook"
 
 	rendered := fmt.Sprintf("%v", *cfg)
 	assert.NotContains(t, rendered, "super-secret-password")
 	assert.NotContains(t, rendered, "super-secret-jwt")
+	assert.NotContains(t, rendered, "super-secret-webhook")
 	assert.Contains(t, rendered, "***")
 }

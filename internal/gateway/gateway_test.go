@@ -142,10 +142,12 @@ func TestGatewayRouting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	identity := newUpstream(t, "identity")
 	expense := newUpstream(t, "expense")
+	billingSvc := newUpstream(t, "billing")
 	reportSvc := newUpstream(t, "report")
 	upstreams := map[string]string{
 		"identity": identity.URL,
 		"expense":  expense.URL,
+		"billing":  billingSvc.URL,
 		"report":   reportSvc.URL,
 	}
 
@@ -200,6 +202,19 @@ func TestGatewayRouting(t *testing.T) {
 		assert.Equal(t, path, reportSvc.lastURL)
 		assert.Contains(t, got.body, "report")
 		assert.Equal(t, before, identity.hits, "报表请求不能落到 identity")
+	})
+
+	t.Run("支付回调不要求令牌且只转发给 billing", func(t *testing.T) {
+		beforeIdentity := identity.hits
+		beforeBilling := billingSvc.hits
+		srv := startGateway(t, upstreams, DefaultRules(), nil)
+		const path = "/api/v1/webhooks/payments"
+		got := call(t, srv, http.MethodPost, path, nil)
+
+		assert.Equal(t, http.StatusOK, got.status)
+		assert.Equal(t, beforeBilling+1, billingSvc.hits)
+		assert.Equal(t, path, billingSvc.lastURL)
+		assert.Equal(t, beforeIdentity, identity.hits, "回调不能落到 identity")
 	})
 
 	t.Run("未知路径返回统一信封", func(t *testing.T) {

@@ -24,7 +24,7 @@ LDFLAGS := -s -w -X github.com/edgerunner-fris/expensio/internal/platform/versio
 -include .env
 export
 
-.PHONY: help preflight env tidy fmt vet lint test test-integration test-race build up down ps logs migrate migrate-version smoke clean
+.PHONY: help preflight env tidy fmt vet lint test test-integration test-race build up down ps logs migrate migrate-version topics smoke clean
 
 help: ## 列出所有可用目标
 	@grep -hE '^[a-zA-Z_%:-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; !seen[$$1]++ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' || true
@@ -67,8 +67,12 @@ build: ## 编译全部服务到 bin/
 run-%: ## 本地运行单个服务，例如 make run-gateway
 	EXPENSIO_DB_NAME=$*_db EXPENSIO_DB_USER=$*_app $(GO) run ./cmd/$*
 
-up: env ## 启动依赖容器（core + obs + mail），阻塞到全部健康
+up: env ## 启动依赖容器（core + obs + mail）并创建事件主题
 	$(COMPOSE) --profile core --profile obs --profile mail up -d --wait --wait-timeout 180
+	./scripts/topics.sh
+
+topics: ## 创建业务事件主题（幂等；up 之后执行一次）
+	./scripts/topics.sh
 
 down: ## 停止并移除容器
 	$(COMPOSE) --profile core --profile obs --profile mail down

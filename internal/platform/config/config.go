@@ -30,6 +30,9 @@ type Options struct {
 	NeedsKafka  bool
 	NeedsJWT    bool
 	NeedsMinIO  bool
+	// NeedsBillingWebhook 只在 billing 为 true：回调密钥与渠道名是运行必需项，
+	// 缺失时应在启动期失败，而不是等第一个回调进来才发现没配置。
+	NeedsBillingWebhook bool
 	// NeedsUpstreams 只在网关为 true：其他服务是"被转发方"，没有下游地址可校验。
 	NeedsUpstreams bool
 }
@@ -46,6 +49,7 @@ type Config struct {
 	JWT       JWT       `mapstructure:"jwt"`
 	OTel      OTel      `mapstructure:"otel"`
 	MinIO     MinIO     `mapstructure:"minio"`
+	Billing   Billing   `mapstructure:"billing"`
 	Upstreams Upstreams `mapstructure:"upstreams"`
 	RateLimit RateLimit `mapstructure:"rate_limit"`
 }
@@ -121,6 +125,13 @@ type MinIO struct {
 	UseSSL    bool   `mapstructure:"use_ssl"`
 }
 
+// Billing 是支付回调的验签参数。密钥只从环境变量 / K8s Secret 读取，
+// 没有默认值；渠道名只用于拒绝其他渠道的回调。
+type Billing struct {
+	WebhookProvider string `mapstructure:"webhook_provider"`
+	WebhookSecret   string `mapstructure:"webhook_secret"`
+}
+
 // Load 读取环境变量、应用默认值、反序列化并校验。
 func Load(opts Options) (*Config, error) {
 	if opts.Service == "" {
@@ -192,6 +203,9 @@ func defaults(opts Options) map[string]any {
 		"minio.secret_key": "",
 		"minio.bucket":     "expensio-invoices",
 		"minio.use_ssl":    false,
+
+		"billing.webhook_provider": "mockpay",
+		"billing.webhook_secret":   "",
 
 		// 网关下游：本地默认指向 make run-<service> 起的端口。
 		"upstreams.identity":     "http://127.0.0.1:8081",
@@ -293,6 +307,17 @@ func (c *Config) validate(opts Options) error {
 		}
 	}
 
+	if opts.NeedsBillingWebhook {
+		// 与 billing.EnableWebhooks 的下限一致：32 字节以下的 HMAC 密钥
+		// 不足以抵抗离线暴力破解，直接拒绝启动。
+		if len(c.Billing.WebhookSecret) < 32 {
+			errs = append(errs, errors.New("billing.webhook_secret 至少需要 32 字节（EXPENSIO_BILLING_WEBHOOK_SECRET）"))
+		}
+		if c.Billing.WebhookProvider == "" {
+			errs = append(errs, errors.New("billing.webhook_provider 不能为空（EXPENSIO_BILLING_WEBHOOK_PROVIDER）"))
+		}
+	}
+
 	if opts.NeedsUpstreams {
 		for _, u := range []struct{ name, raw string }{
 			{"upstreams.identity", c.Upstreams.Identity},
@@ -356,7 +381,12 @@ func (m MinIO) String() string {
 		m.Endpoint, m.Bucket)
 }
 
+func (b Billing) String() string {
+	return fmt.Sprintf("Billing{webhook_provider:%s webhook_secret:***}",
+		b.WebhookProvider)
+}
+
 func (c Config) String() string {
-	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s}",
-		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT)
+	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s billing:%s}",
+		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT, c.Billing)
 }

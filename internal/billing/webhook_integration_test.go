@@ -142,7 +142,7 @@ func TestBillingPaymentWebhookTransitions(t *testing.T) {
 
 func doWebhookRequest(t *testing.T, engine *gin.Engine, raw []byte, provider, timestamp, signature string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/billing/webhooks/payments", bytes.NewReader(raw))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/payments", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Billing-Provider", provider)
 	req.Header.Set("X-Billing-Timestamp", timestamp)
