@@ -813,7 +813,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（2/7）
+## M4 进行中（3/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -823,7 +823,7 @@ exit=0
 | --- | --- | --- |
 | M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
 | M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
-| M4-3 | 套餐与订阅 service/repository/HTTP | 未开始 |
+| M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
 | M4-4 | 出账（同周期幂等）与账单查询 API | 未开始 |
 | M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 未开始 |
 | M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 未开始 |
@@ -902,11 +902,50 @@ ok  github.com/edgerunner-fris/expensio/internal/billing  0.023s
 - 写测试时用了名为 `strings` 的辅助函数，`go vet` 报与 `model.go` 的 `strings`
   导入冲突（package 级声明与文件级导入同名），已改名为 `repeatA`。
 
-## 下一步：M4-3
+### M4-3 实际执行的验证（2026-10-26）
 
-套餐与订阅的 service/repository/HTTP：套餐目录只读；订阅创建走“同一租户最多一条
-未取消订阅”的唯一约束，冲突映射为 409；状态变更按白名单校验并递增 version；
-写操作只允许 owner/admin，读允许成员与查看者。
+```text
+$ gofmt -l internal/billing && go vet ./internal/billing && go build ./...
+BUILD-OK
+
+$ go test ./internal/billing -count=1 -v -timeout=10m \
+    -run '^(TestBillingPlansAndSubscriptionHTTP|TestBillingSubscriptionBadRequests)$'
+--- PASS: TestBillingPlansAndSubscriptionHTTP (3.25s)
+--- PASS: TestBillingSubscriptionBadRequests (0.01s)
+    --- PASS: 套餐不存在 / 套餐为空 / 席位为零 / 席位超上限
+    --- PASS: 请求体不是对象 / 非法订阅 ID / 取消缺 version
+ok  github.com/edgerunner-fris/expensio/internal/billing  3.754s
+
+# 随后整包复跑（含 M4-1 的 schema 用例）
+$ go test ./internal/billing -count=1 -timeout=10m
+ok  github.com/edgerunner-fris/expensio/internal/billing  3.833s
+```
+
+（PostgreSQL 16.15-alpine 容器真实启动；时钟固定为 2026-10-26 09:00 UTC，
+周期断言不依赖跑测试的当天。）
+
+本轮验证到的事实：
+
+- `GET /billing/plans` 返回迁移里种子的 5 个套餐，按 interval、价格排序；
+  查看者也能读，价格直接取自 `app.plans`，不在代码里复制一份。
+- `POST /billing/subscriptions` 对 member 返回 403（中间件与 service 各挡一次）；
+  admin 开通后状态 `active`、version 1，月付周期 2026-10-26..2026-11-25，
+  年付 2026-10-26..2027-10-25，与 `PeriodEnd` 的单元测试一致。
+- 同租户第二条生效订阅返回 409 `billing.subscription_exists`，
+  由 `subscriptions_one_live_per_tenant` 唯一索引判定，没有先查后插的竞态窗口。
+- 邻租户按 ID 查订阅返回 404：RLS 让查询本身没有行，而不是查到后再拒绝。
+- 取消必须带匹配的 version：版本不符 409 `billing.subscription_version_conflict`；
+  成功后状态 `canceled`、version 2、`canceled_at` 非空；再次取消 409
+  `billing.subscription_state_conflict`，不会刷新取消时间。
+- 取消后当前订阅返回 404，历史列表仍返回该条 `canceled` 记录；可立即重新订阅。
+- 测试抓到一个真实缺陷：`CancelSubscription` 的 SQL 已把状态改成 `canceled`，
+  但仓储没把扫描出的 status 写回结构体，响应会是 `active`。已修复（写回 Status）。
+
+## 下一步：M4-4
+
+出账与账单查询：按订阅周期生成账单（同订阅同周期唯一，重复出账返回 409），
+金额 = 套餐单价 × 席位，使用 `InvoiceAmount` 的溢出保护；
+账单列表与详情对全租户可读，写操作仍限 owner/admin。
 
 
 
