@@ -14,6 +14,7 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
 	"github.com/edgerunner-fris/expensio/internal/platform/money"
+	"github.com/edgerunner-fris/expensio/internal/platform/outbox"
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
 
@@ -28,12 +29,19 @@ const (
 type Service struct {
 	database *db.DB
 	repo     *Repository
+	// outbox 只用于在业务事务内追加事件，实际投递由后台 dispatcher 完成。
+	outbox *outbox.Store
 	// now 可替换，测试用固定时钟验证"发生时间不能在未来"这类规则。
 	now func() time.Time
 }
 
 func NewService(database *db.DB) *Service {
-	return &Service{database: database, repo: NewRepository(), now: time.Now}
+	return &Service{
+		database: database,
+		repo:     NewRepository(),
+		outbox:   outbox.NewStore(),
+		now:      time.Now,
+	}
 }
 
 // DraftInput 是创建/修改草稿的请求体。

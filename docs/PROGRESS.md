@@ -571,7 +571,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | --- | --- | --- |
 | M3-1 | ADR-0004、事件契约、outbox 迁移与仓储 | 完成 |
 | M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 完成 |
-| M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 未开始 |
+| M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 完成 |
 | M3-4 | report 迁移：幂等表、读模型、RLS | 未开始 |
 | M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 未开始 |
 | M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 未开始 |
@@ -646,11 +646,36 @@ ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  4.135s
   HTTP 服务照常启动，readiness 不依赖 Kafka。
 - 真实 Kafka broker 的端到端验证留到 M3-5（当前用 fake publisher 验证投递器逻辑）。
 
-## 下一步：M3-3
+### M3-3 实际执行的验证（2026-10-26）
 
-五个审批动作在各自事务内写 outbox：提交、批准、驳回、撤销、报销。
-测试重点：动作成功与 outbox 行同生共死；回滚时 Kafka 收不到任何消息；
-快照状态与事件类型一致。
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/expense/ -run "TestWorkflowActionsWriteOutbox|TestRejectAndCancelWriteOutboxWithoutSensitiveText|TestFailedActionsWriteNoOutbox" -count=1
+ok  github.com/edgerunner-fris/expensio/internal/expense  3.818s
+
+$ go test ./internal/expense/... -count=1
+ok  github.com/edgerunner-fris/expensio/internal/expense  3.985s
+```
+
+本轮验证到的事实：
+
+- 提交 → 批准 → 报销产生三条事件，类型依次为
+  `expense.submitted/approved/reimbursed`，聚合版本 2/3/4，与费用行版本一致。
+- 驳回与撤销各自产生两条事件；快照状态分别为 `rejected` / `cancelled`。
+- 事件快照不含商户名、描述与驳回理由，测试直接断言这些字符串和字段名不出现。
+- 预算不足、自审、重复提交、空理由驳回全部失败，outbox 行数保持不变：
+  失败动作不可能留下待投递事件，更不可能发出消息。
+- 事件租户、提交人、预算 ID、审批人字段与费用行一致；信封版本等于快照版本。
+
+## 下一步：M3-4
+
+report 数据库迁移：`processed_events` 幂等表、`expense_facts` 读模型、RLS，
+以及读模型的 down/up 验证。
 
 
 

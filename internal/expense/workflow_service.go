@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
+	"github.com/edgerunner-fris/expensio/internal/platform/events"
 )
 
 // maxCommentRunes 与 approval_steps_comment_check 一致。
@@ -16,13 +17,14 @@ const maxCommentRunes = 1000
 
 // ApplyAction 执行一次审批动作。整个动作在一个事务里完成：
 //
-//	submit    : 匹配预算 → 条件预占 → 改状态 → 追加轨迹
-//	approve   : reserved → spent  → 改状态 → 追加轨迹
-//	reject    : 释放预占        → 改状态 → 追加轨迹
-//	cancel    : 释放预占        → 改状态 → 追加轨迹
-//	reimburse : 改状态（预算不变）→ 追加轨迹
+//	submit    : 匹配预算 → 条件预占 → 改状态 → 追加轨迹 → 写 outbox
+//	approve   : reserved → spent  → 改状态 → 追加轨迹 → 写 outbox
+//	reject    : 释放预占        → 改状态 → 追加轨迹 → 写 outbox
+//	cancel    : 释放预占        → 改状态 → 追加轨迹 → 写 outbox
+//	reimburse : 改状态（预算不变）→ 追加轨迹 → 写 outbox
 //
-// 任何一步失败都会整体回滚，不会留下"钱占了但单没提交"或"单批了但钱没扣"的状态。
+// 任何一步失败都会整体回滚，不会留下"钱占了但单没提交""单批了但钱没扣"
+// 或"业务成功但事件丢失"的状态。Kafka 发送不在事务内，见 ADR-0004。
 func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, action Action, comment string) (*Expense, error) {
 	if !action.Valid() {
 		return nil, apperr.InvalidArgument("未知的审批动作")
@@ -105,7 +107,7 @@ func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, ac
 			}
 		}
 
-		return s.repo.InsertApprovalStep(ctx, tx, &ApprovalStep{
+		if err := s.repo.InsertApprovalStep(ctx, tx, &ApprovalStep{
 			ID:         uuid.New(),
 			TenantID:   e.TenantID,
 			ExpenseID:  e.ID,
@@ -114,7 +116,15 @@ func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, ac
 			FromStatus: e.Status,
 			ToStatus:   to,
 			Comment:    comment,
-		})
+		}); err != nil {
+			return err
+		}
+
+		env, err := newExpenseEvent(action, out)
+		if err != nil {
+			return err
+		}
+		return s.outbox.Insert(ctx, tx, events.TopicExpense, env)
 	})
 	if err != nil {
 		return nil, mapDBError(err)
