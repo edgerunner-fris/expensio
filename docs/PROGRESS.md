@@ -499,6 +499,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | WSL2 本机（Linux 内核）已通过；GitHub Actions 尚未配置，M6 落地时以 runner 结果为准 |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
+| 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **待验证（M3-5）** | 投递器的领取/重试/标记已用真实 PostgreSQL + fake publisher 验证；真实 broker 的发送、消费、重复投递与乱序在 M3-5 集成测试中验证，M3-5 完成前不宣称链路可用 |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -569,7 +570,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | 批次 | 内容 | 状态 |
 | --- | --- | --- |
 | M3-1 | ADR-0004、事件契约、outbox 迁移与仓储 | 完成 |
-| M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 未开始 |
+| M3-2 | outbox 投递器 + Kafka 生产者（重试/退避；事务外发送） | 完成 |
 | M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 未开始 |
 | M3-4 | report 迁移：幂等表、读模型、RLS | 未开始 |
 | M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 未开始 |
@@ -615,9 +616,41 @@ ok  github.com/edgerunner-fris/expensio/internal/expense  3.804s
 - `expense_app` 对 outbox 的 `DELETE` 被拒绝：投递成功只标记，不删行（审计）。
 - 迁移 down 3 步再 up 成功，重建后 `outbox_events` 存在、为空且未启用 RLS。
 
-## 下一步：M3-2
+### M3-2 实际执行的验证（2026-10-26）
 
-outbox 投递器与 Kafka 生产者：`franz-go`、按 `tenant_id` 分区、指数退避
-（1s → 2s → 4s … 上限 1m）、Kafka 不可用时不阻塞费用提交。
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/platform/events/... ./internal/platform/kafka/... -count=1
+ok  github.com/edgerunner-fris/expensio/internal/platform/events  0.003s
+ok  github.com/edgerunner-fris/expensio/internal/platform/kafka   0.003s
+
+$ go test ./internal/platform/outbox/... -count=1
+ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  4.135s
+```
+
+本轮验证到的事实：
+
+- 投递器先提交领取事务，再发送 Kafka，最后用另一个短事务标记，
+  数据库事务内没有任何 broker 调用。
+- 发送失败会写回 `attempts`、`last_error` 与退避后的 `available_at`；
+  退避未到期时 `DispatchOnce` 返回 0，不会打满 broker。
+- 同批一条事件失败不会阻塞其余事件；失败的那条留在 outbox 等重试。
+- 发送内容与 `Envelope.Encode()` 完全一致，分区键为 `tenant_id`。
+- `Backoff` 为 1s → 2s → 4s → … → 1m，已用表驱动测试固定。
+- `cmd/expense` 启动后台投递器；Kafka 启动时探测失败只告警，
+  HTTP 服务照常启动，readiness 不依赖 Kafka。
+- 真实 Kafka broker 的端到端验证留到 M3-5（当前用 fake publisher 验证投递器逻辑）。
+
+## 下一步：M3-3
+
+五个审批动作在各自事务内写 outbox：提交、批准、驳回、撤销、报销。
+测试重点：动作成功与 outbox 行同生共死；回滚时 Kafka 收不到任何消息；
+快照状态与事件类型一致。
+
 
 

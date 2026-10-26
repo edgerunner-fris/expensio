@@ -7,6 +7,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/expense"
 	"github.com/edgerunner-fris/expensio/internal/platform/auth"
@@ -14,6 +17,8 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
 	"github.com/edgerunner-fris/expensio/internal/platform/health"
+	"github.com/edgerunner-fris/expensio/internal/platform/kafka"
+	"github.com/edgerunner-fris/expensio/internal/platform/outbox"
 )
 
 func main() {
@@ -22,6 +27,7 @@ func main() {
 		DefaultAddr: ":8082",
 		NeedsDB:     true,
 		NeedsJWT:    true,
+		NeedsKafka:  true,
 	}, setup))
 }
 
@@ -44,5 +50,43 @@ func setup(app *bootstrap.App) error {
 
 	svc := expense.NewService(database)
 	expense.RegisterRoutes(app.Server.Engine(), expense.NewHandler(svc), issuer)
+
+	// 事件投递是后台链路：Kafka 不可用不影响 HTTP 服务启动，
+	// 也不参与 readiness。事件已经在 outbox 里，进程活着就会继续重试。
+	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
+	if err != nil {
+		return fmt.Errorf("expense: 初始化 Kafka 生产者失败: %w", err)
+	}
+	app.OnStop(producer.Close)
+
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := producer.Ping(pingCtx); err != nil {
+		app.Logger.Warn("kafka unavailable at startup; outbox delivery will retry",
+			zap.Error(err))
+	}
+	cancelPing()
+
+	dispatcher, err := outbox.NewDispatcher(outbox.DispatcherOptions{
+		Database:  database,
+		Publisher: producer,
+		Logger:    app.Logger,
+	})
+	if err != nil {
+		return fmt.Errorf("expense: 初始化 outbox 投递器失败: %w", err)
+	}
+
+	dispatchCtx, stopDispatch := context.WithCancel(context.Background())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		dispatcher.Run(dispatchCtx)
+	}()
+	// OnStop 逆序执行：先停投递器（dispatcher → producer → database），
+	// 否则投递器可能在连接池关闭后写回发布状态。
+	app.OnStop(func() {
+		stopDispatch()
+		<-dispatchDone
+	})
+
 	return nil
 }

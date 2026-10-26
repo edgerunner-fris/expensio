@@ -75,11 +75,11 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
 
 ## 事件与异步（M3）
 
-M3 采用事务内 outbox（ADR-0004），当前已完成事件契约与 outbox 存储：
+M3 采用事务内 outbox（ADR-0004），当前已完成事件契约、outbox 存储与投递器：
 
 1. 业务事务内写 `app.outbox_events`（`internal/platform/outbox`）；
-2. 提交后由后台投递器发送到 Kafka（M3-2）；
-3. 消费端按事件 ID 幂等，报表读模型最终一致。
+2. 提交后由后台投递器同步发送到 Kafka（`expense` 进程内，Kafka 故障不影响 HTTP）；
+3. 消费端按事件 ID 幂等，报表读模型最终一致（M3-4 起）。
 
 **禁止在数据库事务内直接发 Kafka 消息**，否则回滚后消息无法撤回。
 事件信封与费用快照定义在 `internal/platform/events`；主题为
