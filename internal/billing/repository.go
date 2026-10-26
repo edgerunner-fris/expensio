@@ -157,3 +157,87 @@ func (r *Repository) CancelSubscription(ctx context.Context, tx pgx.Tx, s *Subsc
 func dateString(t time.Time) string {
 	return t.Format("2006-01-02")
 }
+
+const invoiceColumns = `id, tenant_id, subscription_id, number, status,
+	period_start, period_end, currency, amount_minor, due_on, issued_at, paid_at, version`
+
+func scanInvoice(row pgx.Row) (*Invoice, error) {
+	var (
+		inv      Invoice
+		status   string
+		currency string
+	)
+	if err := row.Scan(
+		&inv.ID, &inv.TenantID, &inv.SubscriptionID, &inv.Number, &status,
+		&inv.PeriodStart, &inv.PeriodEnd, &currency, &inv.AmountMinor,
+		&inv.DueOn, &inv.IssuedAt, &inv.PaidAt, &inv.Version,
+	); err != nil {
+		return nil, err
+	}
+	inv.Status = InvoiceStatus(status)
+	inv.Currency = money.Currency(currency)
+	return &inv, nil
+}
+
+// CreateInvoice 插入账单。同一订阅周期重复出账由唯一约束拒绝，
+// 金额与周期在插入时就固定，后续改价不会回溯影响历史账单。
+func (r *Repository) CreateInvoice(ctx context.Context, tx pgx.Tx, inv *Invoice) error {
+	const q = `INSERT INTO app.invoices
+	    (id, tenant_id, subscription_id, number, status, period_start, period_end,
+	     currency, amount_minor, due_on)
+	 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	 RETURNING version, issued_at`
+	return tx.QueryRow(ctx, q,
+		inv.ID, inv.TenantID, inv.SubscriptionID, inv.Number, string(inv.Status),
+		dateString(inv.PeriodStart), dateString(inv.PeriodEnd),
+		string(inv.Currency), inv.AmountMinor, dateString(inv.DueOn),
+	).Scan(&inv.Version, &inv.IssuedAt)
+}
+
+func (r *Repository) GetInvoice(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Invoice, error) {
+	return scanInvoice(tx.QueryRow(ctx,
+		`SELECT `+invoiceColumns+` FROM app.invoices WHERE id = $1`, id))
+}
+
+// InvoiceFilter 里没有租户字段：租户只来自 RLS 上下文。
+type InvoiceFilter struct {
+	Status InvoiceStatus
+	Limit  int
+	Offset int
+}
+
+func (r *Repository) ListInvoices(ctx context.Context, tx pgx.Tx, f InvoiceFilter) ([]Invoice, int64, error) {
+	var status any
+	if f.Status != "" {
+		status = string(f.Status)
+	}
+	const where = `($1::text IS NULL OR status = $1)`
+
+	var total int64
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM app.invoices WHERE `+where, status).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT `+invoiceColumns+` FROM app.invoices WHERE `+where+`
+		 ORDER BY issued_at DESC, id DESC LIMIT $2 OFFSET $3`,
+		status, f.Limit, f.Offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]Invoice, 0, f.Limit)
+	for rows.Next() {
+		inv, err := scanInvoice(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		items = append(items, *inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}

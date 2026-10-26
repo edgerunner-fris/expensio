@@ -21,9 +21,12 @@ func RegisterRoutes(r gin.IRouter, h *Handler, parser middleware.AccessParser) {
 	authed.GET("/billing/subscription", h.GetCurrentSubscription)
 	authed.GET("/billing/subscriptions", h.ListSubscriptions)
 	authed.GET("/billing/subscriptions/:subscriptionID", h.GetSubscription)
+	authed.GET("/billing/invoices", h.ListInvoices)
+	authed.GET("/billing/invoices/:invoiceID", h.GetInvoice)
 
 	admin := authed.Group("")
 	admin.Use(middleware.RequireRole(tenantctx.RoleAdmin))
 	admin.POST("/billing/subscriptions", h.CreateSubscription)
 	admin.POST("/billing/subscriptions/:subscriptionID/cancel", h.CancelSubscription)
+	admin.POST("/billing/subscriptions/:subscriptionID/invoices", h.GenerateInvoice)
 }

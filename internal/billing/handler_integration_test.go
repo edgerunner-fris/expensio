@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,6 +197,93 @@ func TestBillingPlansAndSubscriptionHTTP(t *testing.T) {
 	renewed := decode[subscriptionView](t, rec)
 	assert.Equal(t, "2026-10-26", renewed.CurrentPeriodStart)
 	assert.Equal(t, "2027-10-25", renewed.CurrentPeriodEnd)
+}
+
+func TestBillingInvoiceHTTP(t *testing.T) {
+	database, _ := newDB(t)
+	engine, issuer := newBillingHTTPTestServer(t, database)
+	tenant := uuid.New()
+	adminToken := tokenFor(t, issuer, tenant, uuid.New(), tenantctx.RoleAdmin)
+	memberToken := tokenFor(t, issuer, tenant, uuid.New(), tenantctx.RoleMember)
+	foreignToken := tokenFor(t, issuer, uuid.New(), uuid.New(), tenantctx.RoleAdmin)
+
+	rec := doRequest(t, engine, http.MethodPost, "/api/v1/billing/subscriptions", adminToken,
+		SubscriptionInput{PlanCode: "growth-monthly", Seats: 5})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	sub := decode[subscriptionView](t, rec)
+
+	invoicePath := "/api/v1/billing/subscriptions/" + sub.ID.String() + "/invoices"
+
+	// 成员不能出账。
+	rec = doRequest(t, engine, http.MethodPost, invoicePath, memberToken, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = doRequest(t, engine, http.MethodPost, invoicePath, adminToken, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	inv := decode[invoiceView](t, rec)
+	assert.Equal(t, sub.ID, inv.SubscriptionID)
+	assert.Equal(t, "open", inv.Status)
+	assert.Equal(t, "USD", inv.Currency)
+	assert.EqualValues(t, 49500, inv.AmountMinor) // 9900 × 5
+	assert.Equal(t, "2026-10-26", inv.PeriodStart)
+	assert.Equal(t, "2026-11-25", inv.PeriodEnd)
+	assert.Equal(t, "2026-11-09", inv.DueOn)
+	assert.True(t, strings.HasPrefix(inv.Number, "INV-202610-"), inv.Number)
+	assert.Len(t, inv.Number, len("INV-202610-")+8)
+	assert.Equal(t, 1, inv.Version)
+
+	// 同一订阅周期重复出账 409，且不会生成第二张账单。
+	rec = doRequest(t, engine, http.MethodPost, invoicePath, adminToken, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, CodeInvoiceExists, decodeError(t, rec).Code)
+
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices", memberToken, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	page := decode[struct {
+		Items []invoiceView `json:"items"`
+		Total int64         `json:"total"`
+	}](t, rec)
+	assert.EqualValues(t, 1, page.Total)
+
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices?status=paid", memberToken, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	page = decode[struct {
+		Items []invoiceView `json:"items"`
+		Total int64         `json:"total"`
+	}](t, rec)
+	assert.EqualValues(t, 0, page.Total)
+
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices?status=void", memberToken, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices/"+inv.ID.String(), memberToken, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, inv.Number, decode[invoiceView](t, rec).Number)
+
+	// 邻租户看不到账单。
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices/"+inv.ID.String(), foreignToken, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	// 订阅取消后不能再出账。
+	rec = doRequest(t, engine, http.MethodPost,
+		"/api/v1/billing/subscriptions/"+sub.ID.String()+"/cancel", adminToken,
+		map[string]int{"version": 1})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRequest(t, engine, http.MethodPost, invoicePath, adminToken, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, CodeSubscriptionStateConflict, decodeError(t, rec).Code)
+
+	// 非法/不存在的 ID。
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices/not-a-uuid", memberToken, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doRequest(t, engine, http.MethodGet, "/api/v1/billing/invoices/"+uuid.NewString(), memberToken, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	rec = doRequest(t, engine, http.MethodPost,
+		"/api/v1/billing/subscriptions/"+uuid.NewString()+"/invoices", adminToken, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestBillingSubscriptionBadRequests(t *testing.T) {

@@ -212,3 +212,116 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 	}
 	httpx.OK(c, newSubscriptionView(sub))
 }
+
+// invoiceView 的日期保持 YYYY-MM-DD，时间戳保留 RFC3339。
+type invoiceView struct {
+	ID             uuid.UUID  `json:"id"`
+	SubscriptionID uuid.UUID  `json:"subscription_id"`
+	Number         string     `json:"number"`
+	Status         string     `json:"status"`
+	PeriodStart    string     `json:"period_start"`
+	PeriodEnd      string     `json:"period_end"`
+	Currency       string     `json:"currency"`
+	AmountMinor    int64      `json:"amount_minor"`
+	DueOn          string     `json:"due_on"`
+	IssuedAt       time.Time  `json:"issued_at"`
+	PaidAt         *time.Time `json:"paid_at,omitempty"`
+	Version        int        `json:"version"`
+}
+
+func newInvoiceView(inv *Invoice) invoiceView {
+	return invoiceView{
+		ID:             inv.ID,
+		SubscriptionID: inv.SubscriptionID,
+		Number:         inv.Number,
+		Status:         string(inv.Status),
+		PeriodStart:    dateString(inv.PeriodStart),
+		PeriodEnd:      dateString(inv.PeriodEnd),
+		Currency:       string(inv.Currency),
+		AmountMinor:    inv.AmountMinor,
+		DueOn:          dateString(inv.DueOn),
+		IssuedAt:       inv.IssuedAt,
+		PaidAt:         inv.PaidAt,
+		Version:        inv.Version,
+	}
+}
+
+func invoiceID(c *gin.Context) (uuid.UUID, error) {
+	id, err := uuid.Parse(c.Param("invoiceID"))
+	if err != nil {
+		return uuid.Nil, apperr.InvalidArgument("账单 ID 非法")
+	}
+	return id, nil
+}
+
+func (h *Handler) GenerateInvoice(c *gin.Context) {
+	actor, err := actorFrom(c.Request.Context())
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	id, err := subscriptionID(c)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	inv, err := h.svc.GenerateInvoice(c.Request.Context(), actor, id)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.Created(c, newInvoiceView(inv))
+}
+
+func (h *Handler) GetInvoice(c *gin.Context) {
+	actor, err := actorFrom(c.Request.Context())
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	id, err := invoiceID(c)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	inv, err := h.svc.GetInvoice(c.Request.Context(), actor, id)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, newInvoiceView(inv))
+}
+
+func (h *Handler) ListInvoices(c *gin.Context) {
+	actor, err := actorFrom(c.Request.Context())
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	var q struct {
+		Page     int    `form:"page"`
+		PageSize int    `form:"page_size"`
+		Status   string `form:"status"`
+	}
+	if bindErr := c.ShouldBindQuery(&q); bindErr != nil {
+		httpx.Error(c, apperr.InvalidArgument("查询参数非法"))
+		return
+	}
+	page := httpx.PageQuery{Page: q.Page, PageSize: q.PageSize}
+	page.Normalize()
+
+	items, total, err := h.svc.ListInvoices(c.Request.Context(), actor, InvoiceQuery{
+		Status: q.Status,
+		Limit:  page.PageSize,
+		Offset: page.Offset(),
+	})
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	views := make([]invoiceView, 0, len(items))
+	for i := range items {
+		views = append(views, newInvoiceView(&items[i]))
+	}
+	httpx.OK(c, httpx.NewPage(views, total, page))
+}

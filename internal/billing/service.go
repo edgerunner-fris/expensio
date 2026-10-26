@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
+	"github.com/edgerunner-fris/expensio/internal/platform/events"
+	"github.com/edgerunner-fris/expensio/internal/platform/outbox"
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
 
@@ -20,17 +23,25 @@ const (
 	CodeSubscriptionExists          = "billing.subscription_exists"
 	CodeSubscriptionStateConflict   = "billing.subscription_state_conflict"
 	CodeSubscriptionVersionConflict = "billing.subscription_version_conflict"
+	CodeInvoiceExists               = "billing.invoice_exists"
+	CodeInvoiceNumberConflict       = "billing.invoice_number_conflict"
+	CodeInvoiceStateConflict        = "billing.invoice_state_conflict"
 )
+
+// invoiceDueDays 是出账后的付款宽限期：到期日 = 出账日 + 14 天。
+const invoiceDueDays = 14
 
 // Service 承载订阅的业务规则：谁能改、一个租户一条生效订阅、取消是终态。
 type Service struct {
 	database *db.DB
 	repo     *Repository
-	now      func() time.Time
+	// outbox 只在业务事务内追加事件，实际投递由 M4-6 装配的 dispatcher 完成。
+	outbox *outbox.Store
+	now    func() time.Time
 }
 
 func NewService(database *db.DB) *Service {
-	return &Service{database: database, repo: NewRepository(), now: time.Now}
+	return &Service{database: database, repo: NewRepository(), outbox: outbox.NewStore(), now: time.Now}
 }
 
 // SubscriptionInput 是开通订阅的请求体。
@@ -131,6 +142,13 @@ func (s *Service) CreateSubscription(ctx context.Context, actor tenantctx.Tenant
 		if err := s.repo.CreateSubscription(ctx, tx, sub); err != nil {
 			return err
 		}
+		env, err := newSubscriptionEvent(events.TypeSubscriptionCreated, sub)
+		if err != nil {
+			return err
+		}
+		if err := s.outbox.Insert(ctx, tx, events.TopicBilling, env); err != nil {
+			return err
+		}
 		out = sub
 		return nil
 	})
@@ -223,6 +241,13 @@ func (s *Service) CancelSubscription(ctx context.Context, actor tenantctx.Tenant
 			}
 			return err
 		}
+		env, err := newSubscriptionEvent(events.TypeSubscriptionCanceled, sub)
+		if err != nil {
+			return err
+		}
+		if err := s.outbox.Insert(ctx, tx, events.TopicBilling, env); err != nil {
+			return err
+		}
 		out = sub
 		return nil
 	})
@@ -233,6 +258,139 @@ func (s *Service) CancelSubscription(ctx context.Context, actor tenantctx.Tenant
 }
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// invoiceNumber 生成租户内账单号：INV-<出账年月>-<8 位十六进制>。
+// 后 8 位取自随机 UUID，避免同月多张账单号段耗尽。
+func invoiceNumber(issued time.Time, id uuid.UUID) string {
+	return fmt.Sprintf("INV-%s-%s", issued.Format("200601"), strings.ToUpper(id.String()[:8]))
+}
+
+// GenerateInvoice 为订阅的当前周期出账。
+//
+// 重复出账由 (tenant_id, subscription_id, period_start) 唯一约束拒绝；
+// 账单号极小概率撞车时换一个新 ID 重试，而不是让用户重试整个请求。
+func (s *Service) GenerateInvoice(ctx context.Context, actor tenantctx.Tenant, subscriptionID uuid.UUID) (*Invoice, error) {
+	if err := requireBillingManager(actor); err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		inv, err := s.generateInvoiceOnce(ctx, subscriptionID)
+		if err == nil {
+			return inv, nil
+		}
+		if e, ok := apperr.As(err); ok && e.Code() == CodeInvoiceNumberConflict {
+			lastErr = err
+			continue
+		}
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (s *Service) generateInvoiceOnce(ctx context.Context, subscriptionID uuid.UUID) (*Invoice, error) {
+	var out *Invoice
+	err := s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		sub, err := s.repo.GetSubscription(ctx, tx, subscriptionID, true)
+		if err != nil {
+			return err
+		}
+		if sub.Status == SubscriptionCanceled {
+			return apperr.Conflict(CodeSubscriptionStateConflict, "已取消的订阅不能出账")
+		}
+		plan, err := s.repo.GetPlan(ctx, tx, sub.PlanCode)
+		if err != nil {
+			return err
+		}
+		amount, err := InvoiceAmount(*plan, sub.Seats)
+		if err != nil {
+			return err
+		}
+		now := s.now().UTC()
+		due := dateOnly(now).AddDate(0, 0, invoiceDueDays)
+		if due.Before(sub.CurrentPeriodStart) {
+			due = sub.CurrentPeriodStart
+		}
+		inv := &Invoice{
+			ID:             uuid.New(),
+			TenantID:       sub.TenantID,
+			SubscriptionID: sub.ID,
+			Status:         InvoiceOpen,
+			PeriodStart:    sub.CurrentPeriodStart,
+			PeriodEnd:      sub.CurrentPeriodEnd,
+			Currency:       plan.Currency,
+			AmountMinor:    amount,
+			DueOn:          due,
+		}
+		inv.Number = invoiceNumber(now, inv.ID)
+		if err := s.repo.CreateInvoice(ctx, tx, inv); err != nil {
+			return err
+		}
+		env, err := newInvoiceEvent(events.TypeInvoiceCreated, inv)
+		if err != nil {
+			return err
+		}
+		if err := s.outbox.Insert(ctx, tx, events.TopicBilling, env); err != nil {
+			return err
+		}
+		out = inv
+		return nil
+	})
+	if err != nil {
+		return nil, mapBillingDBError(err)
+	}
+	return out, nil
+}
+
+func (s *Service) GetInvoice(ctx context.Context, actor tenantctx.Tenant, id uuid.UUID) (*Invoice, error) {
+	if err := requireMember(actor); err != nil {
+		return nil, err
+	}
+	var out *Invoice
+	err := s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		out, err = s.repo.GetInvoice(ctx, tx, id)
+		return err
+	})
+	if err != nil {
+		if isNoRows(err) {
+			return nil, apperr.NotFound("账单")
+		}
+		return nil, mapBillingDBError(err)
+	}
+	return out, nil
+}
+
+// InvoiceQuery 是账单列表请求。账单属于租户而不是个人，
+// 因此没有 expense 那样的 scope 参数：能读的前提就是该租户成员。
+type InvoiceQuery struct {
+	Status string
+	Limit  int
+	Offset int
+}
+
+func (s *Service) ListInvoices(ctx context.Context, actor tenantctx.Tenant, q InvoiceQuery) ([]Invoice, int64, error) {
+	if err := requireMember(actor); err != nil {
+		return nil, 0, err
+	}
+	filter := InvoiceFilter{Status: InvoiceStatus(strings.TrimSpace(q.Status)), Limit: q.Limit, Offset: q.Offset}
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, 0, apperr.InvalidArgument("账单状态必须是 open 或 paid")
+	}
+	var (
+		items []Invoice
+		total int64
+	)
+	err := s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		items, total, err = s.repo.ListInvoices(ctx, tx, filter)
+		return err
+	})
+	if err != nil {
+		return nil, 0, mapBillingDBError(err)
+	}
+	return items, total, nil
+}
 
 func mapBillingDBError(err error) error {
 	if err == nil {
@@ -246,12 +404,21 @@ func mapBillingDBError(err error) error {
 	case isNoRows(err):
 		return apperr.NotFound("订阅")
 	case errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "invoices_period_key":
+		return apperr.Conflict(CodeInvoiceExists, "该订阅周期已出账")
+	case errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "invoices_number_key":
+		return apperr.Conflict(CodeInvoiceNumberConflict, "账单号冲突，请重试")
+	case errors.As(err, &pgErr) && pgErr.Code == "23505" &&
 		pgErr.ConstraintName == "subscriptions_one_live_per_tenant":
 		return apperr.Conflict(CodeSubscriptionExists, "该租户已有生效中的订阅")
 	case errors.As(err, &pgErr) && pgErr.Code == "23505":
 		return apperr.Conflict(CodeSubscriptionVersionConflict, "订阅已被修改，请刷新后重试")
 	case errors.As(err, &pgErr) && pgErr.Code == "23503":
 		return apperr.InvalidArgument("套餐不存在")
+	case errors.As(err, &pgErr) && pgErr.Code == "23514" &&
+		strings.HasPrefix(pgErr.ConstraintName, "invoices_"):
+		return apperr.Conflict(CodeInvoiceStateConflict, "账单状态不满足约束")
 	case errors.As(err, &pgErr) && pgErr.Code == "23514":
 		return apperr.Conflict(CodeSubscriptionStateConflict, "订阅状态不满足约束")
 	default:

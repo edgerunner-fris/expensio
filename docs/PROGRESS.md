@@ -813,7 +813,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（3/7）
+## M4 进行中（4/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -824,7 +824,7 @@ exit=0
 | M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
 | M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
 | M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
-| M4-4 | 出账（同周期幂等）与账单查询 API | 未开始 |
+| M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
 | M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 未开始 |
 | M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 未开始 |
 | M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 未开始 |
@@ -941,11 +941,46 @@ ok  github.com/edgerunner-fris/expensio/internal/billing  3.833s
 - 测试抓到一个真实缺陷：`CancelSubscription` 的 SQL 已把状态改成 `canceled`，
   但仓储没把扫描出的 status 写回结构体，响应会是 `active`。已修复（写回 Status）。
 
-## 下一步：M4-4
+### M4-4 实际执行的验证（2026-10-26）
 
-出账与账单查询：按订阅周期生成账单（同订阅同周期唯一，重复出账返回 409），
-金额 = 套餐单价 × 席位，使用 `InvoiceAmount` 的溢出保护；
-账单列表与详情对全租户可读，写操作仍限 owner/admin。
+```text
+$ gofmt -l internal/billing && go vet ./... && go build ./...
+ALL-OK
+
+$ go test ./internal/billing -count=1 -timeout=10m
+ok  github.com/edgerunner-fris/expensio/internal/billing  3.351s
+
+$ go test ./internal/platform/events ./internal/platform/outbox -count=1
+ok  github.com/edgerunner-fris/expensio/internal/platform/events  0.004s
+ok  github.com/edgerunner-fris/expensio/internal/platform/outbox  4.450s
+```
+
+本轮验证到的事实：
+
+- 事件契约新增 `expensio.billing.events.v1` 与五种事件类型；
+  `SubscriptionSnapshot` / `InvoiceSnapshot` 有独立校验，取消时间与取消状态、
+  支付时间与 paid 状态必须同时出现，非法快照在写 outbox 前就被拒绝。
+- 出账金额来自 `plans.price_minor × seats`：Growth 9900 × 5 席 = 49500；
+  到期日 = 出账日 + 14 天（2026-10-26 → 2026-11-09），账单号
+  `INV-202610-<8 位十六进制>`，租户内唯一。
+- 同一订阅周期第二次出账返回 409 `billing.invoice_exists`；
+  已取消订阅出账返回 409 `billing.subscription_state_conflict`；
+  邻租户按 ID 查账单返回 404；`status=void` 这类非法过滤值是 400。
+- 订阅开通、出账、取消各在同一事务内写一条 outbox 事件
+  （`subscription.created` / `invoice.created` / `subscription.canceled`），
+  重复出账失败后事件数不增加，证明事务回滚时事件一起消失。
+- 事件信封可被 `events.Decode` 还原并通过校验；快照里的金额、状态、周期
+  与实际落库行一致。
+- 测试隔离修正：`outbox_events` 按设计没有 RLS（投递器跨租户扫描），
+  同包用例共享一个容器，断言必须显式按 `tenant_id` 过滤，否则会读到别的
+  用例产生的事件。已按租户过滤。
+
+## 下一步：M4-5
+
+支付回调：`X-Billing-Signature` HMAC-SHA256 验签（常量时间比较）、
+5 分钟时间窗防重放、按 `invoice_id` 经 `app.invoice_tenant` 反查租户，
+在单事务内写支付流水、回调记录、账单 paid 与 outbox 事件；
+重复回调靠唯一约束幂等。
 
 
 

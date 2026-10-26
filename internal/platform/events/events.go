@@ -19,6 +19,11 @@ const (
 	TopicExpense    = "expensio.expense.events.v1"
 	TopicExpenseDLQ = "expensio.expense.events.v1.dlq"
 
+	// billing 事件是独立主题：报表消费组不应该被订阅/账单变化唤醒，
+	// 两套消费者的重试与积压也互不影响。
+	TopicBilling    = "expensio.billing.events.v1"
+	TopicBillingDLQ = "expensio.billing.events.v1.dlq"
+
 	// SchemaVersion 是当前唯一支持的版本。不兼容变更必须升版本并换主题。
 	SchemaVersion = 1
 
@@ -35,12 +40,20 @@ const (
 	TypeExpenseRejected   Type = "expense.rejected"
 	TypeExpenseCancelled  Type = "expense.cancelled"
 	TypeExpenseReimbursed Type = "expense.reimbursed"
+
+	TypeSubscriptionCreated  Type = "subscription.created"
+	TypeSubscriptionCanceled Type = "subscription.canceled"
+	TypeInvoiceCreated       Type = "invoice.created"
+	TypeInvoicePaid          Type = "invoice.paid"
+	TypeInvoicePaymentFailed Type = "invoice.payment_failed"
 )
 
 func (t Type) Valid() bool {
 	switch t {
 	case TypeExpenseSubmitted, TypeExpenseApproved, TypeExpenseRejected,
-		TypeExpenseCancelled, TypeExpenseReimbursed:
+		TypeExpenseCancelled, TypeExpenseReimbursed,
+		TypeSubscriptionCreated, TypeSubscriptionCanceled,
+		TypeInvoiceCreated, TypeInvoicePaid, TypeInvoicePaymentFailed:
 		return true
 	default:
 		return false
@@ -180,4 +193,100 @@ func validCurrency(s string) bool {
 		}
 	}
 	return true
+}
+
+// SubscriptionSnapshot 是订阅的全量快照。
+// 日期字段是 UTC 日粒度，与数据库的 date 列一致。
+type SubscriptionSnapshot struct {
+	ID                 uuid.UUID  `json:"id"`
+	TenantID           uuid.UUID  `json:"tenant_id"`
+	PlanCode           string     `json:"plan_code"`
+	Seats              int        `json:"seats"`
+	Status             string     `json:"status"`
+	CurrentPeriodStart time.Time  `json:"current_period_start"`
+	CurrentPeriodEnd   time.Time  `json:"current_period_end"`
+	Version            int        `json:"version"`
+	CanceledAt         *time.Time `json:"canceled_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+var validSubscriptionStatuses = map[string]struct{}{
+	"active": {}, "past_due": {}, "canceled": {},
+}
+
+func (s SubscriptionSnapshot) Validate() error {
+	var errs []error
+	if s.ID == uuid.Nil || s.TenantID == uuid.Nil {
+		errs = append(errs, errors.New("id/tenant_id 不能为空"))
+	}
+	if s.PlanCode == "" {
+		errs = append(errs, errors.New("plan_code 不能为空"))
+	}
+	if s.Seats < 1 || s.Seats > 1000 {
+		errs = append(errs, fmt.Errorf("席位数超出范围: %d", s.Seats))
+	}
+	if _, ok := validSubscriptionStatuses[s.Status]; !ok {
+		errs = append(errs, fmt.Errorf("非法订阅状态 %q", s.Status))
+	}
+	if s.CurrentPeriodStart.IsZero() || s.CurrentPeriodEnd.IsZero() ||
+		s.CurrentPeriodEnd.Before(s.CurrentPeriodStart) {
+		errs = append(errs, errors.New("订阅周期不合法"))
+	}
+	if (s.Status == "canceled") != (s.CanceledAt != nil) {
+		errs = append(errs, errors.New("取消状态与取消时间必须同时出现"))
+	}
+	if s.Version <= 0 {
+		errs = append(errs, errors.New("version 必须为正"))
+	}
+	return errors.Join(errs...)
+}
+
+// InvoiceSnapshot 是账单的全量快照。金额为最小货币单位。
+type InvoiceSnapshot struct {
+	ID             uuid.UUID  `json:"id"`
+	TenantID       uuid.UUID  `json:"tenant_id"`
+	SubscriptionID uuid.UUID  `json:"subscription_id"`
+	Number         string     `json:"number"`
+	Status         string     `json:"status"`
+	PeriodStart    time.Time  `json:"period_start"`
+	PeriodEnd      time.Time  `json:"period_end"`
+	Currency       string     `json:"currency"`
+	AmountMinor    int64      `json:"amount_minor"`
+	DueOn          time.Time  `json:"due_on"`
+	IssuedAt       time.Time  `json:"issued_at"`
+	PaidAt         *time.Time `json:"paid_at,omitempty"`
+	Version        int        `json:"version"`
+}
+
+func (s InvoiceSnapshot) Validate() error {
+	var errs []error
+	if s.ID == uuid.Nil || s.TenantID == uuid.Nil || s.SubscriptionID == uuid.Nil {
+		errs = append(errs, errors.New("id/tenant_id/subscription_id 不能为空"))
+	}
+	if s.Number == "" {
+		errs = append(errs, errors.New("账单号不能为空"))
+	}
+	if s.Status != "open" && s.Status != "paid" {
+		errs = append(errs, fmt.Errorf("非法账单状态 %q", s.Status))
+	}
+	if !validCurrency(s.Currency) {
+		errs = append(errs, fmt.Errorf("币种必须是三位大写字母，当前为 %q", s.Currency))
+	}
+	if s.AmountMinor < 1 || s.AmountMinor > 1_000_000_000_000 {
+		errs = append(errs, fmt.Errorf("金额超出范围: %d", s.AmountMinor))
+	}
+	if s.PeriodStart.IsZero() || s.PeriodEnd.IsZero() || s.PeriodEnd.Before(s.PeriodStart) {
+		errs = append(errs, errors.New("账单周期不合法"))
+	}
+	if s.DueOn.IsZero() || s.DueOn.Before(s.PeriodStart) {
+		errs = append(errs, errors.New("到期日必须不早于周期开始"))
+	}
+	if (s.Status == "paid") != (s.PaidAt != nil) {
+		errs = append(errs, errors.New("已支付状态与支付时间必须同时出现"))
+	}
+	if s.Version <= 0 {
+		errs = append(errs, errors.New("version 必须为正"))
+	}
+	return errors.Join(errs...)
 }
