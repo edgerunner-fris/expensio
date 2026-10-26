@@ -389,6 +389,44 @@ ok  internal/expense  6.823s（全包）
 预算写操作权限：owner/admin；成员与 viewer 只读。期间按 UTC 日期解释，
 避免同一张单因服务器时区不同匹配到不同预算。
 
+### M2-8 实际执行的验证（2026-10-26）
+
+审批端点：`POST /api/v1/expenses/:id/{submit,approve,reject,cancel,reimburse}`，
+请求体仅有可选 `comment`；目标状态由动作决定，客户端不能直接写 `status`。
+每个动作在一个事务内完成"锁单 → 鉴权 → 预算变更 → 状态变更 → 追加轨迹"：
+
+| 动作 | 预算操作 | 状态 |
+| --- | --- | --- |
+| submit | 匹配预算后条件预占 `reserved += amount` | draft → submitted |
+| approve | `reserved → spent`（同一条 UPDATE） | submitted → approved |
+| reject | `reserved -= amount` | submitted → rejected |
+| cancel | `reserved -= amount` | submitted → cancelled |
+| reimburse | 不改变预算 | approved → reimbursed |
+
+条件更新未命中（额度不足/预占不足）返回 409 `expense.budget_unavailable`；
+状态机冲突返回 409 `expense.state_conflict`；自审返回 403 `expense.self_approval_forbidden`；
+驳回不写理由返回 400。预算变更与状态变更同事务，任一步失败整体回滚。
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run 'TestWorkflow|TestConcurrentSubmit|TestHTTPWorkflow' -race -count=1 -v
+--- PASS: TestHTTPWorkflow                       （空体提交 200；重复提交 409；驳回无理由 400；审批/报销 200；owner 自审 403）
+--- PASS: TestHTTPWorkflowBadRequests            （非法 ID、非对象 JSON、comment 类型错误 → 400）
+--- PASS: TestWorkflowSubmitApproveReimburse     （submit 预占 12345；approve 后 reserved=0/spent=12345；reimburse 不改预算；轨迹 3 条）
+--- PASS: TestWorkflowWithoutBudgets             （从未配置预算的租户：budget_id 为 NULL，可提交/审批）
+--- PASS: TestWorkflowBudgetUnavailable          （预算 10000 提交 12345 → 409，单据仍为 draft v1，轨迹为空）
+--- PASS: TestWorkflowBudgetNotMatched           （租户有 meals 预算时提交 travel → 409；显式指定不匹配预算同样 409）
+--- PASS: TestWorkflowSelfApprovalForbidden      （owner 审批自己的单 → 403，状态与预占均不变）
+--- PASS: TestWorkflowRejectAndCancelReleaseBudget（驳回/撤销释放预占；驳回理由必填且 ≤1000 字符；撤销不写审批人）
+--- PASS: TestWorkflowInvalidTransitions         （越级审批/重复提交/提前报销/撤销已批准 → 409；被降级 viewer 403）
+--- PASS: TestConcurrentSubmitRespectsBudget     （两份草稿争同额度：恰好 1 个成功、1 个 409，预占不超额度，仅 1 条轨迹）
+ok  internal/expense  5.200s（定向）；全包 -race 7.020s
+```
+
+并发用例依赖 `UPDATE ... WHERE reserved + spent + amount <= amount` 的行锁语义：
+两个事务先后锁同一预算行，后到者在 READ COMMITTED 下重新求值 WHERE，命中 0 行即失败。
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -478,8 +516,8 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-5 | 费用仓储与草稿 CRUD | 完成 |
 | M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 完成 |
 | M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 完成 |
-| M2-8 | 审批工作流与同事务预占/释放/结转 | 进行中 |
-| M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
+| M2-8 | 审批工作流与同事务预占/释放/结转 | 完成 |
+| M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 进行中 |
 
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。

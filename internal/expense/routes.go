@@ -24,6 +24,14 @@ func RegisterRoutes(r gin.IRouter, h *Handler, parser middleware.AccessParser) {
 	authed.PUT("/expenses/:expenseID", h.UpdateExpense)
 	authed.DELETE("/expenses/:expenseID", h.DeleteExpense)
 
+	// 审批动作各自一个端点。谁能执行哪个动作由领域层 AuthorizeAction 决定：
+	// 提交限本人，审批/驳回/报销限 admin 及以上且禁止自审，撤销限本人或管理岗。
+	authed.POST("/expenses/:expenseID/submit", h.actionHandler(ActionSubmit))
+	authed.POST("/expenses/:expenseID/approve", h.actionHandler(ActionApprove))
+	authed.POST("/expenses/:expenseID/reject", h.actionHandler(ActionReject))
+	authed.POST("/expenses/:expenseID/cancel", h.actionHandler(ActionCancel))
+	authed.POST("/expenses/:expenseID/reimburse", h.actionHandler(ActionReimburse))
+
 	// 预算对全租户可读（提交费用时要知道有哪些预算），
 	// 写操作只允许 owner/admin：在网关与中间件各挡一次，service 里还有第三次判断。
 	authed.GET("/budgets", h.ListBudgets)
