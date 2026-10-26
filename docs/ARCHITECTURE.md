@@ -88,6 +88,14 @@ M3 采用事务内 outbox（ADR-0004），当前已完成事件契约、outbox �
 事件信封与费用快照定义在 `internal/platform/events`；主题为
 `expensio.expense.events.v1`，分区键固定为 `tenant_id`。
 
+## 报表查询（M3）
+
+report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
+`app.expense_facts`（不调用 expense API、不跨库 JOIN）。聚合在查询时完成，
+按 `(分组维度, 币种)` 输出，币种之间永不求和。owner/admin 默认
+`scope=all`，member/viewer 只能用 `mine`，越权返回 403 而不是静默降级。
+所有查询经 FORCE RLS + JWT 派生的租户上下文，读不到邻租户数据。
+
 ## 可观测性与运维
 
 - 日志：zap JSON，敏感字段（token、密码、卡号）在 logger 层脱敏。

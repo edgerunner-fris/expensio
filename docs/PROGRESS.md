@@ -562,7 +562,7 @@ M2 已全部完成，全量 `-race` 与 `-count=5` 通过，网关联调见上�
 M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时点为审批通过
 （`reserved → spent`），报销不再改变预算数字。详见 ADR-0003。
 
-## M3 进行中（5/7）
+## M3 进行中（6/7）
 
 设计已锁定在 ADR-0004：事务内 outbox、事务外投递、全量快照 + `aggregate_version`、
 `tenant_id` 作为分区键、消费端按事件 ID 幂等。
@@ -574,7 +574,7 @@ M2 明确不做 `expense_items`（明细行）与 Kafka/outbox；预算扣减时
 | M3-3 | expense 五个动作同事务写 outbox + 回滚不发消息测试 | 完成 |
 | M3-4 | report 迁移：幂等表、读模型、RLS | 完成 |
 | M3-5 | report 消费者 + 幂等/乱序/重复投递集成测试（真实 Kafka） | 完成 |
-| M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 未开始 |
+| M3-6 | 报表查询 API + 网关路由 + HTTP 测试 | 完成 |
 | M3-7 | 全量回归、联调、PROGRESS 收尾 | 未开始 |
 
 ### M3-1 实际执行的验证（2026-10-26）
@@ -735,11 +735,43 @@ ok  github.com/edgerunner-fris/expensio/internal/report  18.018s
 - `cmd/report` 现在装配数据库、生产者与消费者；Kafka 启动探测失败只告警，
   消费循环后台重连，readiness 仍只依赖数据库。
 
-## 下一步：M3-6
+### M3-6 实际执行的验证（2026-10-26）
 
-报表查询 API：按 `(group, currency)` 聚合，禁止混合币种求和；
-owner/admin 默认 `scope=all`，member/viewer 只能用 `mine`，
-越权请求返回 403；补 HTTP 集成测试与网关路由联调。
+```text
+$ gofmt -l .                       # 无输出
+$ go vet ./...
+vet_ok
+$ go build ./...
+build_ok
+
+$ go test ./internal/gateway/ -count=1
+ok  github.com/edgerunner-fris/expensio/internal/gateway  1.687s
+
+$ go test ./internal/report/ -count=1
+ok  github.com/edgerunner-fris/expensio/internal/report  21.466s
+```
+
+本轮验证到的事实：
+
+- 新端点 `GET /api/v1/reports/expenses/summary`，参数
+  `from`/`to`（必填，`YYYY-MM-DD`，`to` 为闭区间）、`group_by`（`category`/`status`）、
+  `scope`、`status`、`category`。查询范围上限 365 天，超出返回 400。
+- 币种隔离由 SQL 结构保证：`GROUPING SETS ((分组, currency), (currency))`，
+  总计行只按币种分组，分组行自带币种，任何一行都不是跨币种求和。
+  同一语句同时产出总计与分组，前端看到的账一定对得上。
+- owner/admin 不传 `scope` 默认 `all`，member/viewer 默认 `mine`；
+  member/viewer 显式请求 `all` 返回 403 `auth.forbidden`，不静默降级。
+  管理员传 `scope=mine` 可以收窄到本人。
+- 邻租户用合法令牌查询得到空数组而不是别人的数据；缺少令牌返回 401。
+- 网关 `/api/v1/reports` 前缀转发到 report，路径与查询串原样保留，
+  不会落到 identity 的兜底下游。
+- 非法参数（缺 from、格式错误、from > to、超范围、未知分组/状态/类别/scope）
+  统一返回 400 `common.invalid_argument`。
+
+## 下一步：M3-7
+
+全量回归：`go test ./... -race -count=5`、真实依赖联调（expense → outbox →
+Kafka → report 读模型 → 报表 API），PROGRESS / ARCHITECTURE 收尾后提交推送。
 
 
 

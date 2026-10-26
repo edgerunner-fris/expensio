@@ -142,7 +142,12 @@ func TestGatewayRouting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	identity := newUpstream(t, "identity")
 	expense := newUpstream(t, "expense")
-	upstreams := map[string]string{"identity": identity.URL, "expense": expense.URL}
+	reportSvc := newUpstream(t, "report")
+	upstreams := map[string]string{
+		"identity": identity.URL,
+		"expense":  expense.URL,
+		"report":   reportSvc.URL,
+	}
 
 	t.Run("公开路由不要求令牌", func(t *testing.T) {
 		srv := startGateway(t, upstreams, DefaultRules(), nil)
@@ -181,6 +186,20 @@ func TestGatewayRouting(t *testing.T) {
 		assert.Empty(t, identity.last.Get("X-User-Role"))
 		assert.Equal(t, "Bearer good", identity.last.Get("Authorization"))
 		assert.NotEmpty(t, identity.last.Get("X-Request-ID"))
+	})
+
+	t.Run("报表路由转发到 report 且保留路径与查询串", func(t *testing.T) {
+		before := identity.hits
+		srv := startGateway(t, upstreams, DefaultRules(), nil)
+		const path = "/api/v1/reports/expenses/summary?from=2026-10-01&to=2026-10-31&scope=all"
+		got := call(t, srv, http.MethodGet, path, map[string]string{
+			"Authorization": "Bearer good",
+		})
+
+		assert.Equal(t, http.StatusOK, got.status)
+		assert.Equal(t, path, reportSvc.lastURL)
+		assert.Contains(t, got.body, "report")
+		assert.Equal(t, before, identity.hits, "报表请求不能落到 identity")
 	})
 
 	t.Run("未知路径返回统一信封", func(t *testing.T) {

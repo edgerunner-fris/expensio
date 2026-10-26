@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/edgerunner-fris/expensio/internal/platform/auth"
 	"github.com/edgerunner-fris/expensio/internal/platform/bootstrap"
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
@@ -24,6 +25,7 @@ func main() {
 		DefaultAddr: ":8084",
 		NeedsDB:     true,
 		NeedsKafka:  true,
+		NeedsJWT:    true,
 	}, setup))
 }
 
@@ -40,6 +42,14 @@ func setup(app *bootstrap.App) error {
 	}
 	app.OnStop(database.Close)
 	app.Health.Add(health.Check("db", database.Ping))
+
+	// report 不假设网关校验过令牌：所有端点自己再校验一次。
+	issuer, err := auth.NewTokenIssuer(cfg.JWT.Issuer, cfg.JWT.Secret,
+		cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	if err != nil {
+		return fmt.Errorf("report: 初始化令牌校验器失败: %w", err)
+	}
+	report.RegisterRoutes(app.Server.Engine(), report.NewHandler(report.NewService(database)), issuer)
 
 	// DLQ 与业务事件共用同一个生产者：两者对 acks=all 的要求一致。
 	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
