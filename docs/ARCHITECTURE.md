@@ -131,7 +131,7 @@ report 暴露 `GET /api/v1/reports/expenses/summary`，只读自己的
 | M1 | identity、gateway、RLS、集成测试 | 完成 |
 | M2 | expense、审批状态机、预算预占 | 完成 |
 | M3 | Kafka、outbox、报表读模型 | 完成 |
-| M4 | billing、订阅与支付回调幂等 | 进行中 |
+| M4 | billing、订阅与支付回调幂等 | 完成 |
 | M5 | 前端、通知 | 未开始 |
 | M6 | Dockerfile、K8s、Helm、GitHub Actions | 未开始 |
 | M7 | 指标、trace、压测与告警 | 未开始 |

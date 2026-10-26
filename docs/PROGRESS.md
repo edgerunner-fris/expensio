@@ -814,7 +814,7 @@ exit=0
 - 每个测试包进程各自启动容器（testenv 的 once 是包级的），跨服务用例不会
   与其他包的 Kafka/PostgreSQL 数据互相污染。
 
-## M4 进行中（6/7）
+## M4 完成情况（7/7）
 
 设计锁定在 ADR-0005：订阅与账单状态机分离、一个订阅周期一张账单、
 回调按 HMAC 验签后从 `invoice_lookup` 反查租户、幂等依赖唯一约束而非先查后插、
@@ -828,7 +828,7 @@ exit=0
 | M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
 | M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 完成 |
 | M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 完成 |
-| M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 未开始 |
+| M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 完成 |
 
 ### M4-1 实际执行的验证（2026-10-26）
 
@@ -1082,10 +1082,60 @@ billing 启动失败: billing.webhook_secret 至少需要 32 字节（EXPENSIO_B
 - `billing.webhook_secret` 缺失或短于 32 字节时进程拒绝启动，而不是带病运行；
   `Config.String` 对该字段打码，日志不会带出密钥。
 
-## 下一步：M4-7
+### M4-7 实际执行的验证（2026-10-26）
 
-M4 收尾回归：全量 `-race -count=5`、billing 与 gateway 的跨服务链路、
-PROGRESS 与 ARCHITECTURE 的 M4 状态收尾；确认没有以 `t.Skip` 冒充通过。
+里程碑收尾回归，全量跑两遍（`-race -count=5` 与真实容器）：
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ go test ./... -race -count=5 -timeout=25m
+ok  internal/billing                15.223s
+ok  internal/e2e                    37.219s
+ok  internal/expense                19.237s
+ok  internal/gateway                 5.070s
+ok  internal/identity               33.324s
+ok  internal/platform/outbox        14.599s
+ok  internal/report                 58.002s
+ok  internal/platform/apperr / bootstrap / config / events / health
+    / httpx / middleware / kafka / logger / money / server / tenantctx  全部 ok
+exit=0
+```
+
+本轮验证到的事实：
+
+- billing 的 7 个集成用例没有使用 `t.Skip` 作为通过条件；Docker 不可用时由
+  `testenv` 的显式门禁失败（`EXPENSIO_REQUIRE_DOCKER=1`），不是静默跳过。
+- 全量竞态回归覆盖了 M4 新增的回调路径：重复回调、金额不符、未知账单、
+  坏签名、过期时间戳均被既有用例与真实联调同时覆盖。
+- 跨服务链路：真实 identity → gateway → billing → PostgreSQL → outbox →
+  Kafka 已跑通，Kafka 上可读到三条 billing 事件且状态与数据库一致
+  （明细见 M4-6）。本次没有新增 fake publisher，也没有直接向 outbox 插行。
+- M4 完成后的边界：billing 只负责订阅/账单/支付状态，不产生邮件；
+  通知与前端留到 M5。
+
+## M4 完成情况（7/7）
+
+M4 已全部完成。设计锁定在 ADR-0005，所有状态变更与 outbox 事件同事务，
+回调幂等依赖数据库唯一约束，租户只从数据库映射反查。
+
+| 批次 | 内容 | 状态 |
+| --- | --- | --- |
+| M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
+| M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
+| M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
+| M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
+| M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 完成 |
+| M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 完成 |
+| M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 完成 |
+
+## 下一步：M5
+
+前端管理台（Vue 3 + TS + Vite + Element Plus + Pinia + Router + ECharts + Axios，
+:5173）与 notification 服务：先核对 `npm ls` 的真实版本，再按登录、费用、
+审批、预算、报表、账单六个页面落地；通知消费 billing/expense 事件，但不作为
+任何业务事实的来源。
 
 
 
