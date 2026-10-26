@@ -338,6 +338,20 @@ $ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -race -count=1
 ok  internal/expense  7.417s（含 M2-1/M2-2 集成用例）
 ```
 
+### M2-5 实际执行的验证（2026-10-26）
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense -run 'Test(CreateAndGetDraft|DraftPermission|UpdateDraftOptimisticLock|DeleteDraft|ListDrafts|DraftValidation|DraftBudgetMustBelongToTenant)' -race -count=1 -v
+--- PASS: TestCreateAndGetDraft            （tenant/submitter 来自上下文；小写币种归一化；空白裁剪）
+--- PASS: TestDraftPermission             （viewer 禁写；他人草稿 404；管理员可读不可改；跨租户不可见）
+--- PASS: TestUpdateDraftOptimisticLock    （v1→v2；旧版本 409 expense.version_conflict；提交后 409；不存在 404）
+--- PASS: TestDeleteDraft                  （版本不符 409；软删后 404 且行仍在）
+--- PASS: TestListDrafts                   （mine/all、scope=all 对成员 403、状态过滤、分页、租户隔离）
+--- PASS: TestDraftValidation              （金额/币种/类别/时间/长度边界，200 汉字按字符计数通过）
+--- PASS: TestDraftBudgetMustBelongToTenant（跨租户预算 400；同租户可通过；草稿可清空预算）
+ok  internal/expense  6.559s
+```
+
 ## 风险清单
 
 | # | 风险 | 状态 | 结论 / 处置 |
@@ -424,8 +438,8 @@ M2 设计与批次已于 2026-10-26 确认，剩余工作：
 | M2-2 | Schema 集成测试（RLS / 触发器 / 只追加 / 重叠约束 / down-up） | 完成 |
 | M2-3 | `platform/money`：int64 最小单位、币种与金额校验 | 完成 |
 | M2-4 | expense 领域模型：状态机、角色规则、禁止自审 | 完成 |
-| M2-5 | 费用仓储与草稿 CRUD | 进行中 |
-| M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 待开始 |
+| M2-5 | 费用仓储与草稿 CRUD | 完成 |
+| M2-6 | 费用 HTTP 层与 `cmd/expense` 装配 | 进行中 |
 | M2-7 | 预算仓储/服务/HTTP 与匹配规则 | 待开始 |
 | M2-8 | 审批工作流与同事务预占/释放/结转 | 待开始 |
 | M2-9 | 全量回归、网关联调、PROGRESS 收尾 | 待开始 |
