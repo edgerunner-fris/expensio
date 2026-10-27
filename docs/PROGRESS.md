@@ -503,7 +503,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 30 | 业务事件主题未在 broker 上预先创建 | **已解决（本地实测；集群待验证）** | franz-go 先取元数据，broker 的 `auto.create.topics.enable=true` 不会对这类请求生效；缺主题时投递器会持续退避重试且不丢事件（M4-6 实测）。Compose `topics` Job 实测 `Exited (0)`，创建 expense/billing 主题与 DLQ；Helm 以 `pre-install,pre-upgrade` Hook 提供同等 Job，`helm template` 能渲染。**集群内 Job 未实际执行** |
 | 31 | notification 消费组首次启动会从最早位点回放，可能补发历史邮件 | **已解决** | 消费端新增 `OffsetReset`：report 保持 `ResetEarliest`（回放重建读模型），notification 两个主题改为 `ResetLatest`——全新消费组只消费组成立之后的事件，已有位点的重启不受影响。`TestResetLatestSkipsRecordsWrittenBeforeGroupExists` 对真实 broker 验证：组成立前写入的 `old` 不会被读到，之后写入的 `new` 正常消费；`-race -count=5` 通过。代价：重建通知库时不再自动补历史通知，需要时用专用运维消费者回放 |
 | 32 | 邮件投递是至少一次，崩溃窗口可能重复发送 | **已解决（明示取舍）** | 发送成功与标记 `sent` 之间进程崩溃，会在 5 分钟后被重新领取并重发同一封邮件；优先保证不丢。通知本身不是业务事实，重复邮件可接受；若要严格一次需要与 SMTP 供应商的幂等键，成本高于收益 |
-| 33 | 真实 SMTP 供应商（STARTTLS / 认证）尚未验证 | **待验证（M9）** | 集成测试用假 Mailer 验证退避与状态迁移，端到端联调用 Mailpit 收信；`RequireTLS`、`PlainAuth` 与证书校验只做了单元级覆盖，尚未对真实邮件服务验证。M7 范围是可观测性、M8 范围是前端与 E2E，本项均未动；M9 用真实供应商或启用了 STARTTLS 的本地中继补测 |
+| 33 | 真实 SMTP 供应商（STARTTLS / 认证）尚未验证 | **已解决（M11，协议层实测）** | 集成测试用假 Mailer 验证退避与状态迁移，端到端联调用 Mailpit 收信（明文 1025），`RequireTLS`、`PlainAuth` 与证书校验此前确实没有对真实 SMTP 服务执行过。M11 新增 `internal/notification/mailer_test.go`：进程内起真实 TCP socket 的最小 SMTP 服务（EHLO / STARTTLS / AUTH PLAIN / MAIL / RCPT / DATA / QUIT），自签 ECDSA 证书经 `MailerOptions.TLSConfig` 注入 RootCAs，实测三条路径——STARTTLS 后 AUTH PLAIN 成功并收到正文、`RequireTLS` 下服务器不公布 STARTTLS 即拒发、自签证书不在信任链时握手失败。`go test ./internal/notification -run TestSMTPMailer -race -count=5` → `ok 1.183s`。遗留：真实供应商的地址、凭据与证书链尚未接入，属部署配置而非代码路径，见 M11 |
 | 34 | 前端首屏包体偏大 | **已解决（M8，首屏）** | 原构建 `index` 865.67 KB（gzip 276.04 KB）、`ReportsView` 510.52 KB（gzip 172.62 KB）。M8 改为逐组件注册 Element Plus（不再 `app.use(ElementPlus)`），并把 ECharts 拆成按需 `import()`。实测：`index` 469.16 KB（gzip 150.49 KB，原始体积 -45.8%、gzip -45.5%），`ReportsView` 5.07 KB，ECharts 独立为 `charts` 519.31 KB（gzip 175.39 KB），只在报表页真正有数据时下载。Vite 仍对 `charts` 报 >500 KB：这是按需 chunk，不影响首屏；若继续压缩需换更小的图表实现或拆分 zrender，暂不做 |
 | 35 | 没有成员邀请/入组接口，新租户只有 owner | **已解决（M10）** | M1 的"成员管理"原先只包含列表与角色调整；新租户注册后只有 owner，而自审批被禁止，真实审批流程必须先由运维写库补成员。M10 补齐：owner/admin 创建邀请（只有 owner 能邀请 owner），令牌 32 字节随机值、库内只存 SHA-256 摘要，同一租户同一邮箱最多一条待接受邀请，重复邀请撤销旧链接，默认 7 天过期；接受时必须验证密码（新邮箱设置、已有账号输入原密码），公开页与接受接口经网关 IP 限流；邮件经 notification 发件箱投递，入队失败仍返回可复制的一次性链接。详见 ADR-0010 与 M10 章节。遗留：链接是 bearer 凭据（新邮箱仍可凭链接入组）、无域名限制/批量邀请/撤销通知 |
 | 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。M10 追加邀请流程用例（创建 → Mailpit 收信 → 公开页接受 → 一次性链接失效 → 新成员登录 → owner 复核成员列表），全量 `--repeat-each=3` 为 9 passed（23.3s）。CI 尚未运行浏览器测试（需要先起整栈），仍见风险 26 |
@@ -1701,7 +1701,7 @@ Compose 侧用 `docker compose --profile app config` 验证：identity 独有
 | 权限 | 完成 | owner/admin 可邀请，只有 owner 能邀请 owner；member/viewer 无创建/列表权限 |
 | 邮件 | 完成 | identity → notification `POST /api/v1/internal/emails`（HMAC 短时令牌）→ `email_outbox` → worker；失败不回滚邀请 |
 | 网关 | 完成 | `/api/v1/invitations` 公开 + IP 限流；`/api/v1/internal/*` 不转发 |
-| 管理台 | 完成 | 成员页邀请弹窗、一次性链接复制、待接受列表与撤销；公开 `/invite/:token` 接受页。typecheck 与生产构建通过；**邀请页尚未纳入 Playwright E2E**（邮箱取链需要 Mailpit API） |
+| 管理台 | 完成 | 成员页邀请弹窗、一次性链接复制、待接受列表与撤销；公开 `/invite/:token` 接受页。typecheck 与生产构建通过；邀请页已纳入 Playwright E2E（经 Mailpit API 取链），见本节末尾 |
 | 审计 | 完成 | `member.invited`、`member.invitation_accepted`；元数据不含令牌/链接 |
 
 ### 自动化测试
@@ -1849,9 +1849,44 @@ Running 9 tests using 1 worker
 本地 `vite dev` 场景没有 Mailpit 时，用例仍跑完整 UI 流程，只跳过邮件
 送达断言（`E2E_MAILPIT_URL` 为空）。
 
+## M11 完成情况：SMTP STARTTLS、证书校验与认证
+
+风险 33 此前的空白是协议层：`net/smtp` 的 STARTTLS、`PlainAuth` 与证书校验
+从未对真实 socket 跑过，只有 Mailpit 明文收信。M11 用进程内真实 SMTP 服务
+补测，不依赖外部供应商，也不打桩绕过 TLS。
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 测试服务器 | 完成 | `fakeSMTPServer` 起真实 `127.0.0.1:0` 监听，实现 EHLO / STARTTLS / AUTH PLAIN / MAIL / RCPT / DATA / QUIT；AUTH 只在 TLS 之后公布，与真实服务器行为一致 |
+| 证书 | 完成 | 每个用例生成自签 ECDSA P-256 证书（SAN = 127.0.0.1），测试通过 `MailerOptions.TLSConfig` 注入 RootCAs |
+| 业务改动 | 完成 | `MailerOptions.TLSConfig` 可选；`startTLSConfig()` 在调用方配置上补齐 `ServerName` 与最低 TLS 1.2，传 `&tls.Config{}` 也不会降级 |
+| 覆盖场景 | 完成 | ① STARTTLS → AUTH PLAIN → 正文送达；② `RequireTLS` 且服务器不公布 STARTTLS → 拒发；③ 证书不受信 → 握手失败 |
+
+```text
+$ go test ./internal/notification -run "TestSMTPMailer" -race -count=5 -v
+--- PASS: TestSMTPMailerSendsOverSTARTTLSWithAuth (0.00s)
+--- PASS: TestSMTPMailerRequiresStartTLSWhenConfigured (0.00s)
+--- PASS: TestSMTPMailerRejectsUntrustedCertificate (0.00s)
+...
+--- PASS: TestSMTPMailerSendsOverSTARTTLSWithAuth (0.00s)
+ok  	github.com/edgerunner-fris/expensio/internal/notification	1.183s
+EXIT=0
+```
+
+用例断言的是错误文案与服务器侧事实（`gotAuth`、DATA 正文包含收件人与
+中文主题），不是"调用没报错"。第三条用例同时确认客户端拒绝证书后服务端
+goroutine 正常退出，不留悬挂连接。
+
+仍未覆盖：真实供应商（SES / Postmark / 企业 SMTP）的地址、凭据、证书链
+与反垃圾策略，属部署配置。接入时填 `EXPENSIO_NOTIFICATION_SMTP_ADDR` /
+`_FROM` / `_USERNAME` / `_PASSWORD` 并把 `EXPENSIO_NOTIFICATION_SMTP_USE_TLS`
+设为 `true`（Helm 对应 `notification.smtpAddr` / `smtpFrom` / `smtpUsername` /
+`smtpUseTLS` 与 Secret 里的 `smtpPassword`）。
+
 ## 下一步
 
-1. 风险 33：用启用 STARTTLS 的真实 SMTP 中继补测认证与证书校验；
+1. 接入真实邮件供应商时复核地址、凭据、证书链与 `RequireTLS`（协议层已由
+   M11 覆盖）；
 2. EdDSA 收尾：一个 access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256`、删除
    HS256 兼容代码与共享密钥；补一次公钥轮换演练；
 3. 风险 20：在真实集群 apply Helm（含按集群 Pod CIDR 填

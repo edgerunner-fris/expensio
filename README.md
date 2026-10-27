@@ -147,12 +147,13 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 未在真实 Kubernetes 集群 apply；NetworkPolicy / PDB / 多副本行为未实测。
-- GitHub Actions 尚未在 runner 上实际执行。
+- CI 已在 GitHub runner 上全绿，但不运行浏览器级 E2E（需要先起整栈）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；
   已有账号仍须原密码。没有域名限制、批量邀请与撤销通知。
 - 迁移期的 HS256 兼容路径尚未删除：identity 仍接受旧令牌，需等一个
   access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256` 并移除共享密钥。
-- 真实 SMTP 供应商的 STARTTLS 与认证尚未验证（本地用 Mailpit）。
+- STARTTLS、证书校验与 AUTH PLAIN 已用本地 TLS SMTP 服务实测；真实供应商
+  的地址、凭据与证书链尚未接入（本地日常收信用明文 Mailpit）。
 - 单地域部署，没有跨集群复制与故障转移。
 
 这些限制与对应风险编号、处置状态都记录在

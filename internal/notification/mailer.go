@@ -27,6 +27,9 @@ type MailerOptions struct {
 	// 本地 Mailpit 不提供 TLS，生产环境应设为 true。
 	RequireTLS bool
 	Timeout    time.Duration
+	// TLSConfig 可选：用于自定义 STARTTLS 握手（企业内网自签 CA、测试）。
+	// nil 时使用系统根证书，ServerName 取 SMTP 主机名，最低 TLS 1.2。
+	TLSConfig *tls.Config
 }
 
 // SMTPMailer 用标准库 net/smtp 发送纯文本邮件。
@@ -39,6 +42,7 @@ type SMTPMailer struct {
 	password   string
 	requireTLS bool
 	timeout    time.Duration
+	tlsConfig  *tls.Config
 }
 
 func NewSMTPMailer(opts MailerOptions) (*SMTPMailer, error) {
@@ -60,6 +64,7 @@ func NewSMTPMailer(opts MailerOptions) (*SMTPMailer, error) {
 		password:   opts.Password,
 		requireTLS: opts.RequireTLS,
 		timeout:    opts.Timeout,
+		tlsConfig:  opts.TLSConfig,
 	}, nil
 }
 
@@ -91,10 +96,7 @@ func (m *SMTPMailer) Send(ctx context.Context, to, subject, body string) error {
 	defer client.Close()
 
 	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err := client.StartTLS(&tls.Config{
-			ServerName: m.host,
-			MinVersion: tls.VersionTLS12,
-		}); err != nil {
+		if err := client.StartTLS(m.startTLSConfig()); err != nil {
 			return fmt.Errorf("notification: STARTTLS 失败: %w", err)
 		}
 	} else if m.requireTLS {
@@ -130,6 +132,23 @@ func (m *SMTPMailer) Send(ctx context.Context, to, subject, body string) error {
 		return fmt.Errorf("notification: SMTP QUIT 失败: %w", err)
 	}
 	return nil
+}
+
+// startTLSConfig 在默认安全参数上叠加调用方配置；调用方没写的字段
+// 仍按安全默认填充，避免传入 &tls.Config{} 时意外接受低版本或空 ServerName。
+func (m *SMTPMailer) startTLSConfig() *tls.Config {
+	cfg := &tls.Config{ServerName: m.host, MinVersion: tls.VersionTLS12}
+	if m.tlsConfig == nil {
+		return cfg
+	}
+	cfg = m.tlsConfig.Clone()
+	if cfg.ServerName == "" {
+		cfg.ServerName = m.host
+	}
+	if cfg.MinVersion == 0 {
+		cfg.MinVersion = tls.VersionTLS12
+	}
+	return cfg
 }
 
 // buildMessage 生成 RFC 5322 纯文本邮件。主题用 RFC 2047 编码，
