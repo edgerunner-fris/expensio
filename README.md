@@ -136,8 +136,10 @@ Kafka、outbox、邮件、限流 fail-open、连接池）。
 
 本地整栈用 `docker-compose.yml`；Kubernetes 用 `deploy/helm/expensio`，
 Chart 只部署无状态服务，PostgreSQL / Redis / Kafka / Secret / Collector
-由平台提供。`helm lint` 与 `helm template` 已通过，但**尚未在真实集群
-apply**，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+由平台提供。`helm lint`、`helm template` 与 kubeconform 已通过，并在真实
+k3d 集群上完成 `helm upgrade --install --wait` 与行为验收（迁移/建主题 Hook、
+Ingress、NetworkPolicy、RBAC、事件链路）；托管云集群与 Ingress TLS 终止
+尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 目录
 
@@ -161,15 +163,16 @@ docs/           架构、部署、进度与 ADR
 
 ## 已知限制
 
-- 未在真实 Kubernetes 集群 apply；NetworkPolicy / PDB / 多副本行为未实测。
+- 集群验收用的是 k3d（双节点 k3s）与单节点依赖；托管云（EKS/AKS/GKE）、
+  Ingress TLS/cert-manager、PDB 驱逐演练与多可用区未验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
-  Playwright（PR 不跑，本地用 `make e2e`）。
+  Playwright 与真实 k3d 集群验收（PR 不跑，本地用 `make e2e`）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；
   已有账号仍须原密码。没有域名限制、批量邀请与撤销通知。
-- 公钥轮换由「逗号分隔多公钥」支持，单元测试覆盖新旧 `kid` 并存；尚未在
-  真实集群做一次在线轮换演练。
-- STARTTLS、证书校验与 AUTH PLAIN 已用本地 TLS SMTP 服务实测；真实供应商
-  的地址、凭据与证书链尚未接入（本地日常收信用明文 Mailpit）。
+- 公钥在线轮换已在 Compose 真实栈完成四阶段演练（加新公钥 → 切私钥 →
+  移除旧公钥 → 回退）；托管集群上仍按 `docs/DEPLOYMENT.md` 的步骤执行。
+- STARTTLS、证书校验与 AUTH PLAIN 已对真实第三方 SMTP 服务实测，并用 IMAP
+  确认收件；生产供应商的配额、退信处理与 SPF/DKIM 仍属运维配置。
 - 单地域部署，没有跨集群复制与故障转移。
 
 这些限制与对应风险编号、处置状态都记录在

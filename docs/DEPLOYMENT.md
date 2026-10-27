@@ -1,10 +1,14 @@
 # 部署
 
-本文只描述当前真实可执行的路径。K8s 部分在本地做过 `helm lint`、
-`helm template` 与 kubeconform（K8s 1.31 schema，24/24 valid）验证，
-但**尚未在真实集群上 apply**；schema 合法不等于 RBAC、NetworkPolicy 与
-Ingress 的实际行为正确。这项状态记录在 `docs/PROGRESS.md` 的风险清单里，
-不在这里含糊带过。
+本文只描述当前真实可执行的路径。K8s 部分除 `helm lint`、`helm template`
+与 kubeconform（K8s 1.31 schema，24/24 valid）外，已在真实 k3d 集群
+（k3s v1.31.5，双节点）完成 `helm upgrade --install --wait` 与行为验收：
+迁移/建主题 Hook 实际执行、Ingress 可达、NetworkPolicy 放行与拒绝符合预期、
+ServiceAccount 无 API 权限、事件链路在集群内跑通。验收清单与 smoke 脚本
+见 [`deploy/cluster/acceptance/`](../deploy/cluster/acceptance/)，实测输出见
+`docs/PROGRESS.md` 的 M14。托管云集群与 Ingress TLS 终止仍未验证，见文末
+「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险清单里，不在这里
+含糊带过。
 
 ## 本地整栈（Docker Compose）
 
@@ -107,9 +111,24 @@ kubectl -n expensio create secret generic expensio-secrets \
 SMTP 密码是可选键：没有认证的 SMTP 可以不提供，但
 `notification.emailEnabled=true` 时必须保证 SMTP 可用。
 
-轮换公钥时把新旧两个公钥用逗号拼进 `EXPENSIO_JWT_PUBLIC_KEYS`，等所有
-Pod 重启完成后再切私钥，最后移除旧公钥；`kid` 是公钥的 RFC 7638 指纹，
-验签端按 `kid` 选钥，不依赖顺序。
+轮换公钥按「验签端先行、签发端后动、旧钥最后退役」的顺序做，`kid` 是公钥的
+RFC 7638 指纹，验签端按 `kid` 选钥，不依赖顺序：
+
+1. 生成新密钥对，把**新公钥追加**到所有服务的 `EXPENSIO_JWT_PUBLIC_KEYS`
+   （identity 也要，它用同一份列表生成 JWKS），滚动重启除 identity 外的五个
+   服务。此时旧令牌仍全部可用，`/.well-known/jwks.json` 不变。
+2. 把 identity 的 `EXPENSIO_JWT_PRIVATE_KEY` 换成新私钥，同时保留
+   `PUBLIC_KEYS=A,B`，重启 identity。此后新签发的令牌用新 `kid`，JWKS 同时
+   公布新旧公钥，**新旧令牌并存**。
+3. 观察至少一个 access token TTL（默认 15 分钟）后，把 `PUBLIC_KEYS` 收窄为
+   只剩新公钥，滚动重启全部六个服务。旧令牌立即 401。
+4. 回退方案：任一步出问题，把 `PUBLIC_KEYS` 改回包含旧公钥、私钥改回旧值并
+   重启即可；旧私钥在步骤 3 完成前不要销毁。
+
+M14 在 Compose 真实栈上按上述四阶段实测（含回退），见 `docs/PROGRESS.md`。
+集群里同样的步骤用 `kubectl rollout status` 代替 `docker compose up`。
+注意 Helm 安装时 `EXPENSIO_JWT_PUBLIC_KEYS` 来自 Secret，轮换要改 Secret 并
+触发一次滚动（`kubectl rollout restart deploy/...`）。
 
 ### 2. 覆盖 values
 
@@ -199,6 +218,31 @@ kubectl -n expensio port-forward svc/expensio-web 8086:8086
 curl -fsS http://127.0.0.1:8086/healthz
 ```
 
+## 集群验收（可复现）
+
+`deploy/cluster/acceptance/` 是一套在真实集群上验证 chart 行为的清单与脚本，
+CI 的 `cluster` job 与本地演练共用：
+
+- `deps.yaml`：本地验收用的 PostgreSQL / Redis / Kafka（单节点，仅用于演练，
+  生产必须用托管服务或你的 Operator）；
+- `values.yaml`：指向本地依赖与 `expensio.test` 的覆盖值；
+- `smoke.sh`：断言 7 个 Deployment 就绪与安全上下文、ServiceAccount 无权限、
+  五个库有迁移记录、四个主题已创建、Hook Job 已清理、Ingress `/healthz` 200、
+  注册→邀请→接受→费用→审批→报表的完整链路，以及 NetworkPolicy 的
+  放行/拒绝三种情形；
+- `README.md`：前置条件与本地 k3d 的步骤。
+
+在已有集群上执行：
+
+```bash
+bash deploy/cluster/acceptance/smoke.sh
+# 或指定地址：NAMESPACE=expensio INGRESS_HOST=expensio.test \
+#             BASE_URL=http://127.0.0.1:8080 bash deploy/cluster/acceptance/smoke.sh
+```
+
+脚本末尾打印 `SMOKE_RESULT: PASS` 才算通过；任何一条断言失败都会以
+`SMOKE FAIL: <原因>` 退出。M14 的实测输出见 `docs/PROGRESS.md`。
+
 ## Chart 的安全默认值
 
 - 全部容器 `runAsNonRoot`、UID 10001、`readOnlyRootFilesystem`、
@@ -211,9 +255,10 @@ curl -fsS http://127.0.0.1:8086/healthz
 
 ## 已知限制
 
-- **未在真实集群验证**：本机没有 kind/k3s 或可用集群，`helm template` 只能
-  证明模板可渲染，不能证明 RBAC、NetworkPolicy、Ingress Controller 的实际
-  行为。上集群前必须按上面的验证步骤跑一遍。
+- **只在 k3d 上验证过**：验收集群是 k3d v5.8.3（k3s v1.31.5，双节点）加
+  单节点 PostgreSQL/Redis/Kafka。托管云（EKS/AKS/GKE）、各 CNI 的
+  NetworkPolicy 实现、Ingress TLS 终止与 cert-manager、PDB 驱逐演练均未验证；
+  `deploy/cluster/acceptance/` 提供了可复用的断言，迁移到新环境时应先跑一遍。
 - **出站未做白名单**：NetworkPolicy 只限制入站。数据库/Kafka/SMTP 地址由
   平台提供，写死 CIDR 会让 chart 无法跨环境复用；需要时由集群级策略补足。
 - **HSTS**：web 在 Ingress 终止 TLS 时看不到 `r.TLS`，因此 HSTS 应由

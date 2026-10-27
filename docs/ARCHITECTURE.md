@@ -211,14 +211,15 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M3 | Kafka、outbox、报表读模型 | 完成 |
 | M4 | billing、订阅与支付回调幂等 | 完成 |
 | M5 | 前端、通知 | 完成 |
-| M6 | Dockerfile、K8s、Helm、GitHub Actions | 已完成（本地整栈验收通过；CI 已实测全绿，集群 apply 待验证） |
+| M6 | Dockerfile、K8s、Helm、GitHub Actions | 已完成（本地整栈验收通过；CI 全绿；M14 在 k3d 完成集群安装验收） |
 | M7 | 指标、trace、压测与告警 | 已完成（本地整栈验收通过；生产采样、集群采集待验证） |
 | M8 | 前端包体优化、浏览器级 E2E | 已完成（风险 34/36 关闭） |
 | M9 | 令牌签名迁移到 EdDSA/JWKS | 已完成（风险 17 关闭；HS256 路径已在 M12 删除） |
 | M10 | 成员邀请与一次性接受链接 | 已完成（风险 35 关闭） |
-| M11 | SMTP STARTTLS、证书校验与认证实测 | 已完成（风险 33 协议层关闭；供应商接入待做） |
+| M11 | SMTP STARTTLS、证书校验与认证实测 | 已完成（风险 33 协议层关闭；M14 接入真实供应商） |
 | M12 | 删除 HS256 兼容路径与共享密钥 | 已完成（只接受 EdDSA，配置面已收敛） |
-| M13 | 最终验收：CI 整栈 E2E、kubeconform、界面预览 | 已完成（本地与 CI 实测；集群 apply 仍待验证） |
+| M13 | 最终验收：CI 整栈 E2E、kubeconform、界面预览 | 已完成（本地与 CI 实测；集群验收留给 M14） |
+| M14 | 三项最终验收：真实 SMTP、在线轮换、真实集群 Helm | 已完成（Ethereal 收发实测、四阶段轮换演练、k3d 上 `helm upgrade --install` 与行为断言；托管云/TLS 终止待验证） |
 
 ## ADR
 

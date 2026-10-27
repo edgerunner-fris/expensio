@@ -42,7 +42,10 @@
 k3d cluster create expensio --servers 1 --agents 1 --port 8080:80@loadbalancer --wait
 
 # 2. 构建并导入镜像（tag 与 values 的 images.registry/tag 对应）
+#    七个服务镜像：expensio/{gateway,identity,expense,billing,report,notification,web}:dev
+#    本地若已用 make 构建，可直接 k3d image import 到集群；
 docker build -f Dockerfile.migrate -t expensio/migrate:dev .
+k3d image import expensio/migrate:dev -c expensio
 
 # 3. 创建命名空间、ConfigMap 与 Secret（示例：复用本地 .env 的密钥）
 kubectl create namespace expensio
