@@ -1949,7 +1949,9 @@ $ docker compose --profile app --profile e2e run --rm e2e
 测的是即将部署的那批镜像，不在 runner 上重新构建。
 
 实测 run `40494336695`（commit `556567a`）12 个 job 全部 success，其中
-`浏览器端到端（整栈）` 从 11:16:06Z 到 11:17:54Z（1m48s）。本地同一命令
+`浏览器端到端（整栈）` 从 11:16:06Z 到 11:17:54Z（1m48s）。收尾提交
+`342b1f6` 的 run `40495335477` 同样 12 个 job 全部 success（含 kubeconform
+与修复后的 web 镜像；e2e 11:23:56Z → 11:26:12Z，2m16s）。本地同一命令
 序列的输出见 M12 章节。
 
 ### Helm 渲染结果的 schema 校验
@@ -1985,11 +1987,19 @@ Running 1 test using 1 worker
 `common.not_found`，于是新租户打开账单页会误报错。已改为
 `common.not_found` 并加注释；重新构建 web 镜像后 toast 消失，截图已更新。
 
+### 全量回归
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -p 1 -timeout=40m
+24 个包 ok，FAIL 0 行；EXIT=0
+最慢：identity 81.371s、report 69.320s、expense 15.837s、web 1.114s
+```
+
 ### 结论
 
 - 本地整栈（六个服务 + web + PostgreSQL/Redis/Kafka/MinIO + Mailpit +
-  观测）：健康检查全绿，Playwright 3 passed；
-- CI：12 个 job 全绿，包含整栈浏览器 E2E 与 kubeconform；
+  观测）：健康检查全绿，Playwright 3 passed，`-race -count=5` 全量回归绿；
+- CI：两次 main 运行各 12 个 job 全绿，包含整栈浏览器 E2E 与 kubeconform；
 - 仍未验证：真实集群 apply、真实 SMTP 供应商、公钥在线轮换（见下一步）。
 
 ## 下一步
