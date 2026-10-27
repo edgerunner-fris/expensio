@@ -164,17 +164,14 @@ type Kafka struct {
 
 type JWT struct {
 	Issuer     string        `mapstructure:"issuer"`
-	Secret     string        `mapstructure:"secret"`
 	AccessTTL  time.Duration `mapstructure:"access_ttl"`
 	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
 	// PrivateKey 是 base64 的 Ed25519 私钥（32 字节种子或 64 字节私钥），
 	// 只有 identity 配置。PublicKeys 是逗号分隔的 base64 公钥，
 	// 所有验签方配置；保留多个是为了轮换期同时接受新旧 kid。
+	// 只支持 EdDSA：不接受 HS256 等共享密钥算法。
 	PrivateKey string `mapstructure:"private_key"`
 	PublicKeys string `mapstructure:"public_keys"`
-	// AllowHS256 是迁移开关：为 true 时继续接受旧 HS256 令牌（并要求 Secret
-	// 至少 32 字节）；等所有旧 token 过期后置为 false，即可完全禁用 HMAC。
-	AllowHS256 bool `mapstructure:"allow_hs256"`
 }
 
 // OTel 控制 OTLP 导出。Enabled=false 时进程使用 noop provider，
@@ -276,12 +273,10 @@ func defaults(opts Options) map[string]any {
 		"kafka.brokers": []string{"localhost:29092"},
 
 		"jwt.issuer":      "expensio",
-		"jwt.secret":      "",
 		"jwt.access_ttl":  "15m",
 		"jwt.refresh_ttl": "168h",
 		"jwt.private_key": "",
 		"jwt.public_keys": "",
-		"jwt.allow_hs256": true,
 
 		"otel.enabled":  false,
 		"otel.endpoint": "localhost:4317",
@@ -388,7 +383,6 @@ func (c *Config) validate(opts Options) error {
 	}
 
 	if opts.NeedsJWT {
-		hasEd25519 := c.JWT.PrivateKey != "" || strings.TrimSpace(c.JWT.PublicKeys) != ""
 		if c.JWT.Issuer == "" {
 			errs = append(errs, errors.New("jwt.issuer 不能为空（EXPENSIO_JWT_ISSUER）"))
 		}
@@ -398,19 +392,13 @@ func (c *Config) validate(opts Options) error {
 		if c.JWT.AccessTTL >= c.JWT.RefreshTTL {
 			errs = append(errs, errors.New("jwt.access_ttl 必须小于 jwt.refresh_ttl"))
 		}
-		if opts.NeedsJWTSigner && c.JWT.PrivateKey == "" {
-			errs = append(errs, errors.New("jwt.private_key 不能为空（EXPENSIO_JWT_PRIVATE_KEY）：签发方必须配置 Ed25519 私钥"))
-		}
-		if !hasEd25519 {
-			// 未配置 Ed25519 材料时退回迁移前的纯 HS256；密钥短于 32 字节直接拒绝启动。
-			if len(c.JWT.Secret) < 32 {
-				errs = append(errs, errors.New("jwt.secret 至少需要 32 字节（EXPENSIO_JWT_SECRET），或配置 jwt.public_keys 使用 EdDSA"))
+		if opts.NeedsJWTSigner {
+			if c.JWT.PrivateKey == "" {
+				errs = append(errs, errors.New("jwt.private_key 不能为空（EXPENSIO_JWT_PRIVATE_KEY）：签发方必须配置 Ed25519 私钥"))
 			}
-			if !c.JWT.AllowHS256 {
-				errs = append(errs, errors.New("jwt.allow_hs256=false 但没有配置 Ed25519 公钥：没有任何可用的验签方式"))
-			}
-		} else if c.JWT.AllowHS256 && c.JWT.Secret != "" && len(c.JWT.Secret) < 32 {
-			errs = append(errs, errors.New("jwt.allow_hs256=true 时 jwt.secret 至少需要 32 字节"))
+		} else if strings.TrimSpace(c.JWT.PublicKeys) == "" {
+			// 只验签的服务没有私钥，必须至少配置一个公钥；否则它无法校验任何令牌。
+			errs = append(errs, errors.New("jwt.public_keys 不能为空（EXPENSIO_JWT_PUBLIC_KEYS）：验签方必须配置 Ed25519 公钥"))
 		}
 	}
 
@@ -535,9 +523,9 @@ func (r Redis) String() string {
 }
 
 func (j JWT) String() string {
-	return fmt.Sprintf("JWT{issuer:%s access_ttl:%s refresh_ttl:%s secret:*** ed25519:%t hs256:%t}",
+	return fmt.Sprintf("JWT{issuer:%s access_ttl:%s refresh_ttl:%s ed25519:%t}",
 		j.Issuer, j.AccessTTL, j.RefreshTTL,
-		j.PrivateKey != "" || j.PublicKeys != "", j.AllowHS256)
+		j.PrivateKey != "" || j.PublicKeys != "")
 }
 
 func (m MinIO) String() string {

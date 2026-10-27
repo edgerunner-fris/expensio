@@ -34,10 +34,6 @@ const (
 	testRefreshTTL = 24 * time.Hour
 )
 
-// testJWTSecret 只用于本地测试签发的短期令牌，不连接任何真实环境。
-// 长度 ≥32 字节，因为 TokenIssuer 会拒绝更短的 HMAC 密钥。
-const testJWTSecret = "test-secret-test-secret-test-secret-test-secret-test"
-
 // testInternalToken 只用于测试服务间令牌；生产值来自环境变量 / K8s Secret。
 const testInternalToken = "0123456789abcdef0123456789abcdef"
 
@@ -101,7 +97,7 @@ func newHarness(t *testing.T) *harness {
 	_, signKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	tokens, err := auth.NewTokenIssuer(auth.IssuerConfig{
-		Issuer: testIssuer, PrivateKey: signKey, HS256Secret: testJWTSecret,
+		Issuer: testIssuer, PrivateKey: signKey,
 		AccessTTL: testAccessTTL, RefreshTTL: testRefreshTTL,
 	})
 	require.NoError(t, err)

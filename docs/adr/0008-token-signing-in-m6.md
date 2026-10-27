@@ -84,10 +84,26 @@ M9 完成了迁移，实现位于 `internal/platform/auth`：
 运行期证据（构建、JWKS 响应、登录、E2E、全量回归）记录在
 `docs/PROGRESS.md` 的 M9 章节。
 
+## M12 收尾（2026-10-27）
+
+迁移窗口结束后删除了 HS256 兼容路径，代码只保留 EdDSA：
+
+- `auth.IssuerConfig` 去掉 `HS256Secret`；`TokenIssuer` 不再持有对称密钥，
+  `IssueAccess` 没有私钥直接返回错误，`ParseAccess` 的
+  `WithValidMethods` 只允许 `EdDSA`，HS256 令牌一律校验失败。
+- 配置去掉 `jwt.secret` 与 `jwt.allow_hs256`；验签方必须配置
+  `EXPENSIO_JWT_PUBLIC_KEYS`（否则拒绝启动），签发方必须配置
+  `EXPENSIO_JWT_PRIVATE_KEY`。
+- Compose、Helm、`.env.example` 与 `scripts/env.sh` 同步移除
+  `EXPENSIO_JWT_SECRET` / `EXPENSIO_JWT_ALLOW_HS256`；Helm Secret 不再需要
+  `secretKeys.jwt`。
+- 测试：`TestHS256TokensAreRejected` 用真实 HS256 签名令牌验证被拒；
+  配置测试验证「只给共享密钥」不再能启动；各集成测试 harness 改用
+  临时 Ed25519 私钥签发。
+
 ## 遗留
 
-1. HS256 兼容路径仍在（`allow_hs256` 开关），删除需要等一个 access TTL；
-2. 多公钥并存的轮换演练尚未在真实集群执行；
-3. 尚未有第三方验签方接入（ingress/API 网关仍不验签）；
-4. 公钥分发走 Secret 挂载，没有实现 JWKS 拉取与缓存（服务间已经用同一把
+1. 多公钥并存的轮换演练尚未在真实集群执行（单元测试覆盖新旧 `kid` 并存）；
+2. 尚未有第三方验签方接入（ingress/API 网关仍不验签）；
+3. 公钥分发走 Secret 挂载，没有实现 JWKS 拉取与缓存（服务间已经用同一把
    公钥，静态注入比运行时拉取少一个故障点）。

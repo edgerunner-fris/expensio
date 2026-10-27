@@ -74,25 +74,11 @@ spec:
                   name: {{ $secret }}
                   key: {{ $keys.jwtPublicKeys }}
             {{- if eq $name "identity" }}
-            - name: EXPENSIO_JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secret }}
-                  key: {{ $keys.jwt }}
-                  # 迁移期可选：不提供时 identity 只签发/接受 EdDSA。
-                  optional: true
             - name: EXPENSIO_JWT_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $secret }}
                   key: {{ $keys.jwtPrivateKey }}
-            # 迁移期：identity 继续接受旧的 HS256 令牌，等一个 access TTL 后改为 false。
-            - name: EXPENSIO_JWT_ALLOW_HS256
-              value: "true"
-            {{- else }}
-            # 验签方不持有 HMAC 密钥，也不接受 HS256——攻破单个服务无法伪造令牌。
-            - name: EXPENSIO_JWT_ALLOW_HS256
-              value: "false"
             {{- end }}
             {{- end }}
             {{- if $svc.billingWebhook }}

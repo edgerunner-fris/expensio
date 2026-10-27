@@ -52,9 +52,10 @@ GitHub Actions、golang-migrate；testify、testcontainers-go、k6、Playwright�
   消费端手动提交位点、按 `(tenant_id, consumer, event_id)` 幂等，
   永久错误进 DLQ。分区键固定为 `tenant_id`。
 - **认证**：argon2id 密码；access token 为 EdDSA（Ed25519）JWT（短 TTL），
-  identity 用私钥签发并公布 JWKS，其余服务只挂公钥验签；
+  identity 用私钥签发并公布 JWKS，其余服务只挂公钥验签；只接受 EdDSA，
+  不存在共享密钥（M12 已删除迁移期 HS256 路径，见
+  [ADR-0008](docs/adr/0008-token-signing-in-m6.md)）；
   refresh token 只存 SHA-256 摘要、条件轮换、重放整族撤销。
-  迁移期 identity 可额外接受旧 HS256 令牌，见 [ADR-0008](docs/adr/0008-token-signing-in-m6.md)。
 - **成员邀请**：owner/admin 生成一次性邀请链接（数据库只存 SHA-256 摘要，
   默认 7 天过期，重复邀请会撤销旧链接），接受时必须验证密码——新邮箱设置
   密码，已有账号输入原密码。邮件经 notification 发件箱投递，创建响应同时
@@ -150,8 +151,8 @@ docs/           架构、部署、进度与 ADR
 - CI 已在 GitHub runner 上全绿，但不运行浏览器级 E2E（需要先起整栈）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；
   已有账号仍须原密码。没有域名限制、批量邀请与撤销通知。
-- 迁移期的 HS256 兼容路径尚未删除：identity 仍接受旧令牌，需等一个
-  access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256` 并移除共享密钥。
+- 公钥轮换由「逗号分隔多公钥」支持，单元测试覆盖新旧 `kid` 并存；尚未在
+  真实集群做一次在线轮换演练。
 - STARTTLS、证书校验与 AUTH PLAIN 已用本地 TLS SMTP 服务实测；真实供应商
   的地址、凭据与证书链尚未接入（本地日常收信用明文 Mailpit）。
 - 单地域部署，没有跨集群复制与故障转移。

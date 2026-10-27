@@ -16,9 +16,6 @@ func (j JWT) AuthIssuer() (*auth.TokenIssuer, error) {
 		AccessTTL:  j.AccessTTL,
 		RefreshTTL: j.RefreshTTL,
 	}
-	if j.AllowHS256 && j.Secret != "" {
-		cfg.HS256Secret = j.Secret
-	}
 	if j.PrivateKey != "" {
 		key, err := auth.ParsePrivateKey(j.PrivateKey)
 		if err != nil {

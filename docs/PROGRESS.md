@@ -487,7 +487,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 14 | 角色大小写两套（DB 小写 / 上下文大写） | **已解决** | 统一为小写，`tenantctx.Role` 同时承载 `Valid()` 与 `AtLeast()`；避免每层各转一次、某条路径漏转 |
 | 15 | gin 默认信任 `X-Forwarded-For`，审计 IP 可伪造 | **已解决（2026-10-27 补配置）** | `server.New` 默认 `SetTrustedProxies(nil)`；新增 `EXPENSIO_HTTP_TRUSTED_PROXIES`（逗号分隔 IP / CIDR，拒绝 0 位前缀），只有来自可信代理的连接才解析 `X-Forwarded-For`。单测覆盖"默认忽略 / 可信网段采信"两条路径 |
 | 16 | Windows 上无法投递 SIGTERM 验证优雅关闭 | **已解决** | WSL2 实测 billing：SIGTERM 后日志依次出现 draining → stopped → service stopped，进程退出码 0。Windows `Stop-Process` 仍是 TerminateProcess，不作为验证手段 |
-| 17 | access token 用 HS256，六个服务共享同一把密钥 | **已解决（M9 迁移到 EdDSA/JWKS）** | M6–M8 期间接受该取舍（同信任域、无第三方验签方）。M9 完成迁移：identity 用 Ed25519 私钥签发，header 带 RFC 7638 指纹作 `kid`；其余五个服务只挂公钥，`EXPENSIO_JWT_ALLOW_HS256=false` 且不再持有 HMAC 密钥，攻破任一验签服务也无法伪造令牌。identity 暴露 `/.well-known/jwks.json`。实测：JWKS `kty=OKP/crv=Ed25519/alg=EdDSA/use=sig`、`x` 32 字节且无 `d`；登录令牌 `alg=EdDSA` 且带 `kid`，expense/identity 均 200；用旧 HS256 密钥伪造的令牌被网关 401。见 ADR-0008。**遗留**：identity 的迁移期 HS256 兼容路径要等一个 access TTL 后再删；多公钥轮换未在真实环境演练 |
+| 17 | access token 用 HS256，六个服务共享同一把密钥 | **已解决（M9 迁移，M12 删除兼容路径）** | M6–M8 期间接受该取舍（同信任域、无第三方验签方）。M9 完成迁移：identity 用 Ed25519 私钥签发，header 带 RFC 7638 指纹作 `kid`；其余五个服务只挂公钥，不再持有 HMAC 密钥。identity 暴露 `/.well-known/jwks.json`。实测：JWKS `kty=OKP/crv=Ed25519/alg=EdDSA/use=sig`、`x` 32 字节且无 `d`；登录令牌 `alg=EdDSA` 且带 `kid`，expense/identity 均 200；用旧 HS256 密钥伪造的令牌被网关 401。见 ADR-0008。**M12 收尾**：删除 `HS256Secret`、`jwt.secret`、`jwt.allow_hs256` 与 compose/Helm 中的共享密钥，解析器只允许 `EdDSA`，`TestHS256TokensAreRejected` 实测 HS256 令牌被拒。遗留：多公钥轮换未在真实集群演练 |
 | 18 | 限流器故障时放行（fail-open） | **已解决（指标+告警已落地）** | 运行期 Redis 抖动时宁可短期超额，也不让全站 5xx；但启动时连不上 Redis 直接失败，避免以"无限流"状态上线。M7 新增 `expensio.gateway.rate_limit.decisions`，按 `scope`（tenant/ip）与 `outcome`（allowed/denied/error）计数，并配 `ExpensioRateLimiterFailOpen` 告警（error 速率 >0 持续 5 分钟）。压测实测 344 次决策全部 allowed、0 denied、0 error，说明指标在正常路径也确实在采集 |
 | 19 | 网关重试会不会把写请求做两遍 | **已解决** | 只对 GET/HEAD/OPTIONS、无 body、且错误属于"连接未建立/未送达"（ECONNREFUSED、DNS 等）的请求重试一次；超时与取消一律不重试，因为请求可能已经到达下游 |
 | 20 | 网关是单点，且到下游走集群内明文 HTTP | **待验证（清单已交付）** | Helm 已提供多副本（`replicas > 1` 时自动生成 PDB）、默认拒绝入站的 NetworkPolicy（只放行 ingress-controller 与同 release）与非 root/只读根文件系统。M6 评估后不引入 mTLS：服务同处一个集群信任域，边界由 NetworkPolicy 与 Service 账户收敛；若未来跨 namespace/跨集群调用再评估。`helm lint`/`helm template` 通过，但**没有真集群可 apply**，多副本行为未实测 |
@@ -1684,6 +1684,7 @@ Compose 侧用 `docker compose --profile app config` 验证：identity 独有
 
 - identity 的 HS256 兼容路径仍在（`allow_hs256=true` + 旧 secret），要等一个
   access TTL 后关闭并删除该密钥与代码分支；
+  **M12 已删除该路径，见下文 M12 章节**；
 - 多公钥并存的轮换演练未做（配置与 `kid` 选择已由单测覆盖）；
 - JWKS 由 identity 直接提供，网关不代理 `/.well-known/jwks.json`；
 - 风险 33（真实 SMTP）、风险 20/26（真实集群、CI runner）状态不变。
@@ -1725,6 +1726,9 @@ ok  	github.com/edgerunner-fris/expensio/internal/notification	4.416s
 
 $ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -p 1
 24 个包 ok；EXIT=0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -p 1 -timeout=40m
+24 个包 ok，FAIL 0 行；EXIT=0（report 59.014s）
 
 $ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -p 1 -timeout=30m
 24 个包 ok；EXIT=0（identity 53.176s、report 53.450s）
@@ -1883,12 +1887,62 @@ goroutine 正常退出，不留悬挂连接。
 设为 `true`（Helm 对应 `notification.smtpAddr` / `smtpFrom` / `smtpUsername` /
 `smtpUseTLS` 与 Secret 里的 `smtpPassword`）。
 
+## M12 完成情况：删除 HS256 兼容路径
+
+M9 迁移到 EdDSA/JWKS 时保留了迁移期的 HS256 开关，`jwt.allow_hs256`
+的默认值甚至是 `true`。这个项目从未签发给旧版 HS256 令牌的用户，
+"迁移窗口"没有实际对象，只留下一把共享密钥和一条对称验签分支——
+任何拿到该密钥的服务都能伪造任意租户的令牌。M12 把这条路径删除。
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 校验器 | 完成 | `IssuerConfig` 删除 `HS256Secret`；`ParseAccess` 的 `WithValidMethods` 只允许 `EdDSA`，HS256 令牌在算法检查处即失败 |
+| 签发器 | 完成 | 没有 `PrivateKey` 时 `IssueAccess` 直接报错，不再退回 HMAC |
+| 配置 | 完成 | 删除 `jwt.secret` / `jwt.allow_hs256`；验签方缺少 `jwt.public_keys` 拒绝启动，签发方缺少 `jwt.private_key` 拒绝启动 |
+| 部署面 | 完成 | Compose、Helm、`.env.example`、`scripts/env.sh` 移除 `EXPENSIO_JWT_SECRET` / `EXPENSIO_JWT_ALLOW_HS256`；Helm `secretKeys` 删除 `jwt` 键 |
+| 测试 | 完成 | `TestHS256TokensAreRejected` 用真实 HS256 签名令牌验证被拒；`TestMissingEd25519KeyMaterialIsRejected` 验证只设置共享密钥无法启动；五个集成 harness 改为临时 Ed25519 私钥 |
+
+```text
+$ go test ./internal/platform/auth/ ./internal/platform/config/ -race -count=1
+ok  	github.com/edgerunner-fris/expensio/internal/platform/auth	1.031s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/config	1.033s
+EXIT=0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -p 1
+24 个包 ok；EXIT=0
+
+$ docker run --rm -v .../deploy/helm/expensio:/chart alpine/helm lint /chart
+1 chart(s) linted, 0 chart(s) failed
+
+$ docker compose --profile app config -q
+COMPOSE_EXIT=0
+
+$ docker compose --profile app up -d --wait --wait-timeout 420
+migrate / topics 退出 0；Postgres、Redis、Kafka、MinIO、六个服务与 web 全部 Healthy
+
+$ docker compose --profile app --profile e2e run --rm e2e
+  ✓  1 [chromium] › tests/expense-flow.spec.ts:56:1 › 未登录访问受保护路由会跳到登录页 (477ms)
+  ✓  2 [chromium] › tests/expense-flow.spec.ts:62:1 › 注册 → 建单 → 提交 → 报表 → access token 失效后自动刷新 (3.9s)
+  ✓  3 [chromium] › tests/invite-flow.spec.ts:39:1 › 邀请成员 → 邮件送达 → 公开页接受 → 新成员可登录 (5.4s)
+  3 passed (10.7s)
+```
+
+整栈起来后还做了一次线上伪造验证：用 `.env` 里遗留的旧共享密钥按
+`alg=HS256` 自签一个 claims 齐全的 access token，打
+`GET /api/v1/expenses?limit=1`，网关返回 `401 auth.unauthorized`。
+这证明新镜像里既没有该密钥，也没有对称验签分支——不是"代码里删了但
+配置还在"。
+
+升级提示：删除后旧的 HS256 access token 立即失效；access TTL 只有 15 分钟，
+客户端用 refresh token 换新令牌即可（新令牌一定是 EdDSA），不需要强制
+重新登录。仓库自建以来没有对外签发过 HS256 令牌，因此这里只影响假想的
+迁移期部署。
+
 ## 下一步
 
 1. 接入真实邮件供应商时复核地址、凭据、证书链与 `RequireTLS`（协议层已由
    M11 覆盖）；
-2. EdDSA 收尾：一个 access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256`、删除
-   HS256 兼容代码与共享密钥；补一次公钥轮换演练；
+2. 公钥轮换演练：按 `docs/DEPLOYMENT.md` 的双公钥步骤在真实环境切换一次；
 3. 风险 20：在真实集群 apply Helm（含按集群 Pod CIDR 填
    `http.trustedProxies`，见风险 37）；浏览器级 E2E 尚未接入 CI；
 4. 最终验收：演示脚本、README 截图与全景回归。

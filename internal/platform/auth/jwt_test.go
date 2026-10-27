@@ -17,8 +17,6 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
 
-const testHS256Secret = "test-hs256-secret-at-least-32-bytes!"
-
 func newSigningKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -101,8 +99,8 @@ func TestUnknownKidIsRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "校验失败")
 }
 
-// 未配置 HS256 密钥时，即便攻击者知道某个字符串也不能用 HS256 伪造。
-func TestHS256RejectedWhenDisabled(t *testing.T) {
+// HS256 已从代码中移除：即使令牌用某个 32 字节密钥签名，也没有共享密钥可验。
+func TestHS256TokensAreRejected(t *testing.T) {
 	priv := newSigningKey(t)
 	issuer := newIssuer(t, IssuerConfig{PrivateKey: priv})
 
@@ -110,24 +108,6 @@ func TestHS256RejectedWhenDisabled(t *testing.T) {
 	_, err := issuer.ParseAccess(forged)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "校验失败")
-}
-
-// 迁移期：新的 EdDSA 令牌与旧的 HS256 令牌同时可用；关掉开关后 HS256 立即失效。
-func TestHS256AcceptedOnlyDuringMigration(t *testing.T) {
-	priv := newSigningKey(t)
-
-	migrating := newIssuer(t, IssuerConfig{PrivateKey: priv, HS256Secret: testHS256Secret})
-	legacy := signHS256(t, testHS256Secret, time.Now().Add(time.Hour))
-	_, err := migrating.ParseAccess(legacy)
-	require.NoError(t, err)
-
-	// 同一个签发器仍应优先签发 EdDSA。
-	newToken, _, _, _ := issueClaimSet(t, migrating)
-	assert.Equal(t, "EdDSA", decodeHeader(t, newToken)["alg"])
-
-	afterMigration := newIssuer(t, IssuerConfig{PrivateKey: priv})
-	_, err = afterMigration.ParseAccess(legacy)
-	assert.Error(t, err)
 }
 
 // 篡改载荷会让签名失效，即使 kid 正确。
@@ -228,14 +208,14 @@ func TestParsePublicKeysAcceptsStandardAndURLBase64(t *testing.T) {
 }
 
 func TestConfigRejectsMissingSigningMaterial(t *testing.T) {
-	_, err := NewTokenIssuer(IssuerConfig{Issuer: "expensio", HS256Secret: "short"})
-	assert.Error(t, err)
+	_, err := NewTokenIssuer(IssuerConfig{Issuer: "expensio", AccessTTL: time.Hour, RefreshTTL: 2 * time.Hour})
+	assert.Error(t, err, "没有私钥也没有公钥时应拒绝构建")
 
 	_, err = NewTokenIssuer(IssuerConfig{Issuer: ""})
 	assert.Error(t, err)
 
 	_, err = NewTokenIssuer(IssuerConfig{
-		Issuer: "expensio", AccessTTL: time.Hour, RefreshTTL: time.Minute,
+		Issuer: "expensio", PrivateKey: newSigningKey(t), AccessTTL: time.Hour, RefreshTTL: time.Minute,
 	})
 	assert.Error(t, err)
 }

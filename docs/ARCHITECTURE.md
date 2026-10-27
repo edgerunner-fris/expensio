@@ -72,9 +72,9 @@ Expensio 是一个多租户 B2B 费用管理平台：员工提交费用单，管
   issuer/audience 固定为 `expensio-api`。只有 identity 持有私钥并签发；
   其余五个服务只挂公钥验签，identity 通过 `/.well-known/jwks.json` 公布
   JWKS（`kid` = RFC 7638 指纹）。验签端用 `jwt.WithValidMethods` 锁定算法，
-  拒绝 `alg=none` 与 RS/HS 混淆。
-- 迁移期开关 `EXPENSIO_JWT_ALLOW_HS256`：identity 为 `true` 时额外接受旧
-  HS256 令牌；五个验签服务为 `false` 且不持有 HMAC 密钥。详见 ADR-0008。
+  拒绝 `alg=none` 与 RS/HS 混淆。只接受 EdDSA：M12 删除了迁移期的
+  HS256 兼容路径与共享密钥配置（`EXPENSIO_JWT_SECRET` /
+  `EXPENSIO_JWT_ALLOW_HS256`），不存在对称回退。历史与迁移步骤见 ADR-0008。
 - refresh token：32 字节随机值，仅存 SHA-256 摘要；刷新时条件轮换，
   旧令牌再次出现视为重放，整族撤销。
 - 角色：`owner > admin > member > viewer`。
@@ -214,9 +214,10 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M6 | Dockerfile、K8s、Helm、GitHub Actions | 已完成（本地整栈验收通过；CI 已实测全绿，集群 apply 待验证） |
 | M7 | 指标、trace、压测与告警 | 已完成（本地整栈验收通过；生产采样、集群采集待验证） |
 | M8 | 前端包体优化、浏览器级 E2E | 已完成（风险 34/36 关闭） |
-| M9 | 令牌签名迁移到 EdDSA/JWKS | 已完成（风险 17 关闭；HS256 兼容路径与轮换演练待收尾） |
+| M9 | 令牌签名迁移到 EdDSA/JWKS | 已完成（风险 17 关闭；HS256 路径已在 M12 删除） |
 | M10 | 成员邀请与一次性接受链接 | 已完成（风险 35 关闭） |
 | M11 | SMTP STARTTLS、证书校验与认证实测 | 已完成（风险 33 协议层关闭；供应商接入待做） |
+| M12 | 删除 HS256 兼容路径与共享密钥 | 已完成（只接受 EdDSA，配置面已收敛） |
 
 ## ADR
 

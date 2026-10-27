@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,7 +31,6 @@ import (
 )
 
 const (
-	e2eJWTSecret    = "e2e-report-secret-at-least-32-bytes!"
 	e2eConsumerName = "report-e2e"
 	e2eGroupID      = "report-e2e-group"
 )
@@ -264,8 +265,10 @@ func TestExpenseEventsReachReportSummary(t *testing.T) {
 
 	assert.Equal(t, 5, processedCount(t, reportDB, tenantID), "每个事件只应被消费一次")
 
+	_, signKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 	issuer, err := auth.NewTokenIssuer(auth.IssuerConfig{
-		Issuer: "expensio-e2e", HS256Secret: e2eJWTSecret,
+		Issuer: "expensio-e2e", PrivateKey: signKey,
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 	})
 	require.NoError(t, err)

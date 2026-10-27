@@ -107,7 +107,6 @@ cp .env.example .env
 db_app=$(rand_hex)
 db_migrator=$(rand_hex)
 postgres_pw=$(rand_hex)
-jwt_secret=$(rand_hex)
 read -r jwt_private jwt_public <<<"$(gen_ed25519)"
 billing_secret=$(rand_hex)
 internal_token=$(rand_hex)
@@ -120,7 +119,6 @@ set_kv EXPENSIO_DB_PASSWORD "$db_app"
 set_kv EXPENSIO_DB_APP_PASSWORD "$db_app"
 set_kv EXPENSIO_DB_MIGRATOR_PASSWORD "$db_migrator"
 set_kv POSTGRES_PASSWORD "$postgres_pw"
-set_kv EXPENSIO_JWT_SECRET "$jwt_secret"
 set_kv EXPENSIO_JWT_PRIVATE_KEY "$jwt_private"
 set_kv EXPENSIO_JWT_PUBLIC_KEYS "$jwt_public"
 set_kv EXPENSIO_BILLING_WEBHOOK_SECRET "$billing_secret"

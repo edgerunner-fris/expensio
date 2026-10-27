@@ -2,6 +2,8 @@ package billing
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +20,6 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
-
-const testJWTSecret = "billing-test-secret-at-least-32-bytes!"
 
 const (
 	testWebhookSecret   = "billing-test-webhook-secret-32-bytes!!"
@@ -39,8 +39,10 @@ type envelope struct {
 func newBillingHTTPTestServer(t *testing.T, database *db.DB) (*gin.Engine, *auth.TokenIssuer) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	_, signKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 	issuer, err := auth.NewTokenIssuer(auth.IssuerConfig{
-		Issuer: "expensio-test", HS256Secret: testJWTSecret,
+		Issuer: "expensio-test", PrivateKey: signKey,
 		AccessTTL: 15 * time.Minute, RefreshTTL: 24 * time.Hour,
 	})
 	require.NoError(t, err)

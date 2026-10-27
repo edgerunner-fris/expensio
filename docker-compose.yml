@@ -365,11 +365,9 @@ services:
       EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
       EXPENSIO_DB_SSLMODE: disable
       EXPENSIO_JWT_ISSUER: expensio
-      # identity 是唯一持有私钥的服务；迁移期保留 HS256 密钥以接受旧令牌。
-      EXPENSIO_JWT_SECRET: ${EXPENSIO_JWT_SECRET:?请先执行 make env 生成 .env}
+      # identity 是唯一持有私钥的服务；其余服务只挂公钥验签。
       EXPENSIO_JWT_PRIVATE_KEY: ${EXPENSIO_JWT_PRIVATE_KEY:?请先执行 make env 生成 Ed25519 密钥}
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "true"
       EXPENSIO_NOTIFICATION_INTERNAL_TOKEN: ${EXPENSIO_NOTIFICATION_INTERNAL_TOKEN:?请先执行 make env 生成 .env}
       # 邀请邮件走 notification 的内部接口；identity 不直接连 SMTP。
       EXPENSIO_NOTIFICATION_SERVICE_URL: http://notification:8085
@@ -407,7 +405,6 @@ services:
       EXPENSIO_JWT_ISSUER: expensio
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "false"
       EXPENSIO_KAFKA_BROKERS: kafka:9092
     depends_on:
       migrate:
@@ -441,7 +438,6 @@ services:
       EXPENSIO_JWT_ISSUER: expensio
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "false"
       EXPENSIO_KAFKA_BROKERS: kafka:9092
       EXPENSIO_BILLING_WEBHOOK_PROVIDER: mockpay
       EXPENSIO_BILLING_WEBHOOK_SECRET: ${EXPENSIO_BILLING_WEBHOOK_SECRET:?请先执行 make env 生成 .env}
@@ -477,7 +473,6 @@ services:
       EXPENSIO_JWT_ISSUER: expensio
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "false"
       EXPENSIO_KAFKA_BROKERS: kafka:9092
     depends_on:
       migrate:
@@ -511,7 +506,6 @@ services:
       EXPENSIO_JWT_ISSUER: expensio
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "false"
       EXPENSIO_KAFKA_BROKERS: kafka:9092
       EXPENSIO_NOTIFICATION_INTERNAL_TOKEN: ${EXPENSIO_NOTIFICATION_INTERNAL_TOKEN:?请先执行 make env 生成 .env}
       EXPENSIO_NOTIFICATION_IDENTITY_URL: http://identity:8081
@@ -548,7 +542,6 @@ services:
       EXPENSIO_JWT_ISSUER: expensio
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
-      EXPENSIO_JWT_ALLOW_HS256: "false"
       EXPENSIO_UPSTREAMS_IDENTITY: http://identity:8081
       EXPENSIO_UPSTREAMS_EXPENSE: http://expense:8082
       EXPENSIO_UPSTREAMS_BILLING: http://billing:8083

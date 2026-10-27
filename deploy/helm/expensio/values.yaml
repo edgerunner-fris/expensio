@@ -22,7 +22,6 @@ imagePullSecrets: []
 # 这是有意的：宁可起不来，也不要带着空密钥提供服务。
 existingSecret: expensio-secrets
 secretKeys:
-  jwt: EXPENSIO_JWT_SECRET
   # identity 用私钥签发；其余服务只挂公钥验签。公钥是公开信息，
   # 但仍放在 Secret 里是为了与现有密钥分发流程保持一致。
   jwtPrivateKey: EXPENSIO_JWT_PRIVATE_KEY

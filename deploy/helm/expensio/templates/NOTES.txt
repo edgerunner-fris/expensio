@@ -7,8 +7,7 @@ Expensio 已部署到命名空间 {{ .Release.Namespace }}。
            {{ .Values.secretKeys.dbAppPassword }}、
            {{ .Values.secretKeys.dbMigratorPassword }}、{{ .Values.secretKeys.billingWebhook }}、
            {{ .Values.secretKeys.internalToken }}
-   可选键：{{ .Values.secretKeys.jwt }}（迁移期保留，identity 在一个 access TTL 内继续接受 HS256 旧令牌）、
-           {{ .Values.secretKeys.smtpPassword }}（SMTP 需要认证时提供）
+   可选键：{{ .Values.secretKeys.smtpPassword }}（SMTP 需要认证时提供）
 
    密钥格式：{{ .Values.secretKeys.jwtPrivateKey }} 是 Ed25519 私钥种子（32 字节）的 base64，
    {{ .Values.secretKeys.jwtPublicKeys }} 是公钥（32 字节）的 base64，多个公钥用逗号分隔以支持轮换。

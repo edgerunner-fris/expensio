@@ -99,10 +99,10 @@ kubectl -n expensio create secret generic expensio-secrets \
   --from-literal=EXPENSIO_NOTIFICATION_SMTP_PASSWORD='...'
 ```
 
-必需键见 `values.yaml` 的 `secretKeys`。`EXPENSIO_JWT_SECRET`（HS256）在
-迁移期是可选的：提供它时 identity 会同时接受旧的 HS256 令牌，其余服务
-只接受 EdDSA 且不持有 HMAC 密钥；一个 access TTL 之后可以移除该键。
-SMTP 密码同样是可选键：没有认证的 SMTP 可以不提供，但
+必需键见 `values.yaml` 的 `secretKeys`。JWT 只支持 EdDSA：identity 需要
+`EXPENSIO_JWT_PRIVATE_KEY`，其余服务需要 `EXPENSIO_JWT_PUBLIC_KEYS`；
+不存在 `EXPENSIO_JWT_SECRET` 或 HS256 开关（M12 已删除）。
+SMTP 密码是可选键：没有认证的 SMTP 可以不提供，但
 `notification.emailEnabled=true` 时必须保证 SMTP 可用。
 
 轮换公钥时把新旧两个公钥用逗号拼进 `EXPENSIO_JWT_PUBLIC_KEYS`，等所有

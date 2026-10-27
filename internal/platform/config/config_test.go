@@ -67,8 +67,9 @@ func TestMissingRequiredDBNameIsReported(t *testing.T) {
 	assert.Contains(t, err.Error(), "EXPENSIO_DB_NAME")
 }
 
-func TestShortJWTSecretIsRejected(t *testing.T) {
-	t.Setenv("EXPENSIO_JWT_SECRET", "too-short")
+func TestMissingEd25519KeyMaterialIsRejected(t *testing.T) {
+	// HS256 共享密钥已移除：只设置 EXPENSIO_JWT_SECRET 不再能启动验签服务。
+	t.Setenv("EXPENSIO_JWT_SECRET", strings.Repeat("s", 40))
 
 	_, err := config.Load(config.Options{
 		Service:     "gateway",
@@ -76,7 +77,7 @@ func TestShortJWTSecretIsRejected(t *testing.T) {
 		NeedsJWT:    true,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "EXPENSIO_JWT_SECRET")
+	assert.Contains(t, err.Error(), "EXPENSIO_JWT_PUBLIC_KEYS")
 }
 
 func TestValidationAggregatesAllProblems(t *testing.T) {
@@ -92,7 +93,7 @@ func TestValidationAggregatesAllProblems(t *testing.T) {
 
 	msg := err.Error()
 	assert.Contains(t, msg, "EXPENSIO_DB_NAME")
-	assert.Contains(t, msg, "EXPENSIO_JWT_SECRET")
+	assert.Contains(t, msg, "EXPENSIO_JWT_PUBLIC_KEYS")
 	assert.Contains(t, msg, "EXPENSIO_BILLING_WEBHOOK_SECRET")
 }
 
@@ -178,14 +179,12 @@ func TestStringRedactsSecrets(t *testing.T) {
 	})
 	require.NoError(t, err)
 	cfg.DB.Password = "super-secret-password"
-	cfg.JWT.Secret = "super-secret-jwt"
 	cfg.Billing.WebhookSecret = "super-secret-webhook"
 	cfg.Notify.InternalToken = "super-secret-internal"
 	cfg.Notify.SMTPPassword = "super-secret-smtp"
 
 	rendered := fmt.Sprintf("%v", *cfg)
 	assert.NotContains(t, rendered, "super-secret-password")
-	assert.NotContains(t, rendered, "super-secret-jwt")
 	assert.NotContains(t, rendered, "super-secret-webhook")
 	assert.NotContains(t, rendered, "super-secret-internal")
 	assert.NotContains(t, rendered, "super-secret-smtp")
@@ -193,9 +192,7 @@ func TestStringRedactsSecrets(t *testing.T) {
 }
 
 func TestIdentityRequiresEd25519PrivateKey(t *testing.T) {
-	// 即使有合法的 HS256 密钥，签发方也必须配置私钥：否则它会退回 HMAC 签名，
-	// 迁移永远无法完成。
-	t.Setenv("EXPENSIO_JWT_SECRET", strings.Repeat("s", 40))
+	// 签发方必须配置私钥；共享密钥已从配置结构中移除，没有回退路径。
 	_, err := config.Load(config.Options{
 		Service:        "identity",
 		DefaultAddr:    ":8081",
@@ -210,14 +207,13 @@ func TestEd25519PublicKeysSatisfyJWTValidationWithoutSecret(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	t.Setenv("EXPENSIO_JWT_PUBLIC_KEYS", base64.StdEncoding.EncodeToString(pub))
-	t.Setenv("EXPENSIO_JWT_ALLOW_HS256", "false")
 
 	cfg, err := config.Load(config.Options{
 		Service:     "gateway",
 		DefaultAddr: ":8080",
 		NeedsJWT:    true,
 	})
-	require.NoError(t, err, "不接受 HS256、没有共享密钥，只靠公钥也应能启动")
+	require.NoError(t, err, "没有共享密钥，只靠公钥也应能启动")
 
 	verifier, err := cfg.JWT.AuthIssuer()
 	require.NoError(t, err)
@@ -267,14 +263,23 @@ func TestTrustedProxyListRejectsUnsafeEntries(t *testing.T) {
 	}
 }
 
-func TestShortHS256SecretStillRejectedWhenEnabled(t *testing.T) {
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+func TestIdentityWithPrivateKeyDoesNotNeedPublicKeys(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	t.Setenv("EXPENSIO_JWT_PUBLIC_KEYS", base64.StdEncoding.EncodeToString(pub))
-	t.Setenv("EXPENSIO_JWT_SECRET", "short")
-	t.Setenv("EXPENSIO_JWT_ALLOW_HS256", "true")
+	t.Setenv("EXPENSIO_JWT_PRIVATE_KEY", base64.StdEncoding.EncodeToString(priv.Seed()))
 
-	_, err = config.Load(config.Options{Service: "gateway", DefaultAddr: ":8080", NeedsJWT: true})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "jwt.secret")
+	cfg, err := config.Load(config.Options{
+		Service:        "identity",
+		DefaultAddr:    ":8081",
+		NeedsJWT:       true,
+		NeedsJWTSigner: true,
+	})
+	require.NoError(t, err)
+
+	issuer, err := cfg.JWT.AuthIssuer()
+	require.NoError(t, err)
+	raw, _, err := issuer.IssueAccess(uuid.New(), uuid.New(), tenantctx.RoleOwner, uuid.New())
+	require.NoError(t, err)
+	_, err = issuer.ParseAccess(raw)
+	require.NoError(t, err)
 }
