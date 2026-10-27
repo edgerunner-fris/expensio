@@ -187,3 +187,53 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}-migrate:${{ github.sha }}
             ghcr.io/${{ github.repository }}-migrate:latest
+
+  # 浏览器级 E2E 需要完整整栈（六个服务、管理台、Postgres/Redis/Kafka/MinIO、
+  # Mailpit 与 Playwright），所以只在 main 上、复用刚推送的镜像跑一次：
+  # 测的就是要部署的那批镜像，而不是 runner 上重新构建的另一份。
+  # PR 不跑（需要先起整栈，成本高）；本地用 `make e2e`。
+  e2e:
+    name: 浏览器端到端（整栈）
+    needs: [backend, frontend, images, web-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EXPENSIO_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 拉取本次提交的镜像并打上本地标签
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          for svc in identity expense billing report notification gateway web; do
+            docker pull "ghcr.io/${repo}/${svc}:${GITHUB_SHA}"
+            docker tag "ghcr.io/${repo}/${svc}:${GITHUB_SHA}" "expensio/${svc}:${GITHUB_SHA}"
+          done
+
+      - name: 生成本地密钥（.env，权限 600）
+        run: bash scripts/env.sh
+
+      - name: 启动整栈（使用已推送镜像，不重新构建）
+        run: docker compose --profile app up -d --wait --wait-timeout 420
+
+      - name: Playwright
+        run: docker compose --profile app --profile e2e run --rm e2e
+
+      - name: 失败时导出服务日志
+        if: failure()
+        run: docker compose --profile app logs --no-color --tail=200
+
+      - name: 清理
+        if: always()
+        run: docker compose --profile core --profile obs --profile mail --profile app down -v
