@@ -2105,8 +2105,18 @@ SMOKE_RESULT: PASS
 
 验收所依赖的清单、values 与 smoke 脚本放在
 [`deploy/cluster/acceptance/`](../deploy/cluster/acceptance/)，CI 的 `cluster`
-job 在 main 分支用刚推送的镜像跑同一套流程。集群验收用的是 k3d 与单节点依赖；
-托管云、Ingress TLS 终止与多可用区仍未验证，见 `docs/DEPLOYMENT.md`。
+job 在 main 分支用刚推送的镜像跑同一套流程。实测 run `40547326540`
+（commit `9c3c0af`）13 个 job 全部 success，其中
+`真实集群 Helm 安装（k3d）` 17:09:44Z → 17:11:40Z（1m56s），
+`浏览器端到端（整栈）` 17:09:44Z → 17:11:47Z（2m03s），互不依赖、并行执行。
+
+CI 的第一次集群运行（run `40546365312`）在“生成密钥并创建 Secret”步骤失败：
+密钥只写进了 `$GITHUB_ENV`，而该文件里的值只在后续 step 生效，当前 step 在
+`set -u` 下引用 `$JWT_PRIVATE_KEY` 立即以 unbound variable 退出。改为普通
+shell 变量后通过——这也是本地手工演练不可能暴露的缺陷。
+
+集群验收用的是 k3d 与单节点依赖；托管云、Ingress TLS 终止与多可用区仍未验证，
+见 `docs/DEPLOYMENT.md`。
 
 ## 下一步
 
