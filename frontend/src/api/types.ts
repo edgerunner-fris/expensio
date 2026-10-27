@@ -215,6 +215,30 @@ export interface ExpenseSummary {
   groups: GroupTotal[]
 }
 
+export interface StatusTotal {
+  status: string
+  currency: string
+  amount_minor: number
+  expense_count: number
+}
+
+export interface DailyTotal {
+  date: string
+  currency: string
+  amount_minor: number
+  expense_count: number
+}
+
+export interface Dashboard {
+  scope: 'mine' | 'all'
+  from: string
+  to: string
+  currency_totals: CurrencyTotal[]
+  status_totals: StatusTotal[]
+  category_totals: GroupTotal[]
+  daily_totals: DailyTotal[]
+}
+
 export interface Plan {
   code: string
   name: string

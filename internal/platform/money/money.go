@@ -107,6 +107,12 @@ func ValidateAmount(minor int64, currency Currency) error {
 // 只用于日志、通知与报表文案；接口响应仍然返回整数 amount_minor + currency，
 // 由前端负责本地化展示。这样服务端永远不会把金额变成浮点数。
 func Format(minor int64, c Currency) string {
+	return FormatNumber(minor, c) + " " + string(c)
+}
+
+// FormatNumber 与 Format 相同，但不带币种后缀。
+// CSV 导出有独立的 currency 列，金额列需要能被表格软件直接当数字读取。
+func FormatNumber(minor int64, c Currency) string {
 	sign := ""
 	// 处理 MinInt64：直接取负会溢出，先加一取负再补一。
 	var v uint64
@@ -119,13 +125,13 @@ func Format(minor int64, c Currency) string {
 
 	exp := c.Exponent()
 	if exp == 0 {
-		return fmt.Sprintf("%s%d %s", sign, v, c)
+		return fmt.Sprintf("%s%d", sign, v)
 	}
 	pow := uint64(1)
 	for i := 0; i < exp; i++ {
 		pow *= 10
 	}
-	return fmt.Sprintf("%s%d.%0*d %s", sign, v/pow, exp, v%pow, c)
+	return fmt.Sprintf("%s%d.%0*d", sign, v/pow, exp, v%pow)
 }
 
 // normalize 去掉首尾空白并转成大写。只处理 ASCII，避免 ToUpper 把某些

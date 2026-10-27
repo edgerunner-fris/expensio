@@ -89,6 +89,38 @@ async function data<T>(request: Promise<{ data: ApiEnvelope<T> }>): Promise<T> {
   return resp.data.data
 }
 
+// download 走同一个 axios 实例，因此 401 刷新与错误处理与普通请求一致；
+// 响应体是文件而不是业务信封，调用方自行决定文件名。
+//
+// 超时单独放宽：导出最多 5 万行，不能用 15 秒的接口超时。
+// 失败时后端返回的仍是 JSON 信封，但 responseType=blob 会把它包成 Blob，
+// 这里解出来再抛，调用方用 apiMessage 就能显示服务端的具体原因。
+export async function download(
+  url: string,
+  params?: Record<string, unknown>,
+  timeout = 60000,
+): Promise<Blob> {
+  try {
+    const resp = await http.get(url, { params, responseType: 'blob', timeout })
+    return resp.data as Blob
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
+      const message = await blobMessage(err.response.data)
+      if (message) throw new Error(message)
+    }
+    throw err
+  }
+}
+
+async function blobMessage(blob: Blob): Promise<string> {
+  try {
+    const parsed = JSON.parse(await blob.text()) as ApiEnvelope<unknown>
+    return parsed.message ?? ''
+  } catch {
+    return ''
+  }
+}
+
 export const api = {
   get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     return data<T>(http.get<ApiEnvelope<T>>(url, config))

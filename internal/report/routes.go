@@ -17,4 +17,6 @@ func RegisterRoutes(r gin.IRouter, h *Handler, parser middleware.AccessParser) {
 	authed.Use(middleware.Auth(parser))
 
 	authed.GET("/reports/expenses/summary", h.ExpenseSummary)
+	authed.GET("/reports/dashboard", h.Dashboard)
+	authed.GET("/reports/expenses.csv", h.ExportExpensesCSV)
 }

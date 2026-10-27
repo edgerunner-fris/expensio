@@ -29,6 +29,13 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/expenses' },
         {
+          // 登录后的落点仍是费用单：概览是补充入口，不改变既有 E2E 的预期。
+          path: 'dashboard',
+          name: 'dashboard',
+          component: () => import('@/views/DashboardView.vue'),
+          meta: { title: '概览' },
+        },
+        {
           path: 'expenses',
           name: 'expenses',
           component: () => import('@/views/ExpensesView.vue'),

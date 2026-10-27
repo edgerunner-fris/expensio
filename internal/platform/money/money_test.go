@@ -111,3 +111,13 @@ func TestFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatNumber(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "123.45", FormatNumber(12345, "USD"))
+	assert.Equal(t, "0.05", FormatNumber(5, "USD"))
+	assert.Equal(t, "999", FormatNumber(999, "JPY"))
+	assert.Equal(t, "1234.567", FormatNumber(1234567, "KWD"))
+	assert.Equal(t, "-123.45", FormatNumber(-12345, "USD"))
+}

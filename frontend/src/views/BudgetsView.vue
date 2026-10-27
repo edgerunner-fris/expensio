@@ -198,6 +198,23 @@ function usedPercent(budget: Budget): number {
 }
 
 const canManage = computed(() => auth.isAdmin)
+
+// 预算告警只是展示：提交时的额度校验仍由服务端条件 UPDATE 决定。
+const alerts = computed(() =>
+  items.value
+    .map((budget) => {
+      const used = budget.amount_minor - budget.available_minor
+      return {
+        name: budget.name,
+        percent: budget.amount_minor > 0 ? Math.round((used * 100) / budget.amount_minor) : 0,
+        over: budget.available_minor <= 0,
+      }
+    })
+    .filter((a) => a.percent >= 90)
+    .sort((a, b) => b.percent - a.percent),
+)
+
+const hasOverLimit = computed(() => alerts.value.some((a) => a.over))
 </script>
 
 <template>
@@ -209,6 +226,21 @@ const canManage = computed(() => auth.isAdmin)
       </div>
       <el-button v-if="canManage" type="primary" :icon="Plus" @click="openCreate">新建预算</el-button>
     </div>
+
+    <el-alert
+      v-if="alerts.length"
+      :type="hasOverLimit ? 'error' : 'warning'"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 16px"
+    >
+      <template #title>
+        {{ hasOverLimit ? '有预算已超限' : '有预算接近上限' }}（已用 ≥ 额度 90%）
+      </template>
+      <div>
+        {{ alerts.map((a) => `${a.name}（${a.percent}%）`).join('、') }}
+      </div>
+    </el-alert>
 
     <div class="section-card">
       <div class="toolbar" style="margin-bottom: 14px">

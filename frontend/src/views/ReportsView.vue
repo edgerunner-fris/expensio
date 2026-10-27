@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Download } from '@element-plus/icons-vue'
 import type { ECharts } from 'echarts/core'
 import { apiMessage } from '@/api/client'
 import { reportApi } from '@/api/reports'
@@ -23,6 +24,34 @@ const filters = reactive<{ scope: 'mine' | 'all'; group_by: 'category' | 'status
 })
 const summary = ref<ExpenseSummary | null>(null)
 const loading = ref(false)
+const exporting = ref(false)
+
+async function exportCSV(): Promise<void> {
+  if (!range.value || exporting.value) return
+  exporting.value = true
+  const [from, to] = range.value
+  try {
+    const blob = await reportApi.exportCSV({
+      from,
+      to,
+      group_by: filters.group_by,
+      scope: auth.isAdmin ? filters.scope : 'mine',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `expenses-${from}-${to}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    ElMessage.success('明细已导出')
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+  } finally {
+    exporting.value = false
+  }
+}
 
 const chartEl = ref<HTMLDivElement>()
 let chart: ECharts | null = null
@@ -169,6 +198,7 @@ onBeforeUnmount(() => {
           @change="load"
         />
         <el-button type="primary" :loading="loading" @click="load">查询</el-button>
+        <el-button :icon="Download" :loading="exporting" @click="exportCSV">导出 CSV</el-button>
       </div>
     </div>
 

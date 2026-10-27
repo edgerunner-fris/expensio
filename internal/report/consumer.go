@@ -36,6 +36,9 @@ type ConsumerOptions struct {
 	Logger    *zap.Logger
 	ClientID  string
 
+	// Cache 可选：设置后每条事件提交成功都会推进租户缓存版本。
+	Cache *DashboardCache
+
 	// 以下字段只用于测试隔离；生产留空即采用 events 包里的契约常量。
 	Topic        string
 	GroupID      string
@@ -51,6 +54,7 @@ type Consumer struct {
 	logger       *zap.Logger
 	consumerName string
 	consumer     *kafka.Consumer
+	cache        *DashboardCache
 }
 
 // NewConsumer 装配消费端。
@@ -86,6 +90,7 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		database:     opts.Database,
 		logger:       opts.Logger,
 		consumerName: consumerName,
+		cache:        opts.Cache,
 	}
 
 	kc, err := kafka.NewConsumer(kafka.ConsumerOptions{
@@ -182,6 +187,9 @@ func (c *Consumer) Handle(ctx context.Context, msg kafka.Message) error {
 		}
 		return classifyDBError(err)
 	}
+
+	// 事务已提交：推进缓存版本。失败只影响缓存新鲜度，不回滚、不阻塞位点提交。
+	c.cache.Bump(ctx, env.TenantID)
 
 	if duplicate {
 		c.logger.Debug("duplicate event ignored",

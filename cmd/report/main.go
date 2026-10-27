@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/bootstrap"
@@ -25,6 +26,7 @@ func main() {
 		NeedsDB:     true,
 		NeedsKafka:  true,
 		NeedsJWT:    true,
+		NeedsRedis:  true,
 	}, setup))
 }
 
@@ -42,12 +44,30 @@ func setup(app *bootstrap.App) error {
 	app.OnStop(database.Close)
 	app.Health.Add(health.Check("db", database.Ping))
 
+	// Redis 只用于仪表盘缓存；它不在 readiness 里，故障时接口回退到现算。
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	app.OnStop(func() { _ = rdb.Close() })
+
+	rdbCtx, cancelRDB := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := rdb.Ping(rdbCtx).Err(); err != nil {
+		app.Logger.Warn("redis unavailable at startup; report dashboard cache disabled until it recovers",
+			zap.Error(err))
+	}
+	cancelRDB()
+
+	cache := report.NewDashboardCache(rdb, app.Logger)
+
 	// report 不假设网关校验过令牌：所有端点自己再校验一次。
 	issuer, err := cfg.JWT.AuthIssuer()
 	if err != nil {
 		return fmt.Errorf("report: 初始化令牌校验器失败: %w", err)
 	}
-	report.RegisterRoutes(app.Server.Engine(), report.NewHandler(report.NewService(database)), issuer)
+	report.RegisterRoutes(app.Server.Engine(),
+		report.NewHandler(report.NewServiceWithCache(database, cache)), issuer)
 
 	// DLQ 与业务事件共用同一个生产者：两者对 acks=all 的要求一致。
 	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
@@ -69,6 +89,7 @@ func setup(app *bootstrap.App) error {
 		Publisher: producer,
 		Logger:    app.Logger,
 		ClientID:  cfg.Service,
+		Cache:     cache,
 	})
 	if err != nil {
 		return fmt.Errorf("report: 初始化报表消费者失败: %w", err)

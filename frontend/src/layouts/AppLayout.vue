@@ -8,6 +8,7 @@ import {
   CreditCard,
   DataAnalysis,
   Files,
+  Odometer,
   User,
   Wallet,
 } from '@element-plus/icons-vue'
@@ -56,6 +57,10 @@ async function handleLogout(): Promise<void> {
       </div>
 
       <el-menu :default-active="activeMenu" router class="app-menu">
+        <el-menu-item index="/dashboard">
+          <el-icon><Odometer /></el-icon>
+          <span>概览</span>
+        </el-menu-item>
         <el-menu-item index="/expenses">
           <el-icon><Files /></el-icon>
           <span>费用单</span>

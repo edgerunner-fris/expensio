@@ -14,10 +14,17 @@ import (
 type Service struct {
 	database *db.DB
 	repo     *Repository
+	// cache 为 nil 时不缓存；summary 与 CSV 永远不经过它。
+	cache *DashboardCache
 }
 
 func NewService(database *db.DB) *Service {
 	return &Service{database: database, repo: &Repository{}}
+}
+
+// NewServiceWithCache 给仪表盘启用 Redis 缓存。缓存的任何失败都会回退现算。
+func NewServiceWithCache(database *db.DB, cache *DashboardCache) *Service {
+	return &Service{database: database, repo: &Repository{}, cache: cache}
 }
 
 // Summary 返回指定时间范围内的费用汇总。

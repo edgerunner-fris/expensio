@@ -486,6 +486,8 @@ services:
       # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
       EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
       EXPENSIO_KAFKA_BROKERS: kafka:9092
+      # 仪表盘缓存：Redis 故障时报表接口回退到现算，不影响正确性。
+      EXPENSIO_REDIS_ADDR: redis:6379
     depends_on:
       migrate:
         condition: service_completed_successfully

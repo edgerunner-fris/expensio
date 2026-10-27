@@ -2266,9 +2266,158 @@ ok  github.com/edgerunner-fris/expensio/internal/platform/config     1.108s
 | 租户只有一名管理员时分级的单据会停在 1/2 | 待验证 | 属运营约束，UI 已显示进度；未在真实租户上演练 |
 | MinIO 故障时的启动/运行边界 | 待验证 | 启动 fail-fast、readiness 不探测 MinIO；运行中故障只影响附件接口，尚未做故障注入演练 |
 
+## M16 设计：仪表盘、CSV 导出与 Redis 缓存
+
+管理台目前只有报表页，没有一眼可见的运营概览；财务只能看聚合，拿不走明细；
+summary 每次刷新都在事实表上现算。设计见
+[ADR-0012](adr/0012-dashboard-export-and-report-cache.md)。
+
+### API 契约
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/v1/reports/dashboard` | 币种/状态/类别/按日聚合，一次事务内四条查询 |
+| `GET /api/v1/reports/expenses.csv` | 与 summary 相同过滤条件的明细导出，50,000 行上限 |
+
+仪表盘与 summary 共用 `resolveScope`：管理岗默认全租户、成员默认本人、
+非管理岗显式请求 `all` 返回 403。
+
+### 缓存与失效
+
+- 仪表盘结果缓存 5 分钟；键包含租户级版本号 `report:version:<tenant>`；
+- 报表消费者成功处理事件后 `INCR` 版本号，旧键自然失效；
+- Redis 读/写/取版本失败都回退到现算，只记 WARN；
+- summary 与 CSV 不缓存，保持"提交后立即可查"的既有 E2E 断言。
+
+### 预算告警
+
+预算 API 已返回整数金额，前端据此计算已用比例：≥90% 显示"接近上限"，
+≥100% 显示"已超限"，并汇总到仪表盘。提交时的条件 UPDATE 仍是唯一防线，
+告警不参与额度判断。
+
+### 验收计划
+
+1. 仪表盘：两种币种、三种状态、跨日数据的金额与笔数逐项断言；成员只看
+   自己，非管理岗请求 `all` 403；范围参数与 summary 同样校验；
+2. CSV：表头、BOM、金额主单位与最小单位、过滤条件、行数上限与 403；
+3. 缓存：真实 Redis，命中后不再查库（改库后仍返回缓存值）；消费者
+   `INCR` 版本后读到新值；Redis 不可用时接口仍返回正确结果；
+4. 前端仪表盘与预算告警通过 `vue-tsc --noEmit && vite build`；
+5. 报表包 `-race -count=5`。
+
+## M16 完成情况：仪表盘、CSV 导出与 Redis 缓存（2026-10-28）
+
+### 交付内容
+
+后端（`internal/report`）：
+
+- [dashboard.go](../internal/report/dashboard.go)：`GET /api/v1/reports/dashboard`，
+  一次事务内四条聚合（币种 / 状态 / 类别 / UTC 自然日），空结果返回 `[]`；
+  校验与可见范围完全复用 summary 的 `newSummaryFilter`；
+- [export.go](../internal/report/export.go)：`GET /api/v1/reports/expenses.csv`，
+  与 summary 同过滤器，50,000 行上限（第 50,001 行触发 400），UTF-8 BOM
+  `EF BB BF`，金额列同时给出主单位字符串与 `amount_minor`；
+- [cache.go](../internal/report/cache.go)：租户版本号失效的仪表盘缓存，
+  5 分钟 TTL，所有 Redis 错误回退现算；
+- 消费者在事务提交后 `INCR report:version:<tenant>`；summary/CSV 不缓存。
+
+其他：
+
+- [money.go](../internal/platform/money/money.go)：新增 `FormatNumber`
+  （只输出数字，不带币种），`Format` 改为委托它，既有输出不变；
+- [docker-compose.yml](../docker-compose.yml)：report 服务补上
+  `EXPENSIO_REDIS_ADDR: redis:6379`；Helm 的 ConfigMap 早已全局注入该键
+  （`deploy/helm/expensio/templates/configmap.yaml:16`，Deployment 统一
+  `envFrom`），`.env.example:31` 也已包含，无需改动；
+- 前端：新增 `DashboardView.vue` 与 `/dashboard` 路由（`/` 仍重定向到
+  `/expenses`，不改变既有 E2E 的落点）、菜单「概览」、报表页「导出 CSV」、
+  预算页 ≥90% 告警横幅；折线图走已有的按需 `@/utils/charts`；
+  导出请求单独 60s 超时，并把 400 返回的 JSON 信封从 Blob 里解出来，
+  提示仍是服务端原文（如「超过 50000 行」）。
+
+### 验收证据（实测）
+
+测试清单：report 包共 19 个测试函数，其中 M16 新增 6 个——
+
+| 用例 | 覆盖 |
+| --- | --- |
+| `TestDashboardAggregates` | 双币种、三状态、跨日数据的金额与笔数；成员 `scope=all` 403；缺参 400；空数组 |
+| `TestExportCSV` | BOM、表头、主单位/最小单位、status 过滤、成员 403、非法参数返回 JSON 400 |
+| `TestExportRejectsTooManyRows` | 50,001 行 → 400 且消息含 `50000` |
+| `TestDashboardCacheInvalidationAndFallback` | 缓存命中（绕过消费者改库仍返回旧值）；`Bump` 后读到新值；Redis 不可达时回退现算 |
+| `TestDashboardCacheSeparatesMembers` | 同租户成员 A/B 的 `scope=mine` 缓存互不串读（回归） |
+| `TestConsumerBumpsDashboardCacheVersion` | 消费成功（含重复投递）后版本号 1 → 2 |
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/report/... ./internal/platform/money/... -race -count=5
+ok  	github.com/edgerunner-fris/expensio/internal/report	54.992s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/money	1.013s
+```
+
+```text
+$ gofmt -l ./internal ./cmd     # 无输出
+$ go build ./...                # BUILD_OK
+$ go vet ./internal/report/...  # VET_OK
+```
+
+前端（node:24 容器内，无 node 的 WSL 环境）：
+
+```text
+$ ./node_modules/.bin/vue-tsc --noEmit && ./node_modules/.bin/vite build
+dist/assets/DashboardView-*.js   8.42 kB │ gzip:  3.76 kB
+dist/assets/ReportsView-*.js     5.59 kB │ gzip:  2.74 kB
+dist/assets/BudgetsView-*.js     9.11 kB │ gzip:  3.50 kB
+✓ built in 623ms
+```
+
+### 过程中发现并修复的缺陷
+
+仪表盘缓存键最初是 `report:dashboard:v<v>:<tenant>:<scope>:<from>:<to>`，
+`scope=mine` 时**没有包含提交人**：同租户两个成员用同一时间范围查询会命中同一
+键，后者的请求会读到前者的单据——这是跨用户的数据泄露，且版本号失效掩盖不了它
+（键本身就不该共享）。
+
+修复：`<scope>` 段改为 `<view>`，`mine` 时为 `mine:<user_id>`，`all` 时为
+`all`。回归用例先对旧调用点执行，确认它确实失败：
+
+```text
+$ go test ./internal/report/ -run TestDashboardCacheSeparatesMembers -count=1
+Error: Not equal:
+  expected: 3000
+  actual  : 10000
+FAIL	github.com/edgerunner-fris/expensio/internal/report	5.366s
+```
+
+恢复修复后该用例通过，并包含在 `-race -count=5` 的 54.992s 里。ADR-0012
+的缓存键说明与风险清单已同步更新。
+
+### 风险状态
+
+| 风险 | 状态 | 依据 |
+| --- | --- | --- |
+| 成员视图缓存串读 | 已解决 | 键含提交人；回归用例对旧实现实测失败、新实现通过 |
+| Redis 故障阻断仪表盘 | 已解决 | 所有 Redis 错误回退现算；不可达地址实测返回 17000 而非错误 |
+| CSV 悄悄截断 | 已解决 | 第 50,001 行返回 400，消息含 `50000` |
+| Excel 打开中文乱码 | 已解决 | 响应体前 3 字节为 `EF BB BF`，用例断言 |
+| 大租户下四条聚合的延迟 | 待验证 | 未压测，不宣称高并发指标；命中缓存后不再扫表 |
+| 多副本 report 的缓存一致性 | 待验证 | 依赖所有副本连同一个 Redis；Helm 上是同一 `redis.addr`，未做集群实测 |
+| 预算告警被误当成额度校验 | 设计如此 | 告警仅前端展示，提交时仍是条件 UPDATE 唯一防线 |
+
 ## 下一步
 
-三项最终验收已完成。剩余的是"换环境"而非"补功能"，按优先级：
+M16 已收口。剩余工作分两类。
+
+功能面（内部审计提出，按里程碑推进）：
+
+1. M17：多租户切换（同一账号属于多个租户时的现状与切换入口）、审计日志
+   查看页、个人设置（改显示名 / 改密码）、登录失败锁定与退避；
+2. M18：`MockPaymentGateway` 与月度出账任务、租户删除（软删 + 清理路径）、
+   `gobreaker` 熔断、Loki 日志聚合；
+3. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
+   安全扫描、`cd.yml`；
+4. M20：托管云、TLS、HPA 与备份演练。
+
+环境面（"换环境"而非"补功能"）：
 
 1. 托管云集群（EKS/AKS/GKE）：替换 `deps.yaml` 为托管 PostgreSQL / Kafka，
    验证存储类、负载均衡器与 NetworkPolicy 在各 CNI 下的行为；
