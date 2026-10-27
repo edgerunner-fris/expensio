@@ -47,6 +47,13 @@ const router = createRouter({
           meta: { title: '预算' },
         },
         {
+          // 待办与审批策略都只对管理岗开放；服务端同样会拒绝普通成员。
+          path: 'approvals',
+          name: 'approvals',
+          component: () => import('@/views/ApprovalsView.vue'),
+          meta: { title: '审批', adminOnly: true },
+        },
+        {
           path: 'reports',
           name: 'reports',
           component: () => import('@/views/ReportsView.vue'),

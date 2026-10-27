@@ -127,10 +127,15 @@ func TestStatusTransitionGuard(t *testing.T) {
 
 	id := insertExpense(t, database, ctx, user, "draft", 1000)
 
-	// draft → approved 跳步。
-	err = execInTenant(t, database, ctx,
-		`UPDATE app.expenses SET status = 'approved' WHERE id = $1`, id)
+	// draft → approved 跳步。审批级别必须同时走完，否则先撞一致性约束，
+	// 这里一并置为 required 级，确保断言的是状态机而不是新约束。
+	err = execInTenant(t, database, ctx, `
+		UPDATE app.expenses
+		SET status = 'approved', approval_level = required_approval_levels
+		WHERE id = $1`, id)
 	assert.Equal(t, "23514", sqlState(err))
+	require.NotNil(t, err)
+	assert.Contains(t, err.Error(), "invalid expense status transition")
 
 	// 合法：draft → submitted。
 	require.NoError(t, execInTenant(t, database, ctx,
@@ -141,14 +146,17 @@ func TestStatusTransitionGuard(t *testing.T) {
 		`UPDATE app.expenses SET amount_minor = amount_minor + 1 WHERE id = $1`, id)
 	assert.Equal(t, "23514", sqlState(err))
 
-	// 审批通过必须同时写入决定人/时间。
-	err = execInTenant(t, database, ctx,
-		`UPDATE app.expenses SET status = 'approved' WHERE id = $1`, id)
+	// 审批通过必须同时写入决定人/时间；级别已走完，只剩决定字段缺失。
+	err = execInTenant(t, database, ctx, `
+		UPDATE app.expenses
+		SET status = 'approved', approval_level = required_approval_levels
+		WHERE id = $1`, id)
 	assert.Equal(t, "23514", sqlState(err))
 
 	require.NoError(t, execInTenant(t, database, ctx, `
 		UPDATE app.expenses
-		SET status = 'approved', decided_by = $2, decided_at = now()
+		SET status = 'approved', approval_level = required_approval_levels,
+		    decided_by = $2, decided_at = now()
 		WHERE id = $1`, id, user))
 
 	require.NoError(t, execInTenant(t, database, ctx,

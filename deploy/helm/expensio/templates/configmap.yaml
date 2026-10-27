@@ -16,6 +16,12 @@ data:
   EXPENSIO_REDIS_ADDR: {{ .Values.redis.addr | quote }}
   EXPENSIO_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
 
+  # 对象存储地址与桶名不是秘密；access/secret key 由 Deployment 从 Secret 注入。
+  EXPENSIO_MINIO_ENDPOINT: {{ .Values.minio.endpoint | quote }}
+  EXPENSIO_MINIO_PUBLIC_ENDPOINT: {{ .Values.minio.publicEndpoint | quote }}
+  EXPENSIO_MINIO_BUCKET: {{ .Values.minio.bucket | quote }}
+  EXPENSIO_MINIO_USE_SSL: {{ .Values.minio.useSSL | quote }}
+
   EXPENSIO_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
   EXPENSIO_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
   EXPENSIO_OTEL_INSECURE: {{ .Values.otel.insecure | quote }}

@@ -2118,6 +2118,154 @@ shell 变量后通过——这也是本地手工演练不可能暴露的缺陷�
 集群验收用的是 k3d 与单节点依赖；托管云、Ingress TLS 终止与多可用区仍未验证，
 见 `docs/DEPLOYMENT.md`。
 
+## M15 设计：附件、评论与分级审批
+
+原始 brief 里还有三块没有实现：发票附件、审批沟通、按金额分级审批。
+M15 补这三块，并加一个服务端过滤的审批待办。设计见
+[ADR-0011](adr/0011-expense-attachments-comments-and-approval-levels.md)。
+
+### API 契约
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/v1/expenses/:id/attachments/presign` | 签发 15 分钟 PUT URL |
+| `POST /api/v1/expenses/:id/attachments` | 确认对象已上传并落元数据 |
+| `GET /api/v1/expenses/:id/attachments` | 列表 + 10 分钟下载 URL |
+| `DELETE /api/v1/expenses/:id/attachments/:attachmentID` | 软删（仅草稿提交人） |
+| `GET /api/v1/expenses/:id/comments` | 评论列表 |
+| `POST /api/v1/expenses/:id/comments` | 新增评论 |
+| `DELETE /api/v1/expenses/:id/comments/:commentID` | 作者或管理员软删 |
+| `GET /api/v1/expenses/:id/approvals` | 各级批准记录 |
+| `GET /api/v1/expenses?inbox=true` | 审批待办（仅 admin/owner） |
+| `GET /api/v1/approval-policies` | 审批策略（仅 admin/owner） |
+| `PUT /api/v1/approval-policies/:currency` | 设置二级门槛 |
+| `DELETE /api/v1/approval-policies/:currency` | 取消分级 |
+
+费用单响应新增 `required_approval_levels` 与 `approval_level`，前端据此显示
+"1/2 已批准"；状态机与事件类型不变。
+
+### 验收计划
+
+1. 迁移 000005 的 up/down 都真实执行，回滚后重建表结构；
+2. 附件：真实 MinIO 容器，presign → PUT → confirm → list → GET 下载内容
+   一致；非提交人、已提交单据、伪对象键、超限大小都被拒；
+3. 评论：可见性、作者/管理员删除、长度边界；
+4. 分级审批：门槛以下 1 级、以上 2 级且必须不同人；中间级不发事件、
+   最后一级才结转预算；策略变更不影响在途单据；待办过滤正确；
+5. 前端 `npm run build` 通过；完整 Go 回归 `-race -count=5`。
+
+## M15 完成情况：附件、评论与分级审批（2026-10-28）
+
+### 1. 迁移与数据约束
+
+`TestMigrationDownAndUp` 对 000002–000005 连续回滚 4 步再重新 up：业务表
+被删除后由迁移重建，`expense_status_transitions` 仍有 5 条种子；重新 up 后
+`expense_approvals`、`expense_comments`、`expense_attachments` 三张表都实测
+`relrowsecurity=true`、`relforcerowsecurity=true`；新建费用单的
+`required_approval_levels=1`、`approval_level=0`。`000005` 的
+`expenses_approval_level_consistency` 与独立触发器
+`expenses_guard_approval_progress` 由数据库测试直接触发验证，不依赖服务层。
+
+### 2. 附件（真实 MinIO 容器）
+
+测试使用 testcontainers 启动真实 MinIO，完整链路
+presign → 浏览器 PUT → confirm → list → GET → delete：
+
+```text
+--- PASS: TestAttachmentLifecycle (0.04s)
+--- PASS: TestAttachmentRejectsInvalidMetadata (0.02s)
+--- PASS: TestAttachmentAuthorizeAndLimits (0.04s)
+--- PASS: TestAttachmentRejectsForeignObjectKey (0.02s)
+--- PASS: TestAttachmentWithoutStoreReturns503 (0.01s)
+--- PASS: TestHTTPAttachmentsAndCollaboration (0.83s)
+--- PASS: TestHTTPAttachmentsWithoutStore (0.02s)
+```
+
+覆盖的断言：presigned PUT 的 `Content-Type` 进入签名；确认接口用
+`StatObject` 核对大小与类型，声明 12 MiB、非白名单类型、含路径分隔符的
+文件名都在落库前被拒；确认后列表返回可下载 URL，`GET` 到的是原始字节且
+带 `Content-Disposition: attachment`；删除元数据后再取下载 URL 得到 404；
+非提交人 403、已提交单据 409、第 11 个附件 409、伪造其他单据前缀的对象键
+409；未配置对象存储的部署返回 503 `attachment_storage_unavailable`。
+
+部署侧的关键修正：presigned URL 的 SigV4 签名包含 Host，容器内的
+`minio:9000` 在浏览器里不可用。`objectstore.Config` 增加
+`PublicEndpoint`，用独立客户端给浏览器地址签名；Compose 显式使用
+`minio:9000` 作为内部地址、`localhost:9000` 作为签名地址。Helm 渲染实测
+（`helm template | grep EXPENSIO_MINIO`）：
+
+```text
+EXPENSIO_MINIO_ENDPOINT: minio:9000
+EXPENSIO_MINIO_PUBLIC_ENDPOINT: minio:9000
+EXPENSIO_MINIO_BUCKET: expensio-invoices
+EXPENSIO_MINIO_USE_SSL: "false"
+```
+
+### 3. 评论与审批待办
+
+`TestCommentsLifecycle` / `TestCommentLengthAndVisibility`：正文首尾空白被
+裁剪；提交后的单据仍可评论；作者和管理员可软删，其他成员删除 403；空正文
+与 2001 字符被拒；不能查看该单据的成员看不到评论。
+
+`TestHTTPAttachmentsAndCollaboration` 从 HTTP 层再走一遍评论、审批记录、
+策略管理：普通成员写策略 403，管理员 upsert 后列表出现该币种，删除返回
+204，评论删除返回 204。
+
+### 4. 分级审批
+
+`TestMultiLevelApproval` 用 50,000 的二级门槛提交 60,000 的单据：
+
+- 提交后 `required_approval_levels=2`、`approval_level=0`；
+- 第一位管理员批准后状态仍是 `submitted`、`approval_level=1`，
+  `approval_steps` 没有 approve 记录，outbox 仍只有提交事件；
+- 同一个人再批一级被 409 `duplicate_approver` 拒绝（数据库唯一约束）；
+- 第二位管理员批准后才 `approved`、预算 `reserved → spent`、
+  `expense_approvals` 两行、outbox 追加最终批准事件（共 2 条）。
+
+`TestApprovalRejectsSelfApprovalAndBadLevels`：提交人自审 403
+`self_approval`；直接 INSERT 第 2 级（跳过第 1 级）被触发器以 23514 拒绝。
+`TestApprovalPolicySnapshotAndInbox`：策略只影响之后提交的单据；待办排除
+自己提交的、排除自己已批过任何一级的、非管理岗访问 403；分页总数与列表
+使用同一过滤条件。
+
+### 5. 前端与全量回归
+
+审批页（待办 + 策略管理）与费用详情页（审批时间线、附件上传/下载/删除、
+评论区）通过 `vue-tsc --noEmit && vite build`，产物包含新的
+`ApprovalsView-*.js` 与 `ExpenseDetailView-*.js`；构建在 `node:24`
+容器内执行（本机 WSL 无 node，`node:24-alpine` 缺 glibc 版 rolldown 绑定）。
+
+里程碑关门回归：
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/expense/... \
+    ./internal/platform/objectstore/... ./internal/platform/config/... \
+    -race -count=5
+ok  github.com/edgerunner-fris/expensio/internal/expense            15.418s
+?   github.com/edgerunner-fris/expensio/internal/platform/objectstore [no test files]
+ok  github.com/edgerunner-fris/expensio/internal/platform/config     1.108s
+```
+
+第一次跑 `-count=5` 时暴露了一个真实回归：`TestStatusTransitionGuard`
+直接用 SQL 把单据改成 `approved`，没有同步 `approval_level`，被 000005 的
+一致性约束以 23514 拒绝。修正测试为同时写入级别，并为"跳过状态"断言
+`invalid expense status transition` 报文，避免新约束掩盖状态机本身的失败。
+这正是 `-count=5` 需要保留的原因——单次运行没有暴露，因为它依赖测试执行
+顺序之外的迁移状态。
+
+### 风险状态
+
+| 风险 | 状态 | 说明 |
+| --- | --- | --- |
+| presigned URL 主机不可达 | 已解决 | 独立 `PublicEndpoint` 签名客户端；Compose 与 Helm 都实测渲染出正确值 |
+| 同一人批两级 / 同一级批两次 | 已解决 | 两条唯一约束 + 触发器，集成测试实测 409 与 23514 |
+| 中间级批准破坏读模型 | 已解决 | 中间级只推进 `approval_level`，不发事件、不写 `approval_steps`；最终级才结转预算 |
+| 附件大小/类型/数量绕过 | 已解决 | 白名单 + 确认时 `StatObject` 复核；集成测试覆盖超限与伪键 |
+| 孤儿对象 | 未解决 | 删除是尽力而为；生产需给桶配置生命周期规则，本地与验收环境未配置 |
+| 附件内容安全扫描 | 未解决 | 仅按声明类型与大小校验，未接入病毒扫描；超出本阶段范围 |
+| 租户只有一名管理员时分级的单据会停在 1/2 | 待验证 | 属运营约束，UI 已显示进度；未在真实租户上演练 |
+| MinIO 故障时的启动/运行边界 | 待验证 | 启动 fail-fast、readiness 不探测 MinIO；运行中故障只影响附件接口，尚未做故障注入演练 |
+
 ## 下一步
 
 三项最终验收已完成。剩余的是"换环境"而非"补功能"，按优先级：

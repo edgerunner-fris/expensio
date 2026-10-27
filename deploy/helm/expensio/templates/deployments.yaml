@@ -81,6 +81,18 @@ spec:
                   key: {{ $keys.jwtPrivateKey }}
             {{- end }}
             {{- end }}
+            {{- if $svc.minio }}
+            - name: EXPENSIO_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.minioAccessKey }}
+            - name: EXPENSIO_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.minioSecretKey }}
+            {{- end }}
             {{- if $svc.billingWebhook }}
             - name: EXPENSIO_BILLING_WEBHOOK_SECRET
               valueFrom:

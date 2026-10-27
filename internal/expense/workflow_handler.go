@@ -3,8 +3,10 @@ package expense
 import (
 	"errors"
 	"io"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/httpx"
@@ -14,6 +16,45 @@ import (
 // 目标状态由 URL 里的动作决定，客户端不能直接写 status 字段。
 type actionRequest struct {
 	Comment string `json:"comment"`
+}
+
+// approvalView 是一级批准的对外形态。
+type approvalView struct {
+	Level     int16     `json:"level"`
+	ActorID   uuid.UUID `json:"actor_id"`
+	Comment   string    `json:"comment,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListApprovals 返回各级批准与当前进度。
+// required/approved 级数来自费用单快照，前端据此显示"1/2 已批准"。
+func (h *Handler) ListApprovals(c *gin.Context) {
+	actor, err := actorFrom(c.Request.Context())
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	id, err := expenseID(c)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	records, e, err := h.svc.ListApprovals(c.Request.Context(), actor, id)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	items := make([]approvalView, 0, len(records))
+	for _, r := range records {
+		items = append(items, approvalView{
+			Level: r.Level, ActorID: r.ActorID, Comment: r.Comment, CreatedAt: r.CreatedAt,
+		})
+	}
+	httpx.OK(c, gin.H{
+		"required_levels": e.RequiredApprovalLevels,
+		"approved_levels": e.ApprovalLevel,
+		"items":           items,
+	})
 }
 
 // actionHandler 为每个动作生成一个端点。

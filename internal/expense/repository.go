@@ -20,8 +20,8 @@ func NewRepository() *Repository { return &Repository{} }
 // SELECT * 会让"加一列"悄悄改变扫描顺序，也可能把未来加入的敏感列带进响应。
 const expenseColumns = `id, tenant_id, submitter_id, status, category, currency,
 	amount_minor, merchant, description, occurred_at, budget_id, decided_by,
-	decided_at, rejection_reason, version, created_at, updated_at,
-	created_by, updated_by, deleted_at`
+	decided_at, rejection_reason, version, required_approval_levels, approval_level,
+	created_at, updated_at, created_by, updated_by, deleted_at`
 
 // scanExpense 用一个中间字符串接住枚举列，再转成领域类型。
 // 数据库的 CHECK 保证取值合法；这里不做二次校验，避免读路径因为脏数据整页失败。
@@ -34,6 +34,7 @@ func scanExpense(row pgx.Row) (*Expense, error) {
 		&e.ID, &e.TenantID, &e.SubmitterID, &status, &category, &currency,
 		&e.AmountMinor, &e.Merchant, &e.Description, &e.OccurredAt, &e.BudgetID,
 		&e.DecidedBy, &e.DecidedAt, &e.RejectionReason, &e.Version,
+		&e.RequiredApprovalLevels, &e.ApprovalLevel,
 		&e.CreatedAt, &e.UpdatedAt, &e.CreatedBy, &e.UpdatedBy, &e.DeletedAt,
 	)
 	if err != nil {
@@ -106,9 +107,12 @@ func (r *Repository) SoftDeleteDraft(ctx context.Context, tx pgx.Tx, id, tenantI
 
 // ListFilter 是列表查询的数据库侧条件。
 // SubmitterID 为空表示全租户；是否允许全租户在 service 里已由 ResolveScope 决定。
+// InboxActor 非空时只返回该用户待审批的单：状态 submitted、不是自己提交的、
+// 且自己还没有批准过任何一级（多级审批要求不同人）。
 type ListFilter struct {
 	SubmitterID uuid.UUID
 	Status      Status
+	InboxActor  uuid.UUID
 	Limit       int
 	Offset      int
 }
@@ -124,22 +128,35 @@ func (r *Repository) List(ctx context.Context, tx pgx.Tx, f ListFilter) ([]Expen
 	if f.Status != "" {
 		status = string(f.Status)
 	}
+	var inboxActor any
+	if f.InboxActor != uuid.Nil {
+		inboxActor = f.InboxActor
+	}
 
 	// 用 NULL 参数表达"不过滤"，避免把用户输入拼进 SQL。
 	const where = `deleted_at IS NULL
 		AND ($1::uuid IS NULL OR submitter_id = $1)
-		AND ($2::text IS NULL OR status = $2)`
+		AND ($2::text IS NULL OR status = $2)
+		AND ($3::uuid IS NULL OR (
+			submitter_id <> $3
+			AND NOT EXISTS (
+				SELECT 1 FROM app.expense_approvals a
+				WHERE a.tenant_id = app.expenses.tenant_id
+				  AND a.expense_id = app.expenses.id
+				  AND a.actor_id = $3
+			)
+		))`
 
 	var total int64
 	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM app.expenses WHERE `+where, submitter, status).Scan(&total); err != nil {
+		`SELECT count(*) FROM app.expenses WHERE `+where, submitter, status, inboxActor).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	rows, err := tx.Query(ctx,
 		`SELECT `+expenseColumns+` FROM app.expenses WHERE `+where+`
-		 ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
-		submitter, status, f.Limit, f.Offset)
+		 ORDER BY created_at DESC, id DESC LIMIT $4 OFFSET $5`,
+		submitter, status, inboxActor, f.Limit, f.Offset)
 	if err != nil {
 		return nil, 0, err
 	}

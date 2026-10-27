@@ -242,9 +242,11 @@ func (s *Service) Get(ctx context.Context, actor Actor, id uuid.UUID) (*Expense,
 }
 
 // ListQuery 是列表请求。Scope 的空值等价于 mine。
+// Inbox 为 true 时忽略 Scope，只返回调用者可以审批的单据。
 type ListQuery struct {
 	Scope  string
 	Status string
+	Inbox  bool
 	Limit  int
 	Offset int
 }
@@ -252,31 +254,43 @@ type ListQuery struct {
 // List 返回分页结果与总数。分页参数在这里再收敛一次：
 // handler 可能被复用，service 不能假设上游一定做过 Normalize。
 func (s *Service) List(ctx context.Context, actor Actor, q ListQuery) ([]Expense, int64, error) {
-	scope, err := ResolveScope(actor.Role, q.Scope)
-	if err != nil {
-		return nil, 0, err
-	}
-	var status Status
-	if q.Status != "" {
-		status = Status(q.Status)
-		if !status.Valid() {
-			return nil, 0, apperr.InvalidArgument("status 不是合法的费用单状态")
-		}
-	}
-
 	filter := ListFilter{
-		Status: status,
 		Limit:  clampLimit(q.Limit),
 		Offset: clampOffset(q.Offset),
 	}
-	if scope == ScopeMine {
-		filter.SubmitterID = actor.UserID
+
+	if q.Inbox {
+		// 待办是管理岗的审批队列；普通成员看自己的单就够了。
+		if !actor.valid() {
+			return nil, 0, apperr.Unauthorized("缺少有效的身份信息")
+		}
+		if !actor.manage() {
+			return nil, 0, apperr.Forbidden("只有管理员或所有者可以查看待审批队列")
+		}
+		filter.InboxActor = actor.UserID
+		filter.Status = StatusSubmitted
+	} else {
+		scope, err := ResolveScope(actor.Role, q.Scope)
+		if err != nil {
+			return nil, 0, err
+		}
+		if q.Status != "" {
+			status := Status(q.Status)
+			if !status.Valid() {
+				return nil, 0, apperr.InvalidArgument("status 不是合法的费用单状态")
+			}
+			filter.Status = status
+		}
+		if scope == ScopeMine {
+			filter.SubmitterID = actor.UserID
+		}
 	}
+
 	var (
 		items []Expense
 		total int64
 	)
-	err = s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	err := s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		items, total, err = s.repo.List(ctx, tx, filter)
 		return err

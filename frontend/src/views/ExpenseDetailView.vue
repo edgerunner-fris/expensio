@@ -1,11 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { ArrowLeft } from '@element-plus/icons-vue'
+import {
+  ElMessage,
+  ElMessageBox,
+  type FormInstance,
+  type FormRules,
+} from 'element-plus'
+import { ArrowLeft, Download } from '@element-plus/icons-vue'
 import { apiMessage } from '@/api/client'
-import { budgetApi, expenseApi } from '@/api/expenses'
-import type { Budget, Category, Expense } from '@/api/types'
+import { attachmentApi, budgetApi, commentApi, expenseApi } from '@/api/expenses'
+import type {
+  ApprovalProgress,
+  Attachment,
+  Budget,
+  Category,
+  Expense,
+  ExpenseComment,
+} from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import {
   categoryLabel,
@@ -34,12 +46,29 @@ const mine = computed(() => expense.value?.submitter_id === auth.profile?.user_i
 const isDraft = computed(() => expense.value?.status === 'draft')
 const isSubmitted = computed(() => expense.value?.status === 'submitted')
 
+const approvals = ref<ApprovalProgress | null>(null)
+const attachments = ref<Attachment[]>([])
+const comments = ref<ExpenseComment[]>([])
+const uploading = ref(false)
+const commentDraft = ref('')
+const commentSending = ref(false)
+
+// 已经批过这张单的人不再看到"批准"按钮：后端会用唯一约束拒绝重复批准。
+const alreadyApproved = computed(
+  () => approvals.value?.items.some((a) => a.actor_id === auth.profile?.user_id) ?? false,
+)
+
 const canEdit = computed(() => isDraft.value && mine.value && auth.canWrite)
 const canDelete = computed(() => isDraft.value && mine.value)
 const canSubmit = computed(() => isDraft.value && mine.value && auth.canWrite)
-const canDecide = computed(() => isSubmitted.value && auth.isAdmin && !mine.value)
+const canDecide = computed(
+  () => isSubmitted.value && auth.isAdmin && !mine.value && !alreadyApproved.value,
+)
 const canCancel = computed(() => isSubmitted.value && (mine.value || auth.isAdmin))
 const canReimburse = computed(() => expense.value?.status === 'approved' && auth.isAdmin)
+// 附件只在草稿阶段可写，且只有提交人可写：提交后它是审批证据。
+const canManageAttachments = computed(() => isDraft.value && mine.value && auth.canWrite)
+const canComment = computed(() => auth.canWrite)
 
 async function load(): Promise<void> {
   const id = String(route.params.id)
@@ -55,6 +84,15 @@ async function load(): Promise<void> {
         // 预算可能已被删除，详情页不因此报错。
       }
     }
+    // 协作数据互相独立：一个失败不应挡住详情页主体。
+    const [progress, files, notes] = await Promise.allSettled([
+      expenseApi.approvals(id),
+      attachmentApi.list(id),
+      commentApi.list(id),
+    ])
+    approvals.value = progress.status === 'fulfilled' ? progress.value : null
+    attachments.value = files.status === 'fulfilled' ? files.value.items : []
+    comments.value = notes.status === 'fulfilled' ? notes.value.items : []
   } catch (err) {
     ElMessage.error(apiMessage(err))
     await router.replace('/expenses')
@@ -246,6 +284,126 @@ async function removeDraft(): Promise<void> {
     if (err !== 'cancel' && err !== 'close') ElMessage.error(apiMessage(err))
   }
 }
+
+// ---- 附件 ----
+const fileInput = ref<HTMLInputElement>()
+
+const allowedTypes: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'application/pdf': '.pdf',
+}
+const maxAttachmentBytes = 10 * 1024 * 1024
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+async function reloadAttachments(): Promise<void> {
+  const e = expense.value
+  if (!e) return
+  try {
+    attachments.value = (await attachmentApi.list(e.id)).items
+  } catch {
+    attachments.value = []
+  }
+}
+
+async function onFilePicked(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  const e = expense.value
+  if (!file || !e) return
+  if (!allowedTypes[file.type]) {
+    ElMessage.error('只支持 JPEG、PNG、WebP 或 PDF 附件')
+    return
+  }
+  if (file.size === 0 || file.size > maxAttachmentBytes) {
+    ElMessage.error('附件大小必须在 1 字节到 10 MiB 之间')
+    return
+  }
+
+  uploading.value = true
+  try {
+    const presigned = await attachmentApi.presign(e.id, {
+      file_name: file.name,
+      content_type: file.type,
+      size_bytes: file.size,
+    })
+    await attachmentApi.upload(presigned, file)
+    await attachmentApi.confirm(e.id, {
+      object_key: presigned.object_key,
+      file_name: file.name,
+      content_type: file.type,
+      size_bytes: file.size,
+    })
+    ElMessage.success('附件已上传')
+    await reloadAttachments()
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+  } finally {
+    uploading.value = false
+  }
+}
+
+function downloadAttachment(a: Attachment): void {
+  // 下载 URL 是对象存储的短期签名地址，不带 Authorization 头。
+  window.open(a.download_url, '_blank', 'noopener')
+}
+
+async function removeAttachment(a: Attachment): Promise<void> {
+  const e = expense.value
+  if (!e) return
+  try {
+    await ElMessageBox.confirm(`删除附件「${a.file_name}」？`, '删除附件', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await attachmentApi.remove(e.id, a.id)
+    ElMessage.success('附件已删除')
+    await reloadAttachments()
+  } catch (err) {
+    if (err !== 'cancel' && err !== 'close') ElMessage.error(apiMessage(err))
+  }
+}
+
+// ---- 评论 ----
+function authorLabel(userID: string): string {
+  if (userID === auth.profile?.user_id) return '我'
+  return `成员 ${userID.slice(0, 8)}`
+}
+
+async function sendComment(): Promise<void> {
+  const e = expense.value
+  const body = commentDraft.value.trim()
+  if (!e || !body) return
+  commentSending.value = true
+  try {
+    await commentApi.add(e.id, body)
+    commentDraft.value = ''
+    comments.value = (await commentApi.list(e.id)).items
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+  } finally {
+    commentSending.value = false
+  }
+}
+
+async function removeComment(comment: ExpenseComment): Promise<void> {
+  const e = expense.value
+  if (!e) return
+  try {
+    await commentApi.remove(e.id, comment.id)
+    comments.value = (await commentApi.list(e.id)).items
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+  }
+}
 </script>
 
 <template>
@@ -324,6 +482,110 @@ async function removeDraft(): Promise<void> {
           <el-descriptions-item label="审批时间">{{ formatDateTime(expense.decided_at) }}</el-descriptions-item>
         </el-descriptions>
       </div>
+
+      <div v-if="approvals && approvals.required_levels > 1" class="section-card">
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <h3 style="margin: 0">分级审批</h3>
+          <el-tag effect="plain" :type="approvals.approved_levels >= approvals.required_levels ? 'success' : 'warning'">
+            {{ approvals.approved_levels }} / {{ approvals.required_levels }} 级已批准
+          </el-tag>
+        </div>
+        <el-timeline style="margin-top: 16px">
+          <el-timeline-item
+            v-for="item in approvals.items"
+            :key="item.level"
+            :timestamp="formatDateTime(item.created_at)"
+          >
+            第 {{ item.level }} 级 · {{ authorLabel(item.actor_id) }}
+            <div v-if="item.comment" class="muted" style="white-space: pre-wrap">{{ item.comment }}</div>
+          </el-timeline-item>
+        </el-timeline>
+        <p v-if="approvals.approved_levels < approvals.required_levels" class="muted" style="margin: 0">
+          还需 {{ approvals.required_levels - approvals.approved_levels }} 位不同的管理员批准，全部完成后才会扣减预算。
+        </p>
+      </div>
+
+      <div class="section-card">
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <h3 style="margin: 0">附件 <span class="muted" style="font-weight: 400">（{{ attachments.length }}/10）</span></h3>
+          <div v-if="canManageAttachments">
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp,.pdf"
+              hidden
+              @change="onFilePicked"
+            />
+            <el-button :loading="uploading" @click="fileInput?.click()">上传附件</el-button>
+          </div>
+        </div>
+        <p v-if="attachments.length === 0" class="muted" style="margin: 8px 0 0">
+          没有附件。{{ canManageAttachments ? '' : '附件只能在草稿阶段由提交人上传。' }}
+        </p>
+        <ul v-else class="thread-list">
+          <li v-for="a in attachments" :key="a.id">
+            <div>
+              <div>{{ a.file_name }}</div>
+              <div class="muted" style="font-size: 12px">
+                {{ formatBytes(a.size_bytes) }} · {{ formatDateTime(a.created_at) }} · {{ authorLabel(a.uploaded_by) }}
+              </div>
+            </div>
+            <div style="display: flex; gap: 4px; flex-shrink: 0">
+              <el-button text :icon="Download" @click="downloadAttachment(a)">下载</el-button>
+              <el-button v-if="canManageAttachments" text type="danger" @click="removeAttachment(a)">
+                删除
+              </el-button>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="section-card">
+        <h3>评论</h3>
+        <ul v-if="comments.length > 0" class="thread-list">
+          <li v-for="c in comments" :key="c.id">
+            <div>
+              <div style="font-weight: 600">
+                {{ authorLabel(c.author_id) }}
+                <span class="muted" style="font-weight: 400; font-size: 12px">
+                  {{ formatDateTime(c.created_at) }}
+                </span>
+              </div>
+              <div style="white-space: pre-wrap">{{ c.body }}</div>
+            </div>
+            <el-button
+              v-if="c.author_id === auth.profile?.user_id || auth.isAdmin"
+              text
+              type="danger"
+              @click="removeComment(c)"
+            >
+              删除
+            </el-button>
+          </li>
+        </ul>
+        <p v-else class="muted" style="margin: 0">还没有评论。</p>
+        <div v-if="canComment" style="margin-top: 12px">
+          <el-input
+            v-model="commentDraft"
+            type="textarea"
+            :rows="2"
+            maxlength="2000"
+            show-word-limit
+            placeholder="留言给审批人或其他成员…"
+          />
+          <div style="margin-top: 8px; text-align: right">
+            <el-button
+              type="primary"
+              :loading="commentSending"
+              :disabled="!commentDraft.trim()"
+              @click="sendComment"
+            >
+              发送
+            </el-button>
+          </div>
+        </div>
+        <p v-else class="muted" style="margin: 8px 0 0">只读成员不能评论。</p>
+      </div>
     </template>
 
     <el-dialog v-model="editVisible" title="编辑草稿" width="520px" destroy-on-close>
@@ -385,3 +647,23 @@ async function removeDraft(): Promise<void> {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.thread-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.thread-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--expensio-border);
+}
+
+.thread-list li:first-child {
+  border-top: none;
+}
+</style>

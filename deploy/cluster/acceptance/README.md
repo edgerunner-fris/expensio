@@ -20,7 +20,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `deps.yaml` | 单节点 PostgreSQL / Redis / Kafka（**仅验收用**，emptyDir，无备份/认证/TLS） |
+| `deps.yaml` | 单节点 PostgreSQL / Redis / Kafka / MinIO（**仅验收用**，emptyDir，无备份/TLS） |
 | `values.yaml` | 指向集群内依赖、Traefik、关闭 TLS 与邮件、主题单副本 |
 | `smoke.sh` | 安装后的验收断言，失败即非零退出 |
 
@@ -31,8 +31,9 @@
   - ConfigMap `postgres-init`（key 为 `01-bootstrap.sh`，内容取
     `deploy/local/postgres/init/01-bootstrap.sh`）；
   - Secret `expensio-secrets`（键见 chart `values.yaml` 的 `secretKeys`，
-    `EXPENSIO_NOTIFICATION_SMTP_PASSWORD` 可省略）；
-  - Secret `deps-secrets`（`POSTGRES_PASSWORD`）。
+    `EXPENSIO_NOTIFICATION_SMTP_PASSWORD` 可省略；
+    MinIO 的 `EXPENSIO_MINIO_ACCESS_KEY` / `EXPENSIO_MINIO_SECRET_KEY` 必填）；
+  - Secret `deps-secrets`（`POSTGRES_PASSWORD`、`MINIO_ROOT_USER`、`MINIO_ROOT_PASSWORD`）。
 - `kubectl`、`helm`、`curl`、`jq` 可用。
 
 ## 本地演练

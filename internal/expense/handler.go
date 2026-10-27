@@ -17,9 +17,16 @@ import (
 // 权限判断在领域层，租户解析在中间件，handler 不重复任何一条规则。
 type Handler struct {
 	svc *Service
+	// attachments 为 nil 表示当前部署没有配置对象存储，附件端点统一返回 503。
+	attachments *AttachmentService
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// NewHandlerWithAttachments 构造带对象存储的 handler。
+func NewHandlerWithAttachments(svc *Service, attachments *AttachmentService) *Handler {
+	return &Handler{svc: svc, attachments: attachments}
+}
 
 // actorFrom 从 JWT 派生的租户上下文取身份。
 // 请求体与查询参数里没有 actor 字段，因此调用方无法伪造操作人。
@@ -48,28 +55,33 @@ type expenseView struct {
 	DecidedAt       *time.Time `json:"decided_at,omitempty"`
 	RejectionReason string     `json:"rejection_reason,omitempty"`
 	Version         int        `json:"version"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// 分级审批进度：required=2 时前端显示"1/2 已批准"。
+	RequiredApprovalLevels int16     `json:"required_approval_levels"`
+	ApprovalLevel          int16     `json:"approval_level"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 func newExpenseView(e *Expense) expenseView {
 	return expenseView{
-		ID:              e.ID,
-		SubmitterID:     e.SubmitterID,
-		Status:          string(e.Status),
-		Category:        string(e.Category),
-		Currency:        string(e.Currency),
-		AmountMinor:     e.AmountMinor,
-		Merchant:        e.Merchant,
-		Description:     e.Description,
-		OccurredAt:      e.OccurredAt,
-		BudgetID:        e.BudgetID,
-		DecidedBy:       e.DecidedBy,
-		DecidedAt:       e.DecidedAt,
-		RejectionReason: e.RejectionReason,
-		Version:         e.Version,
-		CreatedAt:       e.CreatedAt,
-		UpdatedAt:       e.UpdatedAt,
+		ID:                     e.ID,
+		SubmitterID:            e.SubmitterID,
+		Status:                 string(e.Status),
+		Category:               string(e.Category),
+		Currency:               string(e.Currency),
+		AmountMinor:            e.AmountMinor,
+		Merchant:               e.Merchant,
+		Description:            e.Description,
+		OccurredAt:             e.OccurredAt,
+		BudgetID:               e.BudgetID,
+		DecidedBy:              e.DecidedBy,
+		DecidedAt:              e.DecidedAt,
+		RejectionReason:        e.RejectionReason,
+		Version:                e.Version,
+		RequiredApprovalLevels: e.RequiredApprovalLevels,
+		ApprovalLevel:          e.ApprovalLevel,
+		CreatedAt:              e.CreatedAt,
+		UpdatedAt:              e.UpdatedAt,
 	}
 }
 
@@ -119,6 +131,7 @@ func (h *Handler) ListExpenses(c *gin.Context) {
 		PageSize int    `form:"page_size"`
 		Scope    string `form:"scope"`
 		Status   string `form:"status"`
+		Inbox    bool   `form:"inbox"`
 	}
 	if bindErr := c.ShouldBindQuery(&q); bindErr != nil {
 		httpx.Error(c, apperr.InvalidArgument("查询参数非法"))
@@ -130,6 +143,7 @@ func (h *Handler) ListExpenses(c *gin.Context) {
 	items, total, err := h.svc.List(c.Request.Context(), actor, ListQuery{
 		Scope:  q.Scope,
 		Status: q.Status,
+		Inbox:  q.Inbox,
 		Limit:  page.PageSize,
 		Offset: page.Offset(),
 	})

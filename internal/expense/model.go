@@ -23,11 +23,17 @@ const (
 	CodeVersionConflict   = "expense.version_conflict"
 	CodeBudgetNotMatched  = "expense.budget_not_matched"
 	CodeBudgetUnavailable = "expense.budget_unavailable"
+	// CodeDuplicateApprover：同一张单上一个人只能批准一次（多级审批要求不同人）。
+	CodeDuplicateApprover = "expense.duplicate_approver"
 
 	CodeBudgetOverlap          = "budget.period_overlap"
 	CodeBudgetInUse            = "budget.in_use"
 	CodeBudgetAmountBelowSpent = "budget.amount_below_committed"
 	CodeBudgetVersionConflict  = "budget.version_conflict"
+
+	CodeAttachmentLimit   = "attachment.limit_reached"
+	CodeAttachmentObject  = "attachment.object_invalid"
+	CodeAttachmentStorage = "attachment.storage_unavailable"
 )
 
 // Status 是费用单状态。取值与数据库 CHECK 完全一致。
@@ -138,11 +144,15 @@ type Expense struct {
 	DecidedAt       *time.Time
 	RejectionReason string
 	Version         int
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CreatedBy       uuid.UUID
-	UpdatedBy       uuid.UUID
-	DeletedAt       *time.Time
+	// RequiredApprovalLevels 在提交时按审批策略快照，1 或 2；
+	// ApprovalLevel 是已经完成批准的级数。两者只由审批动作推进。
+	RequiredApprovalLevels int16
+	ApprovalLevel          int16
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CreatedBy              uuid.UUID
+	UpdatedBy              uuid.UUID
+	DeletedAt              *time.Time
 }
 
 func (e *Expense) IsDraft() bool { return e.Status == StatusDraft }
@@ -185,6 +195,54 @@ type ApprovalStep struct {
 	ToStatus   Status
 	Comment    string
 	CreatedAt  time.Time
+}
+
+// ApprovalRecord 是一级批准。与 ApprovalStep 分开：它不代表状态变化，
+// 中间级批准只推进 ApprovalLevel，单据仍是 submitted。
+type ApprovalRecord struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	ExpenseID uuid.UUID
+	Level     int16
+	ActorID   uuid.UUID
+	Comment   string
+	CreatedAt time.Time
+}
+
+// Comment 是费用单上的沟通记录，软删保留审计价值。
+type Comment struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	ExpenseID uuid.UUID
+	AuthorID  uuid.UUID
+	Body      string
+	CreatedAt time.Time
+	DeletedAt *time.Time
+}
+
+// Attachment 是对象存储里的一个附件对象。文件本体不在数据库里。
+type Attachment struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	ExpenseID   uuid.UUID
+	ObjectKey   string
+	FileName    string
+	ContentType string
+	SizeBytes   int64
+	UploadedBy  uuid.UUID
+	CreatedAt   time.Time
+	DeletedAt   *time.Time
+}
+
+// ApprovalPolicy 是按币种配置的两级审批门槛。没有策略即单级审批。
+type ApprovalPolicy struct {
+	TenantID                  uuid.UUID
+	Currency                  money.Currency
+	SecondLevelThresholdMinor int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	CreatedBy                 uuid.UUID
+	UpdatedBy                 uuid.UUID
 }
 
 // Actor 是动作发起者，只能由 JWT 解析出的租户上下文构造。

@@ -59,6 +59,10 @@ var (
 	redisInstance *redis.RedisContainer
 	redisErr      error
 
+	minioOnce     sync.Once
+	minioInstance *MinIO
+	minioErr      error
+
 	dockerOnce sync.Once
 	dockerErr  error
 )
@@ -260,6 +264,9 @@ func Cleanup() {
 	defer cancel()
 	if kafkaInstance != nil {
 		_ = kafkaInstance.container.Terminate(ctx)
+	}
+	if minioInstance != nil {
+		_ = minioInstance.container.Terminate(ctx)
 	}
 	if redisInstance != nil {
 		_ = redisInstance.Terminate(ctx)

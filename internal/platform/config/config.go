@@ -183,11 +183,14 @@ type OTel struct {
 }
 
 type MinIO struct {
-	Endpoint  string `mapstructure:"endpoint"`
-	AccessKey string `mapstructure:"access_key"`
-	SecretKey string `mapstructure:"secret_key"`
-	Bucket    string `mapstructure:"bucket"`
-	UseSSL    bool   `mapstructure:"use_ssl"`
+	Endpoint string `mapstructure:"endpoint"`
+	// PublicEndpoint 是浏览器访问对象存储的地址，只影响 presigned URL 里的 Host。
+	// 留空时与 Endpoint 相同，适用于本机直跑。
+	PublicEndpoint string `mapstructure:"public_endpoint"`
+	AccessKey      string `mapstructure:"access_key"`
+	SecretKey      string `mapstructure:"secret_key"`
+	Bucket         string `mapstructure:"bucket"`
+	UseSSL         bool   `mapstructure:"use_ssl"`
 }
 
 // Billing 是支付回调的验签参数。密钥只从环境变量 / K8s Secret 读取，
@@ -287,6 +290,8 @@ func defaults(opts Options) map[string]any {
 		"minio.secret_key": "",
 		"minio.bucket":     "expensio-invoices",
 		"minio.use_ssl":    false,
+		// 空表示沿用 endpoint；容器内地址与浏览器地址不同时再覆盖。
+		"minio.public_endpoint": "",
 
 		"billing.webhook_provider": "mockpay",
 		"billing.webhook_secret":   "",

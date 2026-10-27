@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   Bell,
+  Checked,
   CreditCard,
   DataAnalysis,
   Files,
@@ -62,6 +63,10 @@ async function handleLogout(): Promise<void> {
         <el-menu-item index="/budgets">
           <el-icon><Wallet /></el-icon>
           <span>预算</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin" index="/approvals">
+          <el-icon><Checked /></el-icon>
+          <span>审批</span>
         </el-menu-item>
         <el-menu-item index="/reports">
           <el-icon><DataAnalysis /></el-icon>

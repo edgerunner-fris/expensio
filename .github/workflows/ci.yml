@@ -297,6 +297,8 @@ jobs:
           POSTGRES_PASSWORD=$(openssl rand -hex 16)
           BILLING_WEBHOOK_SECRET=$(openssl rand -hex 32)
           INTERNAL_TOKEN=$(openssl rand -hex 32)
+          MINIO_ROOT_USER=$(openssl rand -hex 8)
+          MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)
 
           kubectl create namespace expensio
           kubectl -n expensio create configmap postgres-init \
@@ -307,9 +309,13 @@ jobs:
             --from-literal=EXPENSIO_DB_APP_PASSWORD="$DB_APP_PASSWORD" \
             --from-literal=EXPENSIO_DB_MIGRATOR_PASSWORD="$DB_MIGRATOR_PASSWORD" \
             --from-literal=EXPENSIO_BILLING_WEBHOOK_SECRET="$BILLING_WEBHOOK_SECRET" \
-            --from-literal=EXPENSIO_NOTIFICATION_INTERNAL_TOKEN="$INTERNAL_TOKEN"
+            --from-literal=EXPENSIO_NOTIFICATION_INTERNAL_TOKEN="$INTERNAL_TOKEN" \
+            --from-literal=EXPENSIO_MINIO_ACCESS_KEY="$MINIO_ROOT_USER" \
+            --from-literal=EXPENSIO_MINIO_SECRET_KEY="$MINIO_ROOT_PASSWORD"
           kubectl -n expensio create secret generic deps-secrets \
-            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=MINIO_ROOT_USER="$MINIO_ROOT_USER" \
+            --from-literal=MINIO_ROOT_PASSWORD="$MINIO_ROOT_PASSWORD"
           kubectl -n expensio create secret docker-registry ghcr-pull \
             --docker-server=ghcr.io \
             --docker-username="${{ github.actor }}" \
@@ -322,6 +328,7 @@ jobs:
           kubectl -n expensio rollout status deploy/postgres --timeout=300s
           kubectl -n expensio rollout status deploy/redis --timeout=180s
           kubectl -n expensio rollout status deploy/kafka --timeout=300s
+          kubectl -n expensio rollout status deploy/minio --timeout=180s
 
       - name: helm upgrade --install
         run: |

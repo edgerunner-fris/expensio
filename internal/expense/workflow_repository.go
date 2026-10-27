@@ -17,23 +17,85 @@ func (r *Repository) GetForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) 
 		 FOR UPDATE`, id))
 }
 
-// Submit 把草稿改为已提交，并写入最终匹配的预算。
+// Submit 把草稿改为已提交，并写入最终匹配的预算与审批级数。
 // WHERE 里带 status='draft'：即使调用方漏了校验，也不会把已审批的单改回提交态。
-func (r *Repository) Submit(ctx context.Context, tx pgx.Tx, e *Expense, budgetID *uuid.UUID, actor uuid.UUID) (*Expense, error) {
+func (r *Repository) Submit(ctx context.Context, tx pgx.Tx, e *Expense, budgetID *uuid.UUID, actor uuid.UUID, requiredLevels int16) (*Expense, error) {
 	const q = `UPDATE app.expenses
-	 SET status = 'submitted', budget_id = $1, version = version + 1, updated_by = $2
-	 WHERE id = $3 AND tenant_id = $4 AND status = 'draft' AND deleted_at IS NULL
+	 SET status = 'submitted', budget_id = $1, required_approval_levels = $2,
+	     version = version + 1, updated_by = $3
+	 WHERE id = $4 AND tenant_id = $5 AND status = 'draft' AND deleted_at IS NULL
 	 RETURNING ` + expenseColumns
-	return scanExpense(tx.QueryRow(ctx, q, budgetID, actor, e.ID, e.TenantID))
+	return scanExpense(tx.QueryRow(ctx, q, budgetID, requiredLevels, actor, e.ID, e.TenantID))
 }
 
 func (r *Repository) Approve(ctx context.Context, tx pgx.Tx, e *Expense, actor uuid.UUID, at time.Time) (*Expense, error) {
+	// 最后一级批准同时把 counter 推到 required，满足
+	// expenses_approval_level_consistency（approved ⇔ 走完全部级别）。
 	const q = `UPDATE app.expenses
 	 SET status = 'approved', decided_by = $1, decided_at = $2,
+	     approval_level = required_approval_levels,
 	     version = version + 1, updated_by = $1
 	 WHERE id = $3 AND tenant_id = $4 AND status = 'submitted' AND deleted_at IS NULL
 	 RETURNING ` + expenseColumns
 	return scanExpense(tx.QueryRow(ctx, q, actor, at, e.ID, e.TenantID))
+}
+
+// AdvanceApprovalLevel 只推进计数器，不改状态——中间级批准的唯一效果。
+func (r *Repository) AdvanceApprovalLevel(ctx context.Context, tx pgx.Tx, e *Expense, level int16, actor uuid.UUID) (*Expense, error) {
+	const q = `UPDATE app.expenses
+	 SET approval_level = $1, version = version + 1, updated_by = $2
+	 WHERE id = $3 AND tenant_id = $4 AND status = 'submitted' AND deleted_at IS NULL
+	 RETURNING ` + expenseColumns
+	return scanExpense(tx.QueryRow(ctx, q, level, actor, e.ID, e.TenantID))
+}
+
+// RequiredApprovalLevels 在提交时计算审批级数。
+// 策略按租户 + 币种匹配；没有策略或金额低于门槛即单级。
+func (r *Repository) RequiredApprovalLevels(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, currency string, amountMinor int64) (int16, error) {
+	var levels int16
+	err := tx.QueryRow(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM app.approval_policies
+			WHERE tenant_id = $1 AND currency = $2
+			  AND second_level_threshold_minor <= $3
+		) THEN 2 ELSE 1 END`,
+		tenantID, currency, amountMinor).Scan(&levels)
+	return levels, err
+}
+
+// InsertApproval 追加一级批准。level 从 1 开始逐级递增，
+// 同人/同级重复由唯一约束与触发器拒绝。
+func (r *Repository) InsertApproval(ctx context.Context, tx pgx.Tx, expenseID, tenantID uuid.UUID, level int16, actorID uuid.UUID, comment string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO app.expense_approvals
+		    (id, tenant_id, expense_id, level, actor_id, comment)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuid.New(), tenantID, expenseID, level, actorID, comment)
+	return err
+}
+
+// ListApprovals 返回一张单的各级批准记录，按级别升序。
+func (r *Repository) ListApprovals(ctx context.Context, tx pgx.Tx, tenantID, expenseID uuid.UUID) ([]ApprovalRecord, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, tenant_id, expense_id, level, actor_id, comment, created_at
+		FROM app.expense_approvals
+		WHERE tenant_id = $1 AND expense_id = $2
+		ORDER BY level`, tenantID, expenseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]ApprovalRecord, 0, 2)
+	for rows.Next() {
+		var a ApprovalRecord
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.ExpenseID, &a.Level,
+			&a.ActorID, &a.Comment, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) Reject(ctx context.Context, tx pgx.Tx, e *Expense, actor uuid.UUID, at time.Time, reason string) (*Expense, error) {

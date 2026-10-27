@@ -31,6 +31,9 @@ secretKeys:
   billingWebhook: EXPENSIO_BILLING_WEBHOOK_SECRET
   internalToken: EXPENSIO_NOTIFICATION_INTERNAL_TOKEN
   smtpPassword: EXPENSIO_NOTIFICATION_SMTP_PASSWORD
+  # 对象存储凭据只给 expense 挂载；桶由服务启动时确保存在。
+  minioAccessKey: EXPENSIO_MINIO_ACCESS_KEY
+  minioSecretKey: EXPENSIO_MINIO_SECRET_KEY
 
 env: prod
 logLevel: info
@@ -46,6 +49,15 @@ redis:
 
 kafka:
   brokers: kafka.example.internal:9092
+
+# 附件对象存储。chart 不部署 MinIO：桶由平台提供，启动时自动创建。
+# publicEndpoint 是浏览器地址，只影响 presigned URL 的 Host 与签名；
+# 它必须指向用户能访问的入口（通常是对象存储的 Ingress / 负载均衡域名）。
+minio:
+  endpoint: minio.example.internal:9000
+  publicEndpoint: https://files.expensio.example.com
+  bucket: expensio-invoices
+  useSSL: true
 
 # OTLP 导出目标。Chart 不部署 Collector：地址由平台提供，
 # 且 Collector 必须同时暴露 OTLP/gRPC 4317 与可被 Prometheus 抓取的指标端点。
@@ -98,6 +110,7 @@ services:
     db: true
     jwt: true
     kafka: true
+    minio: true
   billing:
     port: 8083
     replicas: 1

@@ -97,7 +97,56 @@ export interface Expense {
   decided_at?: string
   rejection_reason?: string
   version: number
+  // 提交时按金额快照的审批级数；approval_level 是已完成的级数。
+  required_approval_levels: number
+  approval_level: number
   created_at: string
+  updated_at: string
+}
+
+export interface ExpenseApproval {
+  level: number
+  actor_id: string
+  comment?: string
+  created_at: string
+}
+
+export interface ApprovalProgress {
+  required_levels: number
+  approved_levels: number
+  items: ExpenseApproval[]
+}
+
+export interface Attachment {
+  id: string
+  file_name: string
+  content_type: string
+  size_bytes: number
+  uploaded_by: string
+  created_at: string
+  // 短期签名 URL，每次列表都会重新签发，不能缓存复用。
+  download_url: string
+  download_expires_at: string
+}
+
+export interface PresignUpload {
+  object_key: string
+  upload_url: string
+  method: 'PUT'
+  headers: Record<string, string>
+  expires_at: string
+}
+
+export interface ExpenseComment {
+  id: string
+  author_id: string
+  body: string
+  created_at: string
+}
+
+export interface ApprovalPolicy {
+  currency: string
+  second_level_threshold_minor: number
   updated_at: string
 }
 

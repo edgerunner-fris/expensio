@@ -17,6 +17,7 @@ import (
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
 	"github.com/edgerunner-fris/expensio/internal/platform/health"
 	"github.com/edgerunner-fris/expensio/internal/platform/kafka"
+	"github.com/edgerunner-fris/expensio/internal/platform/objectstore"
 	"github.com/edgerunner-fris/expensio/internal/platform/outbox"
 )
 
@@ -27,6 +28,7 @@ func main() {
 		NeedsDB:     true,
 		NeedsJWT:    true,
 		NeedsKafka:  true,
+		NeedsMinIO:  true,
 	}, setup))
 }
 
@@ -48,7 +50,24 @@ func setup(app *bootstrap.App) error {
 	}
 
 	svc := expense.NewService(database)
-	expense.RegisterRoutes(app.Server.Engine(), expense.NewHandler(svc), issuer)
+
+	// 附件依赖对象存储。与数据库一样按必需依赖处理：存储不可用时启动失败，
+	// 而不是让"上传 503、其余照常"的降级状态悄悄存在。
+	// bucket 不存在会自动创建；MinIO 不可达则在这一步暴露。
+	store, err := objectstore.New(context.Background(), objectstore.Config{
+		Endpoint:       cfg.MinIO.Endpoint,
+		PublicEndpoint: cfg.MinIO.PublicEndpoint,
+		AccessKey:      cfg.MinIO.AccessKey,
+		SecretKey:      cfg.MinIO.SecretKey,
+		Bucket:         cfg.MinIO.Bucket,
+		UseSSL:         cfg.MinIO.UseSSL,
+	})
+	if err != nil {
+		return fmt.Errorf("expense: 初始化对象存储失败: %w", err)
+	}
+	attachments := expense.NewAttachmentService(database, store, app.Logger)
+
+	expense.RegisterRoutes(app.Server.Engine(), expense.NewHandlerWithAttachments(svc, attachments), issuer)
 
 	// 事件投递是后台链路：Kafka 不可用不影响 HTTP 服务启动，
 	// 也不参与 readiness。事件已经在 outbox 里，进程活着就会继续重试。

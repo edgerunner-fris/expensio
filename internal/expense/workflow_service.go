@@ -2,11 +2,13 @@ package expense
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/events"
@@ -49,8 +51,15 @@ func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, ac
 			return err
 		}
 
+		// 中间级批准只推进会签计数，不改变状态，也不产生事件。
+		var intermediate bool
+
 		switch action {
 		case ActionSubmit:
+			required, err := s.repo.RequiredApprovalLevels(ctx, tx, e.TenantID, string(e.Currency), e.AmountMinor)
+			if err != nil {
+				return err
+			}
 			budgetID, err := s.resolveBudget(ctx, tx, e)
 			if err != nil {
 				return err
@@ -63,12 +72,24 @@ func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, ac
 					return err
 				}
 			}
-			out, err = s.repo.Submit(ctx, tx, e, budgetID, actor.UserID)
+			out, err = s.repo.Submit(ctx, tx, e, budgetID, actor.UserID, required)
 			if err != nil {
 				return stateConflictUnlessNoRows(err, e, action)
 			}
 
 		case ActionApprove:
+			next := e.ApprovalLevel + 1
+			if err := s.repo.InsertApproval(ctx, tx, e.ID, e.TenantID, next, actor.UserID, comment); err != nil {
+				return mapApprovalError(err)
+			}
+			if next < e.RequiredApprovalLevels {
+				out, err = s.repo.AdvanceApprovalLevel(ctx, tx, e, next, actor.UserID)
+				if err != nil {
+					return stateConflictUnlessNoRows(err, e, action)
+				}
+				intermediate = true
+				break
+			}
 			if e.BudgetID != nil {
 				if err := s.repo.CommitReservation(ctx, tx, e.TenantID, *e.BudgetID, e.AmountMinor); err != nil {
 					if isNoRows(err) {
@@ -105,6 +126,12 @@ func (s *Service) ApplyAction(ctx context.Context, actor Actor, id uuid.UUID, ac
 			if err != nil {
 				return stateConflictUnlessNoRows(err, e, action)
 			}
+		}
+
+		// 中间级批准没有状态变化：不写 approval_steps（它的 CHECK 要求
+		// approve 必须 submitted→approved），也不发事件。
+		if intermediate {
+			return nil
 		}
 
 		if err := s.repo.InsertApprovalStep(ctx, tx, &ApprovalStep{
@@ -153,4 +180,43 @@ func stateConflictUnlessNoRows(err error, e *Expense, action Action) error {
 		return ErrStateConflict(e.Status, action)
 	}
 	return err
+}
+
+// mapApprovalError 把各级批准表上的数据库约束翻译成可读的业务错误。
+// DB 是"同一人不能批两级"的最终防线；这里只负责把 23505 变成 409。
+func mapApprovalError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return apperr.Conflict(CodeDuplicateApprover, "同一张单不能重复批准；多级审批要求不同的人")
+		case "23514":
+			return apperr.Conflict(CodeStateConflict, "单据状态或审批顺序已变化，请刷新后重试")
+		}
+	}
+	return err
+}
+
+// ListApprovals 返回一张单的各级批准记录。无权查看的单据按不存在处理。
+func (s *Service) ListApprovals(ctx context.Context, actor Actor, id uuid.UUID) ([]ApprovalRecord, *Expense, error) {
+	var (
+		records []ApprovalRecord
+		e       *Expense
+	)
+	err := s.database.WithinTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		e, err = s.repo.Get(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if !CanView(actor, e) {
+			return apperr.NotFound("费用单")
+		}
+		records, err = s.repo.ListApprovals(ctx, tx, e.TenantID, e.ID)
+		return err
+	})
+	if err != nil {
+		return nil, nil, mapDBError(err)
+	}
+	return records, e, nil
 }
