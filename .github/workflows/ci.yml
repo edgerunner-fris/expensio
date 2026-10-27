@@ -246,3 +246,106 @@ jobs:
       - name: 清理
         if: always()
         run: docker compose --profile core --profile obs --profile mail --profile app down -v
+
+  # 真实集群验收：k3d 起一个双节点 k3s，安装单节点依赖后执行
+  # `helm upgrade --install --wait`，再断言 Hook、Ingress、NetworkPolicy（k3s
+  # 由 kube-router 真正执行策略）与 RBAC 的实际行为。kubeconform 只能证明
+  # schema 合法，证明不了这些。
+  cluster:
+    name: 真实集群 Helm 安装（k3d）
+    needs: [backend, frontend, images, web-image, migrate-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      - name: 创建 k3d 集群
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/k3d https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-amd64
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d cluster create expensio --servers 1 --agents 1 \
+            --port 8080:80@loadbalancer --wait
+          kubectl get nodes -o wide
+
+      - name: 生成密钥并创建 Secret
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm ED25519 -out /tmp/jwt.pem
+          echo "JWT_PRIVATE_KEY=$(openssl pkey -in /tmp/jwt.pem -outform DER | tail -c 32 | base64 -w0)" >> "$GITHUB_ENV"
+          echo "JWT_PUBLIC_KEY=$(openssl pkey -in /tmp/jwt.pem -pubout -outform DER | tail -c 32 | base64 -w0)" >> "$GITHUB_ENV"
+          rm -f /tmp/jwt.pem
+          echo "DB_APP_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "DB_MIGRATOR_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "BILLING_WEBHOOK_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "INTERNAL_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+          kubectl create namespace expensio
+          kubectl -n expensio create configmap postgres-init \
+            --from-file=01-bootstrap.sh=deploy/local/postgres/init/01-bootstrap.sh
+          kubectl -n expensio create secret generic expensio-secrets \
+            --from-literal=EXPENSIO_JWT_PRIVATE_KEY="$JWT_PRIVATE_KEY" \
+            --from-literal=EXPENSIO_JWT_PUBLIC_KEYS="$JWT_PUBLIC_KEY" \
+            --from-literal=EXPENSIO_DB_APP_PASSWORD="$DB_APP_PASSWORD" \
+            --from-literal=EXPENSIO_DB_MIGRATOR_PASSWORD="$DB_MIGRATOR_PASSWORD" \
+            --from-literal=EXPENSIO_BILLING_WEBHOOK_SECRET="$BILLING_WEBHOOK_SECRET" \
+            --from-literal=EXPENSIO_NOTIFICATION_INTERNAL_TOKEN="$INTERNAL_TOKEN"
+          kubectl -n expensio create secret generic deps-secrets \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+          kubectl -n expensio create secret docker-registry ghcr-pull \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="$GH_TOKEN"
+
+      - name: 部署验收用依赖
+        run: |
+          set -euo pipefail
+          kubectl apply -f deploy/cluster/acceptance/deps.yaml
+          kubectl -n expensio rollout status deploy/postgres --timeout=300s
+          kubectl -n expensio rollout status deploy/redis --timeout=180s
+          kubectl -n expensio rollout status deploy/kafka --timeout=300s
+
+      - name: helm upgrade --install
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          helm upgrade --install expensio deploy/helm/expensio \
+            -n expensio --wait --timeout 15m \
+            -f deploy/cluster/acceptance/values.yaml \
+            --set images.registry="ghcr.io/${repo}" \
+            --set images.tag="${GITHUB_SHA}" \
+            --set images.migrate="ghcr.io/${repo}-migrate"
+
+      - name: 集群内验收（Hook / Ingress / NetworkPolicy / RBAC / 事件链路）
+        run: bash deploy/cluster/acceptance/smoke.sh
+
+      - name: 失败时导出集群状态
+        if: failure()
+        run: |
+          kubectl -n expensio get all,jobs,ingress,pdb -o wide || true
+          kubectl -n expensio describe pods || true
+          kubectl -n expensio get events --sort-by=.lastTimestamp | tail -60 || true
+          for d in $(kubectl -n expensio get deploy -o name); do
+            kubectl -n expensio logs "$d" --all-containers --tail=200 || true
+          done
+          helm -n expensio status expensio || true
+
+      - name: 清理
+        if: always()
+        run: k3d cluster delete expensio

@@ -21,8 +21,14 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "expensio.fullname" . }}
+      # 不要引用 chart 自己的 ServiceAccount：pre-install Hook 在普通资源之前
+      # 创建，此时 SA 还不存在，Job 会因 “serviceaccount not found” 无法建 Pod。
+      # Hook 不需要 API 权限，用默认 SA 且不挂载令牌即可。
       automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:

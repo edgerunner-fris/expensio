@@ -1,0 +1,250 @@
+# 仅用于验收环境的单节点依赖：PostgreSQL / Redis / Kafka。
+#
+# 生产 chart 有意不部署有状态组件，本文件也不打算成为生产方案：
+# 全部使用 emptyDir，Pod 一删数据即丢；没有副本、备份、TLS 与认证。
+# 它存在的唯一目的是在真实集群里验证 chart 的 Helm Hook、RBAC、
+# NetworkPolicy、Ingress 与滚动发布行为（CI 的 cluster job 和本地演练共用）。
+#
+# 前置条件（验收脚本会先执行）：
+#   kubectl create namespace expensio
+#   kubectl -n expensio create configmap postgres-init \
+#     --from-file=01-bootstrap.sh=deploy/local/postgres/init/01-bootstrap.sh
+#   Secret expensio-secrets：EXPENSIO_DB_APP_PASSWORD / EXPENSIO_DB_MIGRATOR_PASSWORD
+#   Secret deps-secrets：POSTGRES_PASSWORD
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: expensio-acceptance
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16.15-alpine
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: deps-secrets
+                  key: POSTGRES_PASSWORD
+            # 01-bootstrap.sh 用这两个变量创建五个业务库与角色对。
+            - name: EXPENSIO_DB_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: expensio-secrets
+                  key: EXPENSIO_DB_APP_PASSWORD
+            - name: EXPENSIO_DB_MIGRATOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: expensio-secrets
+                  key: EXPENSIO_DB_MIGRATOR_PASSWORD
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: postgres-init
+            # 0644 → 官方 entrypoint 用 shell source，而不是直接执行；
+            # 脚本本身已用子 shell 包住，source 不会污染 entrypoint 的选项。
+            defaultMode: 420
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/part-of: expensio-acceptance
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4.11-alpine
+          args: ["redis-server", "--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/part-of: expensio-acceptance
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.2
+          env:
+            # 单节点 KRaft：broker 与 controller 同进程，主题只能 1 副本。
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:9093
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://kafka:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: CLUSTER_ID
+              value: MkU3OEVBNTcwNTJENDM2Qk
+            - name: KAFKA_HEAP_OPTS
+              value: -Xms256m -Xmx512m
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          readinessProbe:
+            exec:
+              command:
+                - /opt/kafka/bin/kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: expensio
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: expensio-acceptance
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka

@@ -1,0 +1,59 @@
+# 验收集群的 chart values：只覆盖“环境相关”的地址与开关，
+# 安全默认值（非 root、只读根文件系统、默认拒绝入站）保持不动。
+#
+# CI 会再追加 --set images.tag=<sha>，并把 registry 换成实际仓库路径。
+images:
+  registry: ghcr.io/edgerunner-fris/expensio
+  tag: dev
+  migrate: ghcr.io/edgerunner-fris/expensio-migrate
+# CI 用 GITHUB_TOKEN 创建；本地演练用 --set-json 'imagePullSecrets=[]' 覆盖。
+imagePullSecrets:
+  - name: ghcr-pull
+
+database:
+  host: postgres
+  port: 5432
+  # 验收集群内的 PostgreSQL 没有 TLS；生产必须用 require/verify-full。
+  sslmode: disable
+
+redis:
+  addr: redis:6379
+
+kafka:
+  brokers: kafka:9092
+
+otel:
+  enabled: false
+
+notification:
+  # 验收集群不接外部 SMTP：邀请仍会落库并返回链接，只是不发信。
+  emailEnabled: false
+  smtpAddr: smtp.example.invalid:587
+  smtpFrom: no-reply@expensio.invalid
+  smtpUseTLS: false
+
+invite:
+  baseURL: http://expensio.test:8080
+  ttl: 168h
+
+http:
+  # k3s/k3d 默认 Pod CIDR。ingress → web → gateway 时网关靠它还原客户端 IP。
+  trustedProxies: "10.42.0.0/16"
+
+ingress:
+  className: traefik
+  host: expensio.test
+  tls:
+    # 验收不签发证书；TLS 行为本身已由 kubeconform 与模板覆盖。
+    enabled: false
+
+networkPolicy:
+  # k3s 自带的 Traefik 跑在 kube-system；生产换成 ingress-nginx 命名空间。
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kube-system
+
+topics:
+  # 单 broker 只能 1 副本；chart 默认 3 是给生产三节点用的。
+  partitions: 3
+  replicationFactor: 1

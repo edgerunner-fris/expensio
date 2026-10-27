@@ -20,8 +20,13 @@ spec:
         app.kubernetes.io/component: topics
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "expensio.fullname" . }}
+      # 同 migrate：pre-install Hook 早于 chart 的 ServiceAccount 创建，
+      # 不能引用它；Hook 本身不需要任何 API 权限。
       automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
