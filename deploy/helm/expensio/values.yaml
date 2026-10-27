@@ -78,6 +78,13 @@ rateLimit:
   apiPerMinute: 1200
   apiBurst: 200
 
+http:
+  # 允许携带 X-Forwarded-For 的上游网段，逗号分隔的 IP / CIDR。
+  # 流量路径是 ingress → web（Go 反代）→ gateway，网关看到的直接来源
+  # 永远是 web Pod。留空则所有用户共享同一个限流桶，并把 web Pod IP
+  # 写进审计日志。部署时必须填集群 Pod CIDR（或 ingress controller 网段）。
+  trustedProxies: ""
+
 # 每项至少要有 port；其余字段控制注入哪些环境变量。
 services:
   identity:

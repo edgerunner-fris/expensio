@@ -102,6 +102,43 @@ type HTTP struct {
 	// DrainDelay 是 readiness 置 false 之后、真正关闭监听之前的等待时间。
 	// 本地为 0；K8s 里要留够 kube-proxy 把本实例从 Endpoints 摘掉的时间。
 	DrainDelay time.Duration `mapstructure:"drain_delay"`
+	// TrustedProxies 是允许携带 X-Forwarded-For 的上游地址，逗号分隔的 IP / CIDR。
+	// 为空表示不信任任何代理头。网关经 web 反代或 ingress 接入时，
+	// 必须把代理网段配进来，否则 ClientIP 永远等于代理 IP，
+	// 按 IP 限流就会退化成"全站共用一个桶"。
+	TrustedProxies string `mapstructure:"trusted_proxies"`
+}
+
+// TrustedProxyList 解析并校验 HTTP.TrustedProxies。
+// 拒绝 0 位前缀：信任 0.0.0.0/0 等于让任何人都能伪造来源 IP。
+func (h HTTP) TrustedProxyList() ([]string, error) {
+	raw := strings.TrimSpace(h.TrustedProxies)
+	if raw == "" {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			return nil, errors.New("http.trusted_proxies 含空项（应为逗号分隔的 IP 或 CIDR）")
+		}
+		if net.ParseIP(p) == nil {
+			_, ipnet, err := net.ParseCIDR(p)
+			if err != nil {
+				return nil, fmt.Errorf("http.trusted_proxies 中的 %q 不是合法 IP 或 CIDR", p)
+			}
+			if ones, _ := ipnet.Mask.Size(); ones == 0 {
+				return nil, fmt.Errorf("http.trusted_proxies 不允许 %q：0 位前缀会信任所有来源", p)
+			}
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 type DB struct {
@@ -221,6 +258,7 @@ func defaults(opts Options) map[string]any {
 		"http.idle_timeout":     "60s",
 		"http.shutdown_timeout": "20s",
 		"http.drain_delay":      "0s",
+		"http.trusted_proxies":  "",
 
 		"db.host":      "localhost",
 		"db.port":      5432,
@@ -318,6 +356,9 @@ func (c *Config) validate(opts Options) error {
 	}
 	if c.HTTP.DrainDelay < 0 {
 		errs = append(errs, errors.New("http.drain_delay 不能为负"))
+	}
+	if _, err := c.HTTP.TrustedProxyList(); err != nil {
+		errs = append(errs, err)
 	}
 
 	if opts.NeedsDB {

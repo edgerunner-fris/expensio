@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -92,6 +93,40 @@ func TestServesProbesAndBusinessRoutes(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("关闭超时")
+	}
+}
+
+func TestTrustedProxiesControlClientIP(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		trusted []string
+		want    string
+	}{
+		{name: "默认不信任 X-Forwarded-For", want: "10.1.2.3"},
+		{name: "可信代理网段内采信 X-Forwarded-For", trusted: []string{"10.0.0.0/8"}, want: "203.0.113.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := server.New(server.Options{
+				Addr:           "127.0.0.1:0",
+				Mode:           "test",
+				Logger:         zap.NewNop(),
+				Health:         health.New("test"),
+				TrustedProxies: tc.trusted,
+			})
+			require.NoError(t, err)
+			s.Engine().GET("/ip", func(c *gin.Context) {
+				c.String(http.StatusOK, c.ClientIP())
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+			req.RemoteAddr = "10.1.2.3:1234"
+			req.Header.Set("X-Forwarded-For", "203.0.113.9")
+			rec := httptest.NewRecorder()
+			s.Engine().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.want, rec.Body.String())
+		})
 	}
 }
 

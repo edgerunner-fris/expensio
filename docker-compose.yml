@@ -263,6 +263,8 @@ services:
     working_dir: /e2e
     environment:
       E2E_BASE_URL: http://web:8086
+      # 有 Mailpit 时额外校验邀请邮件真正投递；不配则跳过这一段。
+      E2E_MAILPIT_URL: http://mailpit:8025
       HOME: /tmp
     volumes:
       - ./e2e:/e2e
@@ -272,6 +274,8 @@ services:
     depends_on:
       web:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     logging: *default-logging
 
   # ---------------------------------------------------------------------------
@@ -550,6 +554,13 @@ services:
       EXPENSIO_UPSTREAMS_BILLING: http://billing:8083
       EXPENSIO_UPSTREAMS_REPORT: http://report:8084
       EXPENSIO_UPSTREAMS_NOTIFICATION: http://notification:8085
+      # 浏览器请求经 web 反代进来：信任 Docker 默认网段后，网关才能从
+      # X-Forwarded-For 还原真实来源 IP，按 IP 限流才有意义。
+      # 换成自定义网段时用宿主机环境变量覆盖。
+      EXPENSIO_HTTP_TRUSTED_PROXIES: ${EXPENSIO_HTTP_TRUSTED_PROXIES:-172.16.0.0/12}
+      # 本地和 E2E 会连续注册、登录、接受邀请；生产 chart 仍保持 20/min。
+      EXPENSIO_RATE_LIMIT_AUTH_PER_MINUTE: ${EXPENSIO_RATE_LIMIT_AUTH_PER_MINUTE:-120}
+      EXPENSIO_RATE_LIMIT_AUTH_BURST: ${EXPENSIO_RATE_LIMIT_AUTH_BURST:-60}
     ports:
       - "127.0.0.1:${EXPENSIO_GATEWAY_PORT:-8080}:8080"
     depends_on:

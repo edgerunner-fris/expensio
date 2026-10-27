@@ -146,6 +146,13 @@ invite:
   baseURL: https://expensio.example.com
   ttl: 168h
 
+http:
+  # 必须改成集群 Pod CIDR（或 ingress controller 的地址段），
+  # 下面只是 k3s 默认值示例；EKS 常见 10.100.0.0/16，AKS 常见 10.0.0.0/8。
+  # 流量是 ingress → web → gateway，留空会让网关只看到 web Pod IP：
+  # 所有用户共享一个按 IP 的限流桶，审计日志也记不到真实来源。
+  trustedProxies: "10.42.0.0/16"
+
 ingress:
   host: expensio.example.com
   tls:
@@ -153,6 +160,10 @@ ingress:
 ```
 
 写入 `my-values.yaml`，不要提交真实地址与密钥。
+
+`http.trustedProxies` 只信任列出的地址发来的 `X-Forwarded-For`，不要填
+`0.0.0.0/0`（启动时会拒绝）。网关在未配置该值时会打一条 WARN：此时按 IP
+的认证限流与邀请枚举防护仍会生效，但粒度为整个 web Pod，而不是单个客户端。
 
 启用 `otel.enabled` 前，集群里必须已有一套接收 OTLP/gRPC 的 Collector，
 并且满足以下条件（Chart 不会替你创建）：

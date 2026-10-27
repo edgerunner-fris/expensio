@@ -40,6 +40,9 @@ type Options struct {
 	// Middleware 在 RequestID 之前安装，通常用于 trace/metrics。
 	// 放在最外层才能把 Recovery 写回的 500 计入指标。
 	Middleware []gin.HandlerFunc
+	// TrustedProxies 为 nil 时不信任任何代理头；非空时只采信来自这些
+	// IP/CIDR 的 X-Forwarded-For。业务层依赖 ClientIP 做限流与审计。
+	TrustedProxies []string
 }
 
 type Server struct {
@@ -67,9 +70,9 @@ func New(opts Options) (*Server, error) {
 	setGinMode(opts.Mode)
 
 	engine := gin.New()
-	// 不信任任何代理头：默认行为会采信 X-Forwarded-For，任何人都能伪造 IP 写进审计日志。
-	// 部署在 ingress 之后时，再按实际网段显式配置可信代理。
-	if err := engine.SetTrustedProxies(nil); err != nil {
+	// 默认不信任任何代理头：Gin 的默认行为会采信 X-Forwarded-For，
+	// 任何人都能伪造 IP 写进审计日志。只有显式配置了可信代理网段才解析它。
+	if err := engine.SetTrustedProxies(opts.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("server: 设置可信代理失败: %w", err)
 	}
 	for _, mw := range opts.Middleware {

@@ -100,8 +100,9 @@ make load K6_DURATION=30s
 - k6 对已启动整栈跑真实业务循环；M7 实测 3 VUs / 30s，
   p95 20.26–86.28ms，阈值全部通过，详见 `docs/PROGRESS.md`。
 - 浏览器级 E2E：`make e2e`（Playwright 官方容器，需先 `make app-up`；
-  首次运行会拉取约 1 GB 镜像）。用例覆盖路由守卫、注册建单提交、报表出图
-  与 access token 失效后的自动刷新。
+  首次运行会拉取约 1 GB 镜像）。用例覆盖路由守卫、注册建单提交、报表出图、
+  access token 失效后的自动刷新，以及成员邀请全流程（创建邀请 → Mailpit
+  收信 → 公开页接受 → 一次性链接失效 → 新成员登录）。
 
 ## 可观测性
 

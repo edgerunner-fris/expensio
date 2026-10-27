@@ -238,6 +238,35 @@ func TestEd25519PublicKeysSatisfyJWTValidationWithoutSecret(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTrustedProxyListParsesAndDeduplicates(t *testing.T) {
+	t.Setenv("EXPENSIO_HTTP_TRUSTED_PROXIES", "10.0.0.0/8, 172.18.0.5,10.0.0.0/8")
+
+	cfg, err := config.Load(gatewayOptions())
+	require.NoError(t, err)
+	list, err := cfg.HTTP.TrustedProxyList()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.0/8", "172.18.0.5"}, list)
+}
+
+func TestTrustedProxyListRejectsUnsafeEntries(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{value: "0.0.0.0/0", want: "0 位前缀"},
+		{value: "::/0", want: "0 位前缀"},
+		{value: "not-an-ip", want: "不是合法 IP 或 CIDR"},
+		{value: "10.0.0.0/8,,192.168.0.0/16", want: "含空项"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("EXPENSIO_HTTP_TRUSTED_PROXIES", tc.value)
+			_, err := config.Load(gatewayOptions())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 func TestShortHS256SecretStillRejectedWhenEnabled(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)

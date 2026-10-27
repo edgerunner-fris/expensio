@@ -88,6 +88,16 @@ func New(opts config.Options) (*App, error) {
 
 	reg := health.New(cfg.Service)
 
+	trustedProxies, err := cfg.HTTP.TrustedProxyList()
+	if err != nil {
+		_ = tp.Shutdown(context.Background())
+		return nil, fmt.Errorf("bootstrap: 解析可信代理失败: %w", err)
+	}
+	if cfg.Service == "gateway" && len(trustedProxies) == 0 {
+		lg.Warn("网关未配置可信代理：经反代的请求会共享同一个来源 IP，按 IP 限流将退化为全站一个桶",
+			zap.String("env_var", "EXPENSIO_HTTP_TRUSTED_PROXIES"))
+	}
+
 	srv, err := server.New(server.Options{
 		Addr:            cfg.HTTP.Addr,
 		Mode:            ginMode(cfg.Env),
@@ -99,6 +109,7 @@ func New(opts config.Options) (*App, error) {
 		Logger:          lg,
 		Health:          reg,
 		Middleware:      httpMiddleware,
+		TrustedProxies:  trustedProxies,
 	})
 	if err != nil {
 		_ = tp.Shutdown(context.Background())

@@ -34,6 +34,7 @@ data:
   EXPENSIO_NOTIFICATION_SMTP_USERNAME: {{ .Values.notification.smtpUsername | quote }}
   EXPENSIO_NOTIFICATION_SMTP_USE_TLS: {{ .Values.notification.smtpUseTLS | quote }}
 
+  EXPENSIO_HTTP_TRUSTED_PROXIES: {{ .Values.http.trustedProxies | quote }}
   EXPENSIO_RATE_LIMIT_AUTH_PER_MINUTE: {{ .Values.rateLimit.authPerMinute | quote }}
   EXPENSIO_RATE_LIMIT_AUTH_BURST: {{ .Values.rateLimit.authBurst | quote }}
   EXPENSIO_RATE_LIMIT_API_PER_MINUTE: {{ .Values.rateLimit.apiPerMinute | quote }}

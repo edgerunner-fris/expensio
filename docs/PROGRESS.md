@@ -485,7 +485,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 12 | 并发刷新导致同一令牌被轮换两次 | **已解决** | 轮换用条件更新 `UPDATE … WHERE id=$1 AND revoked_at IS NULL` + `RowsAffected()`；抢输的一方被判为重放并撤销整族。撤销放在独立事务里提交——放在同一事务里会被随后返回的错误一起回滚 |
 | 13 | 登录接口可通过耗时分出"账号是否存在" | **已解决** | 用户或租户不存在时仍对预置哈希执行一次完整 argon2id 校验，返回文案与状态码也完全一致 |
 | 14 | 角色大小写两套（DB 小写 / 上下文大写） | **已解决** | 统一为小写，`tenantctx.Role` 同时承载 `Valid()` 与 `AtLeast()`；避免每层各转一次、某条路径漏转 |
-| 15 | gin 默认信任 `X-Forwarded-For`，审计 IP 可伪造 | **已解决** | `server.New` 里 `SetTrustedProxies(nil)`；部署到 ingress 之后再按实际网段显式配置 |
+| 15 | gin 默认信任 `X-Forwarded-For`，审计 IP 可伪造 | **已解决（2026-10-27 补配置）** | `server.New` 默认 `SetTrustedProxies(nil)`；新增 `EXPENSIO_HTTP_TRUSTED_PROXIES`（逗号分隔 IP / CIDR，拒绝 0 位前缀），只有来自可信代理的连接才解析 `X-Forwarded-For`。单测覆盖"默认忽略 / 可信网段采信"两条路径 |
 | 16 | Windows 上无法投递 SIGTERM 验证优雅关闭 | **已解决** | WSL2 实测 billing：SIGTERM 后日志依次出现 draining → stopped → service stopped，进程退出码 0。Windows `Stop-Process` 仍是 TerminateProcess，不作为验证手段 |
 | 17 | access token 用 HS256，六个服务共享同一把密钥 | **已解决（M9 迁移到 EdDSA/JWKS）** | M6–M8 期间接受该取舍（同信任域、无第三方验签方）。M9 完成迁移：identity 用 Ed25519 私钥签发，header 带 RFC 7638 指纹作 `kid`；其余五个服务只挂公钥，`EXPENSIO_JWT_ALLOW_HS256=false` 且不再持有 HMAC 密钥，攻破任一验签服务也无法伪造令牌。identity 暴露 `/.well-known/jwks.json`。实测：JWKS `kty=OKP/crv=Ed25519/alg=EdDSA/use=sig`、`x` 32 字节且无 `d`；登录令牌 `alg=EdDSA` 且带 `kid`，expense/identity 均 200；用旧 HS256 密钥伪造的令牌被网关 401。见 ADR-0008。**遗留**：identity 的迁移期 HS256 兼容路径要等一个 access TTL 后再删；多公钥轮换未在真实环境演练 |
 | 18 | 限流器故障时放行（fail-open） | **已解决（指标+告警已落地）** | 运行期 Redis 抖动时宁可短期超额，也不让全站 5xx；但启动时连不上 Redis 直接失败，避免以"无限流"状态上线。M7 新增 `expensio.gateway.rate_limit.decisions`，按 `scope`（tenant/ip）与 `outcome`（allowed/denied/error）计数，并配 `ExpensioRateLimiterFailOpen` 告警（error 速率 >0 持续 5 分钟）。压测实测 344 次决策全部 allowed、0 denied、0 error，说明指标在正常路径也确实在采集 |
@@ -496,7 +496,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 23 | 集成测试依赖 Docker，无 Docker 时会被跳过 | **已解决（策略已落地）** | `testenv` 改为显式 `docker info` 门禁：设置 `EXPENSIO_REQUIRE_DOCKER=1` 时不可用即失败，未设置才允许跳过；`make test-integration` 固定启用。失败/跳过两条分支均已实测。CI 实际执行仍见风险 26 |
 | 24 | 测试容器启动过早，迁移时报 `unexpected EOF` | **已解决** | postgres 镜像首次启动会先起临时实例跑初始化脚本再重启。testcontainers v0.44 的 postgres 模块默认不等待，必须显式 `BasicWaitStrategies()`（等第二次 ready + 端口可连） |
 | 25 | Ryuk 回收器需要额外拉取镜像，代理不通时集成测试直接失败 | **已解决（明示取舍）** | 测试改为显式 `Terminate`，默认设置 `TESTCONTAINERS_RYUK_DISABLED=true`；CI 想启用 Ryuk 可显式改回。代价：测试进程被强杀时可能残留容器 |
-| 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | `.github/workflows/ci.yml` 已包含 backend/frontend/helm/images/web-image/migrate-image 六个 job，backend 以 `EXPENSIO_REQUIRE_DOCKER=1` 执行 `-race -count=1`；本地 PyYAML 解析通过（6 jobs、26 steps）。**尚未在 GitHub runner 上实际运行**，首次 push/PR 后以 Actions 结果为准 |
+| 26 | 集成测试在 CI（Linux）尚未执行过 | **已解决（2026-10-27 实测）** | Actions run `40487635434`（commit `c441523`，workflow `CI`）全部 success：backend（`EXPENSIO_REQUIRE_DOCKER=1` + `-race -count=1`）、frontend、helm，以及 identity/expense/billing/report/notification/gateway 六个镜像、web 镜像、migrate 镜像共 11 个 job。CI 尚未运行 Playwright（需要先起整栈），见风险 36 |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **已解决** | `make env`（`scripts/env.sh`）在全新环境为 DB app/migrator/postgres、JWT、billing webhook、内部 token、MinIO、Grafana 生成随机十六进制口令，`.env` 权限 600 且不入仓；已存在 `.env` 时只补齐缺失键，不覆盖现有值。compose 对 15 处应用密钥使用 `${VAR:?}` 强制注入，缺少即拒绝启动。`.env.example` 仍保留 `expensio_local_only` 作为演示值，但推荐路径不会使用它们；仅 127.0.0.1 可达的本地基础设施保留同名 fallback |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
 | 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。M3-7 又在 `internal/e2e` 用真实费用 API → outbox → Kafka → report 消费者 → 报表 API 跑通完整链路 |
@@ -506,7 +506,8 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 33 | 真实 SMTP 供应商（STARTTLS / 认证）尚未验证 | **待验证（M9）** | 集成测试用假 Mailer 验证退避与状态迁移，端到端联调用 Mailpit 收信；`RequireTLS`、`PlainAuth` 与证书校验只做了单元级覆盖，尚未对真实邮件服务验证。M7 范围是可观测性、M8 范围是前端与 E2E，本项均未动；M9 用真实供应商或启用了 STARTTLS 的本地中继补测 |
 | 34 | 前端首屏包体偏大 | **已解决（M8，首屏）** | 原构建 `index` 865.67 KB（gzip 276.04 KB）、`ReportsView` 510.52 KB（gzip 172.62 KB）。M8 改为逐组件注册 Element Plus（不再 `app.use(ElementPlus)`），并把 ECharts 拆成按需 `import()`。实测：`index` 469.16 KB（gzip 150.49 KB，原始体积 -45.8%、gzip -45.5%），`ReportsView` 5.07 KB，ECharts 独立为 `charts` 519.31 KB（gzip 175.39 KB），只在报表页真正有数据时下载。Vite 仍对 `charts` 报 >500 KB：这是按需 chunk，不影响首屏；若继续压缩需换更小的图表实现或拆分 zrender，暂不做 |
 | 35 | 没有成员邀请/入组接口，新租户只有 owner | **已解决（M10）** | M1 的"成员管理"原先只包含列表与角色调整；新租户注册后只有 owner，而自审批被禁止，真实审批流程必须先由运维写库补成员。M10 补齐：owner/admin 创建邀请（只有 owner 能邀请 owner），令牌 32 字节随机值、库内只存 SHA-256 摘要，同一租户同一邮箱最多一条待接受邀请，重复邀请撤销旧链接，默认 7 天过期；接受时必须验证密码（新邮箱设置、已有账号输入原密码），公开页与接受接口经网关 IP 限流；邮件经 notification 发件箱投递，入队失败仍返回可复制的一次性链接。详见 ADR-0010 与 M10 章节。遗留：链接是 bearer 凭据（新邮箱仍可凭链接入组）、无域名限制/批量邀请/撤销通知 |
-| 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。CI 尚未接入（风险 20/26） |
+| 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。M10 追加邀请流程用例（创建 → Mailpit 收信 → 公开页接受 → 一次性链接失效 → 新成员登录 → owner 复核成员列表），全量 `--repeat-each=3` 为 9 passed（23.3s）。CI 尚未运行浏览器测试（需要先起整栈），仍见风险 26 |
+| 37 | 网关按 IP 限流经反代后退化为"全站一个桶" | **已解决（配置化；集群须填值）** | 邀请 E2E 第三次重复运行时接受接口返回 429：浏览器 → web（Go 反代）→ gateway，网关的 `ClientIP` 永远是 web 容器/Pod IP，所有用户共享同一个认证限流桶，审计日志也只记到代理。修复：新增 `EXPENSIO_HTTP_TRUSTED_PROXIES`（默认空、校验、拒绝 `/0`），compose 设为 Docker 网段 `172.16.0.0/12` 并把本地 auth 限流放宽到 120/min、burst 60（Helm 生产值仍为 20/min、burst 10）；网关未配置时启动打 WARN。实测网关日志 `client_ip=172.18.0.18`（E2E 容器）而不是 web 的 `172.18.0.2`，E2E 9/9。**Helm `http.trustedProxies` 默认空，部署时必须填集群 Pod/Ingress 网段**，见 DEPLOYMENT.md |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -1812,13 +1813,49 @@ PASS  网关不转发内部邮件接口  status=404
   `node:24-alpine` 缺 `@rolldown/binding-linux-x64-musl`，改用 `node:24`
   后构建成功。这是本地验收命令的细节，不影响 `Dockerfile.web`（它自己
   `npm ci`）。
+- **E2E 连续运行暴露按 IP 限流失真**：邀请用例写完后用
+  `--repeat-each=3` 连跑，第三轮的接受请求返回 429。查网关访问日志与
+  trace 后确认：请求经 web 反代进入，网关 `ClientIP` 恒为 web 容器 IP，
+  认证类限流实际是"整栈一个桶"；同时审计日志记不到真实来源。修复方式与
+  实测见风险 37，最终 `client_ip` 变为 E2E 容器地址，9 个用例全绿。
+- **member 角色不能读成员管理接口**：邀请用例最初在接受后直接用新会话
+  打开 `/members` 断言邀请人邮箱，实际该接口只对 owner/admin 开放，
+  页面拿到 403 并显示空表。改为退回 owner 登录后复核成员列表——这同时
+  验证了两条会话路径。
+
+### 浏览器级 E2E（2026-10-27）
+
+`e2e/tests/support.ts` 提供每次运行唯一的租户注册与邀请链接路径提取；
+`e2e/tests/invite-flow.spec.ts` 覆盖：
+
+1. owner 在成员页创建邀请，结果弹窗给出一次性链接；
+2. Mailpit（`E2E_MAILPIT_URL`）收到邮件，正文包含同一个链接；
+3. 新用户在公开页设置姓名/密码后加入，会话切到被邀请租户且角色为成员；
+4. 再次打开同一链接返回 410 "邀请已被使用"；
+5. 退出后用新邮箱/密码/租户标识登录成功；
+6. owner 重新登录后成员列表包含被邀请人。
+
+```text
+$ docker compose --profile app --profile e2e run --rm e2e \
+    "npm ci --no-audit --no-fund && npx playwright test --repeat-each=3"
+Running 9 tests using 1 worker
+  ✓  1 [chromium] › tests/expense-flow.spec.ts:56:1 › 未登录访问受保护路由会跳到登录页 (364ms)
+  ...
+  ✓  9 [chromium] › tests/invite-flow.spec.ts:39:1 › 邀请成员 → 邮件送达 → 公开页接受 → 新成员可登录 (3.5s)
+
+  9 passed (23.3s)
+```
+
+本地 `vite dev` 场景没有 Mailpit 时，用例仍跑完整 UI 流程，只跳过邮件
+送达断言（`E2E_MAILPIT_URL` 为空）。
 
 ## 下一步
 
 1. 风险 33：用启用 STARTTLS 的真实 SMTP 中继补测认证与证书校验；
 2. EdDSA 收尾：一个 access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256`、删除
    HS256 兼容代码与共享密钥；补一次公钥轮换演练；
-3. 风险 20/26：在真实集群 apply Helm、在 GitHub runner 执行 CI（含 `make e2e`）；
+3. 风险 20：在真实集群 apply Helm（含按集群 Pod CIDR 填
+   `http.trustedProxies`，见风险 37）；浏览器级 E2E 尚未接入 CI；
 4. 最终验收：演示脚本、README 截图与全景回归。
 
 
