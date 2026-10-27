@@ -47,7 +47,9 @@ async function loadSubscription(): Promise<void> {
   try {
     subscription.value = await billingApi.currentSubscription()
   } catch (err) {
-    if (errorCode(err) === 'not_found') {
+    // 新租户本来就没有订阅，404 是正常的空状态，不是错误。
+    // code 必须与 apperr.CodeNotFound 一致（common.not_found）。
+    if (errorCode(err) === 'common.not_found') {
       subscription.value = null
       return
     }

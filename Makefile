@@ -86,6 +86,12 @@ load: ## 对已启动的整栈跑 k6（默认 30s，K6_DURATION 可覆盖）
 e2e: ## 浏览器级 E2E（Playwright 容器；需先 make app-up）
 	$(COMPOSE) --profile app --profile e2e run --rm e2e
 
+preview: ## 生成 docs/screenshots 界面预览图（需先 make app-up）
+	$(COMPOSE) --profile app --profile e2e run --rm -T \
+		-e PREVIEW_OUT=/out \
+		-v "$$PWD/docs/screenshots:/out" \
+		e2e "npm ci --no-audit --no-fund && npx playwright test --config playwright.capture.config.ts"
+
 topics: ## 创建业务事件主题（幂等；up 之后执行一次）
 	./scripts/topics.sh
 

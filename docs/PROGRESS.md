@@ -496,7 +496,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 23 | 集成测试依赖 Docker，无 Docker 时会被跳过 | **已解决（策略已落地）** | `testenv` 改为显式 `docker info` 门禁：设置 `EXPENSIO_REQUIRE_DOCKER=1` 时不可用即失败，未设置才允许跳过；`make test-integration` 固定启用。失败/跳过两条分支均已实测。CI 实际执行仍见风险 26 |
 | 24 | 测试容器启动过早，迁移时报 `unexpected EOF` | **已解决** | postgres 镜像首次启动会先起临时实例跑初始化脚本再重启。testcontainers v0.44 的 postgres 模块默认不等待，必须显式 `BasicWaitStrategies()`（等第二次 ready + 端口可连） |
 | 25 | Ryuk 回收器需要额外拉取镜像，代理不通时集成测试直接失败 | **已解决（明示取舍）** | 测试改为显式 `Terminate`，默认设置 `TESTCONTAINERS_RYUK_DISABLED=true`；CI 想启用 Ryuk 可显式改回。代价：测试进程被强杀时可能残留容器 |
-| 26 | 集成测试在 CI（Linux）尚未执行过 | **已解决（2026-10-27 实测）** | Actions run `40487635434`（commit `c441523`，workflow `CI`）全部 success：backend（`EXPENSIO_REQUIRE_DOCKER=1` + `-race -count=1`）、frontend、helm，以及 identity/expense/billing/report/notification/gateway 六个镜像、web 镜像、migrate 镜像共 11 个 job。CI 尚未运行 Playwright（需要先起整栈），见风险 36 |
+| 26 | 集成测试在 CI（Linux）尚未执行过 | **已解决（2026-10-27 实测）** | Actions run `40487635434`（commit `c441523`，workflow `CI`）全部 success：backend（`EXPENSIO_REQUIRE_DOCKER=1` + `-race -count=1`）、frontend、helm，以及 identity/expense/billing/report/notification/gateway 六个镜像、web 镜像、migrate 镜像共 11 个 job。M13：main 分支 CI 已增加整栈 Playwright job（拉取本次推送镜像，见最终验收） |
 | 27 | `.env.example` 与 compose 含固定本地口令 | **已解决** | `make env`（`scripts/env.sh`）在全新环境为 DB app/migrator/postgres、JWT、billing webhook、内部 token、MinIO、Grafana 生成随机十六进制口令，`.env` 权限 600 且不入仓；已存在 `.env` 时只补齐缺失键，不覆盖现有值。compose 对 15 处应用密钥使用 `${VAR:?}` 强制注入，缺少即拒绝启动。`.env.example` 仍保留 `expensio_local_only` 作为演示值，但推荐路径不会使用它们；仅 127.0.0.1 可达的本地基础设施保留同名 fallback |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
 | 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。M3-7 又在 `internal/e2e` 用真实费用 API → outbox → Kafka → report 消费者 → 报表 API 跑通完整链路 |
@@ -506,7 +506,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 33 | 真实 SMTP 供应商（STARTTLS / 认证）尚未验证 | **已解决（M11，协议层实测）** | 集成测试用假 Mailer 验证退避与状态迁移，端到端联调用 Mailpit 收信（明文 1025），`RequireTLS`、`PlainAuth` 与证书校验此前确实没有对真实 SMTP 服务执行过。M11 新增 `internal/notification/mailer_test.go`：进程内起真实 TCP socket 的最小 SMTP 服务（EHLO / STARTTLS / AUTH PLAIN / MAIL / RCPT / DATA / QUIT），自签 ECDSA 证书经 `MailerOptions.TLSConfig` 注入 RootCAs，实测三条路径——STARTTLS 后 AUTH PLAIN 成功并收到正文、`RequireTLS` 下服务器不公布 STARTTLS 即拒发、自签证书不在信任链时握手失败。`go test ./internal/notification -run TestSMTPMailer -race -count=5` → `ok 1.183s`。遗留：真实供应商的地址、凭据与证书链尚未接入，属部署配置而非代码路径，见 M11 |
 | 34 | 前端首屏包体偏大 | **已解决（M8，首屏）** | 原构建 `index` 865.67 KB（gzip 276.04 KB）、`ReportsView` 510.52 KB（gzip 172.62 KB）。M8 改为逐组件注册 Element Plus（不再 `app.use(ElementPlus)`），并把 ECharts 拆成按需 `import()`。实测：`index` 469.16 KB（gzip 150.49 KB，原始体积 -45.8%、gzip -45.5%），`ReportsView` 5.07 KB，ECharts 独立为 `charts` 519.31 KB（gzip 175.39 KB），只在报表页真正有数据时下载。Vite 仍对 `charts` 报 >500 KB：这是按需 chunk，不影响首屏；若继续压缩需换更小的图表实现或拆分 zrender，暂不做 |
 | 35 | 没有成员邀请/入组接口，新租户只有 owner | **已解决（M10）** | M1 的"成员管理"原先只包含列表与角色调整；新租户注册后只有 owner，而自审批被禁止，真实审批流程必须先由运维写库补成员。M10 补齐：owner/admin 创建邀请（只有 owner 能邀请 owner），令牌 32 字节随机值、库内只存 SHA-256 摘要，同一租户同一邮箱最多一条待接受邀请，重复邀请撤销旧链接，默认 7 天过期；接受时必须验证密码（新邮箱设置、已有账号输入原密码），公开页与接受接口经网关 IP 限流；邮件经 notification 发件箱投递，入队失败仍返回可复制的一次性链接。详见 ADR-0010 与 M10 章节。遗留：链接是 bearer 凭据（新邮箱仍可凭链接入组）、无域名限制/批量邀请/撤销通知 |
-| 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。M10 追加邀请流程用例（创建 → Mailpit 收信 → 公开页接受 → 一次性链接失效 → 新成员登录 → owner 复核成员列表），全量 `--repeat-each=3` 为 9 passed（23.3s）。CI 尚未运行浏览器测试（需要先起整栈），仍见风险 26 |
+| 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。M10 追加邀请流程用例（创建 → Mailpit 收信 → 公开页接受 → 一次性链接失效 → 新成员登录 → owner 复核成员列表），全量 `--repeat-each=3` 为 9 passed（23.3s）。M13：CI 的 `e2e` job 在 main 分支用推送镜像实测通过（见最终验收） |
 | 37 | 网关按 IP 限流经反代后退化为"全站一个桶" | **已解决（配置化；集群须填值）** | 邀请 E2E 第三次重复运行时接受接口返回 429：浏览器 → web（Go 反代）→ gateway，网关的 `ClientIP` 永远是 web 容器/Pod IP，所有用户共享同一个认证限流桶，审计日志也只记到代理。修复：新增 `EXPENSIO_HTTP_TRUSTED_PROXIES`（默认空、校验、拒绝 `/0`），compose 设为 Docker 网段 `172.16.0.0/12` 并把本地 auth 限流放宽到 120/min、burst 60（Helm 生产值仍为 20/min、burst 10）；网关未配置时启动打 WARN。实测网关日志 `client_ip=172.18.0.18`（E2E 容器）而不是 web 的 `172.18.0.2`，E2E 9/9。**Helm `http.trustedProxies` 默认空，部署时必须填集群 Pod/Ingress 网段**，见 DEPLOYMENT.md |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
@@ -1938,14 +1938,67 @@ $ docker compose --profile app --profile e2e run --rm e2e
 重新登录。仓库自建以来没有对外签发过 HS256 令牌，因此这里只影响假想的
 迁移期部署。
 
+## M13 完成情况：最终验收
+
+### CI 整栈 Playwright（风险 26/36 的最后一环）
+
+`ci.yml` 新增 `e2e` job，只在 main 分支、等 backend/frontend/images/web-image
+全部成功后执行：登录 GHCR 拉取本次提交的七个镜像并打
+`expensio/<svc>:<sha>` 本地标签 → `bash scripts/env.sh` 生成 `.env` →
+`docker compose --profile app up -d --wait` → `docker compose run e2e`。
+测的是即将部署的那批镜像，不在 runner 上重新构建。
+
+实测 run `40494336695`（commit `556567a`）12 个 job 全部 success，其中
+`浏览器端到端（整栈）` 从 11:16:06Z 到 11:17:54Z（1m48s）。本地同一命令
+序列的输出见 M12 章节。
+
+### Helm 渲染结果的 schema 校验
+
+`helm lint` / `helm template` 只能证明模板可渲染；字段名写错时 API server
+会静默忽略未知字段。CI 的 helm job 追加 kubeconform（K8s 1.31 schema）：
+
+```text
+$ helm template expensio deploy/helm/expensio --namespace expensio \
+    | kubeconform -strict -summary -kubernetes-version 1.31.0
+Summary: 24 resources found parsing stdin - Valid: 24, Invalid: 0, Errors: 0, Skipped: 0
+EXIT=0
+```
+
+这只证明字段合法，**不证明** RBAC、NetworkPolicy、Ingress 与 Hook Job 在
+集群里的实际行为；集群 apply 仍未做。
+
+### 界面预览与由此发现的一个缺陷
+
+`e2e/capture/preview.spec.ts`（独立 config，`npx playwright test` 不会执行）
+在真实整栈上注册租户、建 5 条预算、6 张费用单（提交 5 张、保留 1 张草稿）、
+邀请 admin 并完成 3 通过 1 驳回，然后截取 8 个页面到 `docs/screenshots/`：
+
+```text
+$ make preview
+Running 1 test using 1 worker
+  ✓  1 [chromium] › capture/preview.spec.ts:74:1 › 生成界面预览图 (6.4s)
+  1 passed
+```
+
+首次生成时截图里出现红色 toast「订阅不存在」。原因是前端 `BillingView` 把
+404 的 `code` 写成了 `'not_found'`，而 `apperr.CodeNotFound` 实际是
+`common.not_found`，于是新租户打开账单页会误报错。已改为
+`common.not_found` 并加注释；重新构建 web 镜像后 toast 消失，截图已更新。
+
+### 结论
+
+- 本地整栈（六个服务 + web + PostgreSQL/Redis/Kafka/MinIO + Mailpit +
+  观测）：健康检查全绿，Playwright 3 passed；
+- CI：12 个 job 全绿，包含整栈浏览器 E2E 与 kubeconform；
+- 仍未验证：真实集群 apply、真实 SMTP 供应商、公钥在线轮换（见下一步）。
+
 ## 下一步
 
 1. 接入真实邮件供应商时复核地址、凭据、证书链与 `RequireTLS`（协议层已由
    M11 覆盖）；
 2. 公钥轮换演练：按 `docs/DEPLOYMENT.md` 的双公钥步骤在真实环境切换一次；
 3. 风险 20：在真实集群 apply Helm（含按集群 Pod CIDR 填
-   `http.trustedProxies`，见风险 37）；浏览器级 E2E 尚未接入 CI；
-4. 最终验收：演示脚本、README 截图与全景回归。
+   `http.trustedProxies`，见风险 37）。
 
 
 

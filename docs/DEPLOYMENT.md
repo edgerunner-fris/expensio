@@ -1,8 +1,10 @@
 # 部署
 
-本文只描述当前真实可执行的路径。K8s 部分在本地做过 `helm lint` 与
-`helm template` 验证，但**尚未在真实集群上 apply**；这项状态记录在
-`docs/PROGRESS.md` 的风险清单里，不在这里含糊带过。
+本文只描述当前真实可执行的路径。K8s 部分在本地做过 `helm lint`、
+`helm template` 与 kubeconform（K8s 1.31 schema，24/24 valid）验证，
+但**尚未在真实集群上 apply**；schema 合法不等于 RBAC、NetworkPolicy 与
+Ingress 的实际行为正确。这项状态记录在 `docs/PROGRESS.md` 的风险清单里，
+不在这里含糊带过。
 
 ## 本地整栈（Docker Compose）
 

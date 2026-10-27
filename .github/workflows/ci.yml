@@ -88,6 +88,15 @@ jobs:
       - name: helm template
         run: helm template expensio deploy/helm/expensio > /tmp/expensio-manifests.yaml
 
+      # helm lint / template 只证明模板能渲染，不证明字段符合 API schema。
+      # kubeconform 用官方 OpenAPI schema 逐字段校验，挡掉拼错的字段名
+      # （K8s 会静默忽略未知字段）。
+      - name: kubeconform 校验渲染结果
+        run: |
+          docker run --rm -i ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary -kubernetes-version 1.31.0 \
+            < /tmp/expensio-manifests.yaml
+
   images:
     name: 镜像 ${{ matrix.service }}
     needs: [backend, frontend]

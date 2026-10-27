@@ -41,6 +41,20 @@ Kafka 3.9 KRaft / MinIO；Vue 3 / TypeScript / Vite / Element Plus / Pinia /
 Vue Router / ECharts / Axios；Docker Compose、Kubernetes + Helm、
 GitHub Actions、golang-migrate；testify、testcontainers-go、k6、Playwright。
 
+## 界面预览
+
+截图不是静态稿：`e2e/capture/preview.spec.ts` 在真实整栈上注册租户、
+建预算与费用、邀请 admin 完成审批，再逐页截屏，所有数据都经真实 API 产生。
+`make app-up` 之后执行 `make preview` 可重新生成到 `docs/screenshots/`。
+
+| 费用单与状态流转 | 报表（按币种分列） |
+| --- | --- |
+| ![费用单](docs/screenshots/02-expenses.png) | ![报表](docs/screenshots/04-reports.png) |
+| **预算占用** | **成员与邀请** |
+| ![预算](docs/screenshots/05-budgets.png) | ![成员](docs/screenshots/06-members.png) |
+
+登录、费用详情、账单与订阅、通知的截图在同目录。
+
 ## 关键设计
 
 - **多租户隔离**：每个服务独占数据库，`FORCE ROW LEVEL SECURITY` +
@@ -148,7 +162,8 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 未在真实 Kubernetes 集群 apply；NetworkPolicy / PDB / 多副本行为未实测。
-- CI 已在 GitHub runner 上全绿，但不运行浏览器级 E2E（需要先起整栈）。
+- CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
+  Playwright（PR 不跑，本地用 `make e2e`）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；
   已有账号仍须原密码。没有域名限制、批量邀请与撤销通知。
 - 公钥轮换由「逗号分隔多公钥」支持，单元测试覆盖新旧 `kid` 并存；尚未在
