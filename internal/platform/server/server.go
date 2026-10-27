@@ -37,6 +37,9 @@ type Options struct {
 	DrainDelay time.Duration
 	Logger     *zap.Logger
 	Health     *health.Registry
+	// Middleware 在 RequestID 之前安装，通常用于 trace/metrics。
+	// 放在最外层才能把 Recovery 写回的 500 计入指标。
+	Middleware []gin.HandlerFunc
 }
 
 type Server struct {
@@ -68,6 +71,11 @@ func New(opts Options) (*Server, error) {
 	// 部署在 ingress 之后时，再按实际网段显式配置可信代理。
 	if err := engine.SetTrustedProxies(nil); err != nil {
 		return nil, fmt.Errorf("server: 设置可信代理失败: %w", err)
+	}
+	for _, mw := range opts.Middleware {
+		if mw != nil {
+			engine.Use(mw)
+		}
 	}
 	engine.Use(middleware.RequestID())
 	engine.Use(middleware.AccessLog(opts.Logger))

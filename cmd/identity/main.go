@@ -6,9 +6,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/edgerunner-fris/expensio/internal/identity"
-	"github.com/edgerunner-fris/expensio/internal/platform/auth"
 	"github.com/edgerunner-fris/expensio/internal/platform/bootstrap"
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
@@ -17,10 +17,13 @@ import (
 
 func main() {
 	os.Exit(bootstrap.Main(config.Options{
-		Service:     "identity",
-		DefaultAddr: ":8081",
-		NeedsDB:     true,
-		NeedsJWT:    true,
+		Service:                 "identity",
+		DefaultAddr:             ":8081",
+		NeedsDB:                 true,
+		NeedsJWT:                true,
+		NeedsJWTSigner:          true,
+		NeedsInternalAPI:        true,
+		NeedsNotificationClient: true,
 	}, setup))
 }
 
@@ -35,16 +38,27 @@ func setup(app *bootstrap.App) error {
 	app.OnStop(database.Close)
 	app.Health.Add(health.Check("db", database.Ping))
 
-	issuer, err := auth.NewTokenIssuer(cfg.JWT.Issuer, cfg.JWT.Secret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	issuer, err := cfg.JWT.AuthIssuer()
 	if err != nil {
 		return fmt.Errorf("identity: 初始化令牌签发器失败: %w", err)
 	}
 
-	svc, err := identity.NewService(database, issuer)
+	// 邀请邮件通过 notification 的内部接口投递；identity 不直接连 SMTP。
+	notifier, err := identity.NewHTTPNotifier(cfg.Notify.ServiceURL, cfg.Notify.InternalToken, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("identity: 初始化邀请邮件客户端失败: %w", err)
+	}
+	svc, err := identity.NewService(database, issuer, identity.InvitationOptions{
+		Notifier: notifier,
+		BaseURL:  cfg.Invite.BaseURL,
+		TTL:      cfg.Invite.TTL,
+	})
 	if err != nil {
 		return fmt.Errorf("identity: 初始化业务服务失败: %w", err)
 	}
 
-	identity.RegisterRoutes(app.Server.Engine(), identity.NewHandler(svc), issuer)
+	handler := identity.NewHandler(svc)
+	handler.EnableInternalAPI(cfg.Notify.InternalToken)
+	identity.RegisterRoutes(app.Server.Engine(), handler, issuer)
 	return nil
 }

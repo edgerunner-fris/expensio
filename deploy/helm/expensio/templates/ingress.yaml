@@ -1,0 +1,32 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "expensio.fullname" . }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # 全部流量进 web：静态资源与 /api 反代都在同一个源，浏览器不需要 CORS。
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ printf "%s-web" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+                port:
+                  number: {{ .Values.web.port }}
+{{- end }}

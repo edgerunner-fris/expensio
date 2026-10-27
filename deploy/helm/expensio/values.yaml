@@ -1,0 +1,180 @@
+# Expensio Helm values。
+#
+# 这个 chart 不部署有状态依赖（PostgreSQL / Redis / Kafka）；它们由平台团队
+# 或云服务提供，地址通过 values 注入。Chart 也不创建 Secret：生产密钥只能
+# 来自预先存在的 K8s Secret，键名见 secretKeys。这样 `helm get values` 与
+# Git 历史里都不会出现明文。
+
+nameOverride: ""
+fullnameOverride: ""
+
+images:
+  # 每个服务一个仓库：{registry}/{service}:{tag}
+  registry: ghcr.io/edgerunner-fris/expensio
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+  # 迁移镜像 = golang-migrate CLI + 仓库 migrations/
+  migrate: ghcr.io/edgerunner-fris/expensio-migrate
+
+imagePullSecrets: []
+
+# 预先创建的 Secret 名称。缺少必需键时 Pod 会停在 CreateContainerConfigError，
+# 这是有意的：宁可起不来，也不要带着空密钥提供服务。
+existingSecret: expensio-secrets
+secretKeys:
+  jwt: EXPENSIO_JWT_SECRET
+  # identity 用私钥签发；其余服务只挂公钥验签。公钥是公开信息，
+  # 但仍放在 Secret 里是为了与现有密钥分发流程保持一致。
+  jwtPrivateKey: EXPENSIO_JWT_PRIVATE_KEY
+  jwtPublicKeys: EXPENSIO_JWT_PUBLIC_KEYS
+  dbAppPassword: EXPENSIO_DB_APP_PASSWORD
+  dbMigratorPassword: EXPENSIO_DB_MIGRATOR_PASSWORD
+  billingWebhook: EXPENSIO_BILLING_WEBHOOK_SECRET
+  internalToken: EXPENSIO_NOTIFICATION_INTERNAL_TOKEN
+  smtpPassword: EXPENSIO_NOTIFICATION_SMTP_PASSWORD
+
+env: prod
+logLevel: info
+
+database:
+  host: postgres.example.internal
+  port: 5432
+  # 生产必须 require 或 verify-full；disable 只适用于本地 compose。
+  sslmode: require
+
+redis:
+  addr: redis.example.internal:6379
+
+kafka:
+  brokers: kafka.example.internal:9092
+
+# OTLP 导出目标。Chart 不部署 Collector：地址由平台提供，
+# 且 Collector 必须同时暴露 OTLP/gRPC 4317 与可被 Prometheus 抓取的指标端点。
+otel:
+  enabled: false
+  endpoint: otel-collector.observability.svc.cluster.local:4317
+  # 集群内通常是明文 gRPC；跨网络时改为 false 并配置 TLS。
+  insecure: true
+
+billing:
+  webhookProvider: mockpay
+
+notification:
+  emailEnabled: true
+  smtpAddr: smtp.example.internal:587
+  smtpFrom: no-reply@expensio.example
+  smtpUsername: ""
+  # true 时服务器不支持 STARTTLS 就拒绝发送。
+  smtpUseTLS: true
+
+# 成员邀请链接前缀：必须等于用户浏览器里访问的站点（Ingress 对外地址）。
+invite:
+  baseURL: https://expensio.example.com
+  ttl: 168h
+
+rateLimit:
+  authPerMinute: 20
+  authBurst: 10
+  apiPerMinute: 1200
+  apiBurst: 200
+
+# 每项至少要有 port；其余字段控制注入哪些环境变量。
+services:
+  identity:
+    port: 8081
+    replicas: 1
+    db: true
+    jwt: true
+    internalToken: true
+  expense:
+    port: 8082
+    replicas: 1
+    db: true
+    jwt: true
+    kafka: true
+  billing:
+    port: 8083
+    replicas: 1
+    db: true
+    jwt: true
+    kafka: true
+    billingWebhook: true
+  report:
+    port: 8084
+    replicas: 1
+    db: true
+    jwt: true
+    kafka: true
+  notification:
+    port: 8085
+    replicas: 1
+    db: true
+    jwt: true
+    kafka: true
+    internalToken: true
+    notification: true
+  gateway:
+    port: 8080
+    replicas: 2
+    jwt: true
+    redis: true
+    upstreams: true
+
+web:
+  replicas: 2
+  port: 8086
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: expensio.example.com
+  tls:
+    enabled: true
+    secretName: expensio-tls
+
+migration:
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+
+topics:
+  enabled: true
+  partitions: 6
+  replicationFactor: 3
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+
+networkPolicy:
+  enabled: true
+  # 以命名空间标签选择 ingress controller；不同发行版按需覆盖。
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

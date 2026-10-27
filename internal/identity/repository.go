@@ -133,6 +133,32 @@ func (r *Repository) ListMembers(ctx context.Context, tx pgx.Tx, limit, offset i
 	return members, total, rows.Err()
 }
 
+// ListContacts 返回当前租户的活跃成员联系方式，供 notification 服务解析收件人。
+// 只在带内部令牌的 internal 接口里调用；RLS 仍然按租户上下文隔离。
+func (r *Repository) ListContacts(ctx context.Context, tx pgx.Tx) ([]Member, error) {
+	const q = `SELECT m.user_id, u.email, u.display_name, m.role, m.status, m.created_at
+	           FROM app.memberships m
+	           JOIN app.users u ON u.id = m.user_id
+	           WHERE m.deleted_at IS NULL AND m.status = 'active' AND u.deleted_at IS NULL
+	           ORDER BY m.created_at, m.user_id`
+	rows, err := tx.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	members := make([]Member, 0, 16)
+	for rows.Next() {
+		var m Member
+		if err := rows.Scan(&m.UserID, &m.Email, &m.DisplayName, &m.Role, &m.Status, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = m.CreatedAt.UTC()
+		members = append(members, m)
+	}
+	return members, rows.Err()
+}
+
 // MemberByID 必须在租户事务里调用：RLS 会把其他租户的成员过滤成"不存在"。
 func (r *Repository) MemberByID(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*Member, error) {
 	const q = `SELECT m.user_id, u.email, u.display_name, m.role, m.status, m.created_at

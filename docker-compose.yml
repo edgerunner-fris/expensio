@@ -1,15 +1,21 @@
-# Expensio 本地依赖编排。
+# Expensio 本地编排。
 #
-# 只跑基础设施；六个服务在 M0–M5 期间以宿主进程方式运行（make run-<service>），
-# 容器化在 M6 用同一个多阶段 Dockerfile 完成。这样本地调试不需要反复重建镜像。
+# 两种用法：
+#   make up        —— 只起基础设施，六个服务用宿主进程运行（make run-<service>），
+#                     改代码不需要重建镜像，适合日常开发；
+#   make app-up    —— 构建六个服务 + 管理台镜像并整栈运行，验证容器化产物。
+#                     app profile 会连同 core / mail 一起启动。
 #
 # profile 划分：
 #   core —— 服务运行必须依赖：postgres / redis / kafka / minio
-#   obs  —— 可观测性：otel-collector / prometheus / grafana
+#   obs  —— 可观测性：otel-collector / tempo / prometheus / grafana
 #   mail —— 本地邮件收件箱：mailpit
-# 默认 `make up` 会同时起三组；只想跑单测时用 --profile core。
+#   app  —— 六个 Go 服务 + 管理台 + 迁移/建主题一次性任务
+#   load —— k6 压测
+#   e2e  —— Playwright 浏览器级端到端测试
+# 默认 `make up` 会同时起 core + obs + mail；只想跑单测时用 --profile core。
 #
-# 所有端口绑定 127.0.0.1，不暴露到局域网。
+# 所有端口绑定 127.0.0.1，不暴露到局域网；只有 gateway 和 web 发布端口。
 name: expensio
 
 x-logging: &default-logging
@@ -21,6 +27,28 @@ x-logging: &default-logging
 x-restart: &default-restart
   restart: unless-stopped
 
+# 应用容器的公共部分。镜像内没有 curl，健康检查用 busybox wget；
+# 端口从各自容器内的 EXPENSIO_HTTP_ADDR 读取，避免复制六份端口号。
+#
+# 与 Helm 的安全上下文保持一致：只读根文件系统、禁止提权、丢弃全部
+# capability。服务只写网络与数据库，不需要落盘；Go 与 wget 在只读根下
+# 均可正常工作（不需要 /tmp）。
+x-app-service: &app-service
+  profiles: ["app"]
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *default-logging
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://127.0.0.1$${EXPENSIO_HTTP_ADDR}/healthz >/dev/null 2>&1"]
+    interval: 10s
+    timeout: 3s
+    retries: 6
+    start_period: 10s
+
 services:
   # ---------------------------------------------------------------------------
   # PostgreSQL：五个服务共用实例、各自独立数据库。
@@ -30,7 +58,7 @@ services:
   postgres:
     <<: *default-restart
     image: postgres:16.15-alpine
-    profiles: ["core"]
+    profiles: ["core", "app"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-expensio}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-expensio_local_only}
@@ -53,7 +81,7 @@ services:
   redis:
     <<: *default-restart
     image: redis:7.4.11-alpine
-    profiles: ["core"]
+    profiles: ["core", "app"]
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "127.0.0.1:6379:6379"
@@ -74,7 +102,7 @@ services:
   kafka:
     <<: *default-restart
     image: apache/kafka:3.9.2
-    profiles: ["core"]
+    profiles: ["core", "app"]
     hostname: kafka
     ports:
       - "127.0.0.1:29092:29092"
@@ -113,7 +141,7 @@ services:
   minio:
     <<: *default-restart
     image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
-    profiles: ["core"]
+    profiles: ["core", "app"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-expensio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-expensio_local_only}
@@ -139,19 +167,36 @@ services:
   otel-collector:
     <<: *default-restart
     image: otel/opentelemetry-collector-contrib:0.140.0
-    profiles: ["obs"]
+    # app profile 也包含 Collector：整栈演示时指标与 trace 必须真的有着落，
+    # 不能因为漏了一个 profile 就静默丢数据。
+    profiles: ["obs", "app"]
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     ports:
       - "127.0.0.1:4317:4317"   # OTLP gRPC
       - "127.0.0.1:4318:4318"   # OTLP HTTP
     volumes:
       - ./deploy/local/otel/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_started
+    logging: *default-logging
+
+  tempo:
+    <<: *default-restart
+    image: grafana/tempo:2.8.0
+    profiles: ["obs", "app"]
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "127.0.0.1:3200:3200"
+    volumes:
+      - ./deploy/local/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempodata:/var/tempo
     logging: *default-logging
 
   prometheus:
     <<: *default-restart
     image: prom/prometheus:v3.5.0
-    profiles: ["obs"]
+    profiles: ["obs", "app"]
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -160,21 +205,73 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./deploy/local/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/local/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
       - promdata:/prometheus
+    depends_on:
+      otel-collector:
+        condition: service_started
     logging: *default-logging
 
   grafana:
     <<: *default-restart
     image: grafana/grafana:12.2.0
-    profiles: ["obs"]
+    profiles: ["obs", "app"]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana_local_only}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/expensio-overview.json
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
       - grafanadata:/var/lib/grafana
+      - ./deploy/local/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/local/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # k6 压测：与 gateway 同网络，直接打服务名；只有显式 --profile load 才运行。
+  # 结果默认输出到 stdout，配合结束后查询 Prometheus 做交叉验证。
+  # ---------------------------------------------------------------------------
+  k6:
+    image: grafana/k6:1.2.3
+    profiles: ["load"]
+    environment:
+      BASE_URL: http://gateway:8080
+      DURATION: ${K6_DURATION:-30s}
+    volumes:
+      - ./load/k6:/scripts:ro
+    command: ["run", "/scripts/api.js"]
+    depends_on:
+      gateway:
+        condition: service_started
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 浏览器级 E2E：官方 Playwright 镜像自带 Chromium 与系统依赖，宿主机不需要
+  # 安装 libnss/libnspr。打的是 compose 网络内的 web:8086，先 make app-up。
+  # node_modules 用匿名卷，避免以 root 写入宿主工作区。
+  # ---------------------------------------------------------------------------
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.64.1-noble
+    profiles: ["e2e"]
+    working_dir: /e2e
+    environment:
+      E2E_BASE_URL: http://web:8086
+      HOME: /tmp
+    volumes:
+      - ./e2e:/e2e
+      - /e2e/node_modules
+    entrypoint: ["bash", "-lc"]
+    command: ["npm ci --no-audit --no-fund && npx playwright test"]
+    depends_on:
+      web:
+        condition: service_healthy
     logging: *default-logging
 
   # ---------------------------------------------------------------------------
@@ -184,11 +281,321 @@ services:
   mailpit:
     <<: *default-restart
     image: axllent/mailpit:v1.27
-    profiles: ["mail"]
+    profiles: ["mail", "app"]
     ports:
       - "127.0.0.1:1025:1025"
       - "127.0.0.1:8025:8025"
     logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 一次性任务：数据库迁移与事件主题创建。
+  # 迁移用 {service}_migrator（属主、可 DDL），应用容器用 {service}_app（受 RLS 约束）。
+  # 口令会拼进 migrate 的连接串，make env 生成的是十六进制值，天然 URL 安全。
+  # ---------------------------------------------------------------------------
+  migrate:
+    profiles: ["app"]
+    image: migrate/migrate:v4.18.3
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      EXPENSIO_DB_MIGRATOR_PASSWORD: ${EXPENSIO_DB_MIGRATOR_PASSWORD:?请先执行 make env 生成 .env}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        for svc in identity expense billing report notification; do
+          echo "==> migrate $$svc"
+          migrate -path "/migrations/$$svc" \
+            -database "postgres://$${svc}_migrator:$${EXPENSIO_DB_MIGRATOR_PASSWORD}@postgres:5432/$${svc}_db?sslmode=disable" \
+            up
+        done
+    logging: *default-logging
+
+  topics:
+    profiles: ["app"]
+    image: apache/kafka:3.9.2
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        for t in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
+                 expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$t" --partitions 6 --replication-factor 1
+        done
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 六个 Go 服务。共用仓库根的 Dockerfile，用 SERVICE 选择入口。
+  # 只有 gateway 发布到宿主；其余服务只在 compose 网络内可达。
+  # ---------------------------------------------------------------------------
+  identity:
+    <<: *app-service
+    image: expensio/identity:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: identity
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8081"
+      EXPENSIO_DB_HOST: postgres
+      EXPENSIO_DB_PORT: "5432"
+      EXPENSIO_DB_NAME: identity_db
+      EXPENSIO_DB_USER: identity_app
+      EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
+      EXPENSIO_DB_SSLMODE: disable
+      EXPENSIO_JWT_ISSUER: expensio
+      # identity 是唯一持有私钥的服务；迁移期保留 HS256 密钥以接受旧令牌。
+      EXPENSIO_JWT_SECRET: ${EXPENSIO_JWT_SECRET:?请先执行 make env 生成 .env}
+      EXPENSIO_JWT_PRIVATE_KEY: ${EXPENSIO_JWT_PRIVATE_KEY:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "true"
+      EXPENSIO_NOTIFICATION_INTERNAL_TOKEN: ${EXPENSIO_NOTIFICATION_INTERNAL_TOKEN:?请先执行 make env 生成 .env}
+      # 邀请邮件走 notification 的内部接口；identity 不直接连 SMTP。
+      EXPENSIO_NOTIFICATION_SERVICE_URL: http://notification:8085
+      # 邀请链接必须指向用户实际访问的站点（web 发布到宿主的端口）。
+      EXPENSIO_INVITE_BASE_URL: http://localhost:${EXPENSIO_WEB_PORT:-5173}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+
+  expense:
+    <<: *app-service
+    image: expensio/expense:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: expense
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8082"
+      EXPENSIO_DB_HOST: postgres
+      EXPENSIO_DB_PORT: "5432"
+      EXPENSIO_DB_NAME: expense_db
+      EXPENSIO_DB_USER: expense_app
+      EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
+      EXPENSIO_DB_SSLMODE: disable
+      EXPENSIO_JWT_ISSUER: expensio
+      # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "false"
+      EXPENSIO_KAFKA_BROKERS: kafka:9092
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+
+  billing:
+    <<: *app-service
+    image: expensio/billing:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: billing
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8083"
+      EXPENSIO_DB_HOST: postgres
+      EXPENSIO_DB_PORT: "5432"
+      EXPENSIO_DB_NAME: billing_db
+      EXPENSIO_DB_USER: billing_app
+      EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
+      EXPENSIO_DB_SSLMODE: disable
+      EXPENSIO_JWT_ISSUER: expensio
+      # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "false"
+      EXPENSIO_KAFKA_BROKERS: kafka:9092
+      EXPENSIO_BILLING_WEBHOOK_PROVIDER: mockpay
+      EXPENSIO_BILLING_WEBHOOK_SECRET: ${EXPENSIO_BILLING_WEBHOOK_SECRET:?请先执行 make env 生成 .env}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+
+  report:
+    <<: *app-service
+    image: expensio/report:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: report
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8084"
+      EXPENSIO_DB_HOST: postgres
+      EXPENSIO_DB_PORT: "5432"
+      EXPENSIO_DB_NAME: report_db
+      EXPENSIO_DB_USER: report_app
+      EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
+      EXPENSIO_DB_SSLMODE: disable
+      EXPENSIO_JWT_ISSUER: expensio
+      # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "false"
+      EXPENSIO_KAFKA_BROKERS: kafka:9092
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+
+  notification:
+    <<: *app-service
+    image: expensio/notification:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: notification
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8085"
+      EXPENSIO_DB_HOST: postgres
+      EXPENSIO_DB_PORT: "5432"
+      EXPENSIO_DB_NAME: notification_db
+      EXPENSIO_DB_USER: notification_app
+      EXPENSIO_DB_PASSWORD: ${EXPENSIO_DB_APP_PASSWORD:?请先执行 make env 生成 .env}
+      EXPENSIO_DB_SSLMODE: disable
+      EXPENSIO_JWT_ISSUER: expensio
+      # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "false"
+      EXPENSIO_KAFKA_BROKERS: kafka:9092
+      EXPENSIO_NOTIFICATION_INTERNAL_TOKEN: ${EXPENSIO_NOTIFICATION_INTERNAL_TOKEN:?请先执行 make env 生成 .env}
+      EXPENSIO_NOTIFICATION_IDENTITY_URL: http://identity:8081
+      EXPENSIO_NOTIFICATION_EMAIL_ENABLED: "true"
+      EXPENSIO_NOTIFICATION_SMTP_ADDR: mailpit:1025
+      EXPENSIO_NOTIFICATION_SMTP_FROM: no-reply@expensio.local
+      EXPENSIO_NOTIFICATION_SMTP_USE_TLS: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+
+  gateway:
+    <<: *app-service
+    image: expensio/gateway:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: gateway
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      EXPENSIO_ENV: local
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_HTTP_ADDR: ":8080"
+      EXPENSIO_REDIS_ADDR: redis:6379
+      EXPENSIO_JWT_ISSUER: expensio
+      # 验签方只拿公钥：即使容器被攻破也无法伪造 access token。
+      EXPENSIO_JWT_PUBLIC_KEYS: ${EXPENSIO_JWT_PUBLIC_KEYS:?请先执行 make env 生成 Ed25519 密钥}
+      EXPENSIO_JWT_ALLOW_HS256: "false"
+      EXPENSIO_UPSTREAMS_IDENTITY: http://identity:8081
+      EXPENSIO_UPSTREAMS_EXPENSE: http://expense:8082
+      EXPENSIO_UPSTREAMS_BILLING: http://billing:8083
+      EXPENSIO_UPSTREAMS_REPORT: http://report:8084
+      EXPENSIO_UPSTREAMS_NOTIFICATION: http://notification:8085
+    ports:
+      - "127.0.0.1:${EXPENSIO_GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      identity:
+        condition: service_started
+      expense:
+        condition: service_started
+      billing:
+        condition: service_started
+      report:
+        condition: service_started
+      notification:
+        condition: service_started
+
+  # 管理台：Vite 产物由 internal/web 提供，/api 反代到 gateway。
+  web:
+    <<: *app-service
+    image: expensio/web:${EXPENSIO_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        VERSION: ${EXPENSIO_VERSION:-dev}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    environment:
+      EXPENSIO_LOG_LEVEL: ${EXPENSIO_LOG_LEVEL:-info}
+      EXPENSIO_ENV: local
+      EXPENSIO_OTEL_ENABLED: "true"
+      EXPENSIO_OTEL_ENDPOINT: otel-collector:4317
+      EXPENSIO_OTEL_INSECURE: "true"
+      EXPENSIO_WEB_ADDR: ":8086"
+      EXPENSIO_GATEWAY_URL: http://gateway:8080
+    ports:
+      - "127.0.0.1:${EXPENSIO_WEB_PORT:-5173}:8086"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8086/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    depends_on:
+      gateway:
+        condition: service_started
 
 volumes:
   pgdata:
@@ -197,3 +604,4 @@ volumes:
   miniodata:
   promdata:
   grafanadata:
+  tempodata:

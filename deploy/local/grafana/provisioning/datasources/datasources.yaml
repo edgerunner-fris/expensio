@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: expensio-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+
+  - name: Tempo
+    uid: expensio-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # 从 trace 跳到指标时沿用同一个服务与时间范围，排查链路更快。
+      tracesToMetrics:
+        datasourceUid: expensio-prometheus

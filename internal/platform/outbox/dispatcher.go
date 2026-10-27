@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
+	"github.com/edgerunner-fris/expensio/internal/platform/telemetry"
 )
 
 const (
@@ -18,6 +20,19 @@ const (
 	defaultPublishTimeout = 12 * time.Second
 	maxBackoff            = time.Minute
 	bookkeepingTimeout    = 5 * time.Second
+)
+
+var (
+	outboxClaimed = telemetry.NewCounter(
+		"expensio.outbox.events.claimed",
+		"投递器每批从 outbox 领取的事件数",
+		"{event}",
+	)
+	outboxDelivered = telemetry.NewCounter(
+		"expensio.outbox.events.delivered",
+		"outbox 事件投递结果（成功/失败）",
+		"{event}",
+	)
 )
 
 // Publisher 是投递器依赖的最小接口。用接口而不是直接拿 Kafka 客户端，
@@ -141,6 +156,7 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	outboxClaimed.Add(ctx, int64(len(batch)))
 
 	published := 0
 	for _, ev := range batch {
@@ -166,12 +182,18 @@ func (d *Dispatcher) publishOne(ctx context.Context, ev Event) error {
 }
 
 func (d *Dispatcher) recordSuccess(ctx context.Context, ev Event) {
+	outboxDelivered.Add(ctx, 1,
+		attribute.String("event_type", ev.Type),
+		attribute.String("outcome", "success"))
 	d.withBookkeeping(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return d.store.MarkPublished(ctx, tx, ev.ID)
 	}, "mark published failed", ev)
 }
 
 func (d *Dispatcher) recordFailure(ctx context.Context, ev Event, cause error) {
+	outboxDelivered.Add(ctx, 1,
+		attribute.String("event_type", ev.Type),
+		attribute.String("outcome", "error"))
 	// 已经失败的次数从 attempts 读出；本次是第 attempts+1 次失败。
 	retryAt := d.now().Add(Backoff(ev.Attempts + 1))
 	d.withBookkeeping(ctx, func(ctx context.Context, tx pgx.Tx) error {

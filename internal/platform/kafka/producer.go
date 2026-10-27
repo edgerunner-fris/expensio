@@ -65,7 +65,13 @@ func (p *Producer) Publish(ctx context.Context, topic, key string, value []byte)
 // PublishRecord 发送完整记录（含 headers）。消费端写 DLQ 时用它保留
 // 原始字节与来源信息；outbox 投递仍然走 Publish。
 func (p *Producer) PublishRecord(ctx context.Context, rec *kgo.Record) error {
-	return p.client.ProduceSync(ctx, rec).FirstErr()
+	ctx, span := startPublish(ctx, rec.Topic)
+	start := time.Now()
+	// 先注入再发送：traceparent 必须随记录一起落盘，否则消费者无法续接链路。
+	rec.Headers = injectHeaders(ctx, rec.Headers)
+	err := p.client.ProduceSync(ctx, rec).FirstErr()
+	finishPublish(ctx, span, rec.Topic, start, err)
+	return err
 }
 
 func (p *Producer) Close() { p.client.Close() }

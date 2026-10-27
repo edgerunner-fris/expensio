@@ -11,7 +11,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/edgerunner-fris/expensio/internal/gateway"
-	"github.com/edgerunner-fris/expensio/internal/platform/auth"
 	"github.com/edgerunner-fris/expensio/internal/platform/bootstrap"
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 )
@@ -29,7 +28,7 @@ func main() {
 func setup(app *bootstrap.App) error {
 	cfg := app.Config
 
-	issuer, err := auth.NewTokenIssuer(cfg.JWT.Issuer, cfg.JWT.Secret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	issuer, err := cfg.JWT.AuthIssuer()
 	if err != nil {
 		return fmt.Errorf("gateway: 初始化令牌校验器失败: %w", err)
 	}

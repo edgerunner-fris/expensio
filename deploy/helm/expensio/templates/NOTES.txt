@@ -1,0 +1,37 @@
+Expensio 已部署到命名空间 {{ .Release.Namespace }}。
+
+1. 确认 Secret 存在且包含必需键（chart 不会创建它）：
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }}
+   必需键：{{ .Values.secretKeys.jwtPrivateKey }}、{{ .Values.secretKeys.jwtPublicKeys }}、
+           {{ .Values.secretKeys.dbAppPassword }}、
+           {{ .Values.secretKeys.dbMigratorPassword }}、{{ .Values.secretKeys.billingWebhook }}、
+           {{ .Values.secretKeys.internalToken }}
+   可选键：{{ .Values.secretKeys.jwt }}（迁移期保留，identity 在一个 access TTL 内继续接受 HS256 旧令牌）、
+           {{ .Values.secretKeys.smtpPassword }}（SMTP 需要认证时提供）
+
+   密钥格式：{{ .Values.secretKeys.jwtPrivateKey }} 是 Ed25519 私钥种子（32 字节）的 base64，
+   {{ .Values.secretKeys.jwtPublicKeys }} 是公钥（32 字节）的 base64，多个公钥用逗号分隔以支持轮换。
+   生成：openssl genpkey -algorithm ED25519 | openssl pkey -outform DER | tail -c 32 | base64（私钥）
+         openssl genpkey -algorithm ED25519 | openssl pkey -pubout -outform DER | tail -c 32 | base64（公钥）
+
+2. 等待迁移与主题 Job 完成：
+
+   kubectl -n {{ .Release.Namespace }} get jobs
+
+3. 查看 Pod：
+
+   kubectl -n {{ .Release.Namespace }} get pods
+
+{{- if .Values.ingress.enabled }}
+
+4. 访问地址：https://{{ .Values.ingress.host }}/
+{{- else }}
+
+4. Ingress 未启用。端口转发：
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "expensio.fullname" . }}-web {{ .Values.web.port }}:{{ .Values.web.port }}
+   然后打开 http://127.0.0.1:{{ .Values.web.port }}/
+{{- end }}
+
+迁移失败时先看 Job 日志：kubectl -n {{ .Release.Namespace }} logs job/{{ include "expensio.fullname" . }}-migrate

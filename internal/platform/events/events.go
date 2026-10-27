@@ -29,6 +29,11 @@ const (
 
 	// ConsumerReportExpense 是 report 的消费组名，幂等表按它区分消费者。
 	ConsumerReportExpense = "report-expense-v1"
+
+	// notification 有两类消费者：一个跟费用事件，一个跟账单事件。
+	// 消费组名同时是 processed_events.consumer 的取值，改名会让幂等窗口重置。
+	ConsumerNotificationExpense = "notification-expense-v1"
+	ConsumerNotificationBilling = "notification-billing-v1"
 )
 
 // Type 是事件类型，取值与 outbox 的 CHECK 约束一致。

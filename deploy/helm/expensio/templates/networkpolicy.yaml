@@ -1,0 +1,68 @@
+{{- if .Values.networkPolicy.enabled }}
+# 默认拒绝入站：只有显式放行的来源才能连到本 release 的 Pod。
+# 出站不在这里限制（未声明 Egress 即允许），因为数据库/Kafka/SMTP 地址由
+# 平台提供，写死 IP 段会让 chart 无法跨环境复用；需要出站白名单时由集群
+# 级策略补足，见 docs/DEPLOYMENT.md。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-default-deny-ingress" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "expensio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/part-of: expensio
+  policyTypes:
+    - Ingress
+---
+# 只有 ingress controller 能访问 gateway 与 web；其余服务的端口不对外。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-allow-ingress-controller" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["gateway", "web"]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.gateway.port }}
+        - protocol: TCP
+          port: {{ .Values.web.port }}
+---
+# 同一 release 的服务之间可以互访（gateway → 下游、notification → identity）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-allow-same-release" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "expensio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/part-of: expensio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "expensio.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/part-of: expensio
+{{- end }}

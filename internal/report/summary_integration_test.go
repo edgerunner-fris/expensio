@@ -31,8 +31,10 @@ type responseEnvelope struct {
 func newSummaryServer(t *testing.T, database *db.DB) (*gin.Engine, *auth.TokenIssuer) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	issuer, err := auth.NewTokenIssuer("expensio-test", reportTestJWTSecret,
-		15*time.Minute, 24*time.Hour)
+	issuer, err := auth.NewTokenIssuer(auth.IssuerConfig{
+		Issuer: "expensio-test", HS256Secret: reportTestJWTSecret,
+		AccessTTL: 15 * time.Minute, RefreshTTL: 24 * time.Hour,
+	})
 	require.NoError(t, err)
 
 	engine := gin.New()

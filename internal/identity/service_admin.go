@@ -84,6 +84,26 @@ func (s *Service) UpdateMemberRole(ctx context.Context, targetID uuid.UUID, newR
 	return updated, nil
 }
 
+// TenantContacts 供 notification 服务解析某租户的收件人。
+//
+// 租户 ID 来自服务间令牌的签名载荷（见 serviceauth），不是请求参数；
+// 调用方必须先通过内部令牌校验。返回值只有通知所需的联系方式与角色。
+func (s *Service) TenantContacts(ctx context.Context, tenantID uuid.UUID) ([]Member, error) {
+	if tenantID == uuid.Nil {
+		return nil, apperr.InvalidArgument("租户 ID 非法")
+	}
+	var contacts []Member
+	err := s.database.WithinTenantID(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		contacts, err = s.repo.ListContacts(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return contacts, nil
+}
+
 func (s *Service) ListAuditLogs(ctx context.Context, q httpx.PageQuery) (httpx.Page[AuditEntry], error) {
 	q.Normalize()
 

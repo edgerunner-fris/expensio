@@ -24,7 +24,7 @@ LDFLAGS := -s -w -X github.com/edgerunner-fris/expensio/internal/platform/versio
 -include .env
 export
 
-.PHONY: help preflight env tidy fmt vet lint test test-integration test-race build up down ps logs migrate migrate-version topics smoke clean
+.PHONY: help preflight env tidy fmt vet lint test test-integration test-race build up down ps logs migrate migrate-version topics smoke clean app-build app-up app-down load e2e
 
 help: ## 列出所有可用目标
 	@grep -hE '^[a-zA-Z_%:-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; !seen[$$1]++ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' || true
@@ -37,8 +37,8 @@ preflight: ## 检查本机工具链（Linux/WSL）
 	./scripts/preflight.sh
 endif
 
-env: ## 从模板生成 .env（已存在则不覆盖）
-	test -f .env || cp .env.example .env
+env: ## 从模板生成 .env，并填入随机本地密钥（已存在则不覆盖）
+	./scripts/env.sh
 
 tidy: ## 整理依赖
 	$(GO) mod tidy
@@ -71,11 +71,26 @@ up: env ## 启动依赖容器（core + obs + mail）并创建事件主题
 	$(COMPOSE) --profile core --profile obs --profile mail up -d --wait --wait-timeout 180
 	./scripts/topics.sh
 
+app-build: ## 构建六个服务与管理台的容器镜像
+	$(COMPOSE) --profile app build
+
+app-up: env ## 构建并启动完整栈（依赖 + 服务 + 管理台）
+	$(COMPOSE) --profile app up -d --build --wait --wait-timeout 420
+
+app-down: ## 停止并移除完整栈
+	$(COMPOSE) --profile core --profile obs --profile mail --profile app down
+
+load: ## 对已启动的整栈跑 k6（默认 30s，K6_DURATION 可覆盖）
+	$(COMPOSE) --profile app --profile obs --profile load run --rm k6
+
+e2e: ## 浏览器级 E2E（Playwright 容器；需先 make app-up）
+	$(COMPOSE) --profile app --profile e2e run --rm e2e
+
 topics: ## 创建业务事件主题（幂等；up 之后执行一次）
 	./scripts/topics.sh
 
-down: ## 停止并移除容器
-	$(COMPOSE) --profile core --profile obs --profile mail down
+down: ## 停止并移除容器（含 app profile，未启动的服务会被忽略）
+	$(COMPOSE) --profile core --profile obs --profile mail --profile app down
 
 ps: ## 查看容器状态
 	$(COMPOSE) ps
@@ -83,7 +98,7 @@ ps: ## 查看容器状态
 logs: ## 跟踪日志，可用 S=gateway 过滤
 	$(COMPOSE) logs -f --tail=100 $(S)
 
-migrate: ## 对 5 个库执行迁移
+migrate: ## 对 6 个库执行迁移
 	./scripts/migrate.sh up
 
 migrate-version: ## 查看迁移版本

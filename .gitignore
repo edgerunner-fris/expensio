@@ -4,6 +4,8 @@ bin/
 dist/
 node_modules/
 web/node_modules/
+e2e/test-results/
+e2e/playwright-report/
 coverage.out
 *.log
 *.exe

@@ -11,7 +11,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/billing"
-	"github.com/edgerunner-fris/expensio/internal/platform/auth"
 	"github.com/edgerunner-fris/expensio/internal/platform/bootstrap"
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
@@ -46,7 +45,7 @@ func setup(app *bootstrap.App) error {
 	app.OnStop(database.Close)
 	app.Health.Add(health.Check("db", database.Ping))
 
-	issuer, err := auth.NewTokenIssuer(cfg.JWT.Issuer, cfg.JWT.Secret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	issuer, err := cfg.JWT.AuthIssuer()
 	if err != nil {
 		return fmt.Errorf("billing: 初始化令牌校验器失败: %w", err)
 	}

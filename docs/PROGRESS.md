@@ -480,27 +480,33 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 7 | 本机无法运行 `-race` | **已解决** | WSL2 具备 cgo/gcc。2026-10-26 实测 `go test ./... -race -count=5 -timeout=15m` 全部通过（identity 31.461s、gateway 4.109s），并用临时竞争用例做过 `DATA RACE` 反向验证 |
 | 8 | RLS 是否真的隔离了两个租户 | **已解决** | 两租户 + 真实 HTTP 验证：acme token 见 2 名成员 / beta token 见 1 名，审计同样按租户分割；无上下文时 `current_setting` 为 NULL，策略判定不通过，查到 0 行；跨租户 INSERT 被 `WITH CHECK` 拒绝。自动化回归在 M1-6/6 补齐 |
 | 9 | Kafka 端到端（生产 → 消费 → 幂等） | **已解决** | M3-5 用真实 `apache/kafka:3.9.2` broker + 真实 PostgreSQL 验证：生产者同步发送 → 消费组消费 → 幂等去重 → 乱序旧版本忽略 → 永久错误进 DLQ，全部通过。分区键为 `tenant_id`，同一租户的事件保持顺序 |
-| 10 | 前端依赖版本兼容（Vue/Pinia/Router/ECharts/TS） | **待验证** | 版本表已核对，但未真正装过一次。M5 落地时以 `npm ls` 与构建结果为准 |
+| 10 | 前端依赖版本兼容（Vue/Pinia/Router/ECharts/TS） | **已解决** | 2026-10-27 实测 `npm ls --depth=0`：vue 3.5.44、vue-router 5.4.0、pinia 4.1.0、element-plus 2.14.7、echarts 6.1.0、axios 1.20.0、vite 8.3.5、vue-tsc 3.3.13、typescript 5.9.3。`npm run build`（`vue-tsc --noEmit && vite build`）退出码 0，3.59s 完成。首屏包体见风险 34 |
 | 11 | 迁移中途失败会让库进入 dirty 状态 | **已解决（有操作手册）** | 本次踩到过：基线在事务内失败 → `schema_migrations` 标记 dirty。恢复方式：修好 SQL 后重建该库（本地），生产环境只允许向前修复并手工 `force`。`make migrate` 会明确报错，不会静默跳过 |
 | 12 | 并发刷新导致同一令牌被轮换两次 | **已解决** | 轮换用条件更新 `UPDATE … WHERE id=$1 AND revoked_at IS NULL` + `RowsAffected()`；抢输的一方被判为重放并撤销整族。撤销放在独立事务里提交——放在同一事务里会被随后返回的错误一起回滚 |
 | 13 | 登录接口可通过耗时分出"账号是否存在" | **已解决** | 用户或租户不存在时仍对预置哈希执行一次完整 argon2id 校验，返回文案与状态码也完全一致 |
 | 14 | 角色大小写两套（DB 小写 / 上下文大写） | **已解决** | 统一为小写，`tenantctx.Role` 同时承载 `Valid()` 与 `AtLeast()`；避免每层各转一次、某条路径漏转 |
 | 15 | gin 默认信任 `X-Forwarded-For`，审计 IP 可伪造 | **已解决** | `server.New` 里 `SetTrustedProxies(nil)`；部署到 ingress 之后再按实际网段显式配置 |
 | 16 | Windows 上无法投递 SIGTERM 验证优雅关闭 | **已解决** | WSL2 实测 billing：SIGTERM 后日志依次出现 draining → stopped → service stopped，进程退出码 0。Windows `Stop-Process` 仍是 TerminateProcess，不作为验证手段 |
-| 17 | access token 用 HS256，六个服务共享同一把密钥 | **未解决（已知取舍）** | 任何一个服务被攻陷都能签发任意租户的令牌。M1 阶段接受（本地单体部署、密钥只走环境变量）；M6 上 K8s 之前评估改为 EdDSA/RS256（identity 持私钥，其余服务只持公钥）。在 ADR 中记录 |
-| 18 | 限流器故障时放行（fail-open） | **已解决（明示取舍）** | 运行期 Redis 抖动时宁可短期超额，也不让全站 5xx；但启动时连不上 Redis 直接失败，避免以"无限流"状态上线。两类分支都有日志，M7 补指标与告警 |
+| 17 | access token 用 HS256，六个服务共享同一把密钥 | **已解决（M9 迁移到 EdDSA/JWKS）** | M6–M8 期间接受该取舍（同信任域、无第三方验签方）。M9 完成迁移：identity 用 Ed25519 私钥签发，header 带 RFC 7638 指纹作 `kid`；其余五个服务只挂公钥，`EXPENSIO_JWT_ALLOW_HS256=false` 且不再持有 HMAC 密钥，攻破任一验签服务也无法伪造令牌。identity 暴露 `/.well-known/jwks.json`。实测：JWKS `kty=OKP/crv=Ed25519/alg=EdDSA/use=sig`、`x` 32 字节且无 `d`；登录令牌 `alg=EdDSA` 且带 `kid`，expense/identity 均 200；用旧 HS256 密钥伪造的令牌被网关 401。见 ADR-0008。**遗留**：identity 的迁移期 HS256 兼容路径要等一个 access TTL 后再删；多公钥轮换未在真实环境演练 |
+| 18 | 限流器故障时放行（fail-open） | **已解决（指标+告警已落地）** | 运行期 Redis 抖动时宁可短期超额，也不让全站 5xx；但启动时连不上 Redis 直接失败，避免以"无限流"状态上线。M7 新增 `expensio.gateway.rate_limit.decisions`，按 `scope`（tenant/ip）与 `outcome`（allowed/denied/error）计数，并配 `ExpensioRateLimiterFailOpen` 告警（error 速率 >0 持续 5 分钟）。压测实测 344 次决策全部 allowed、0 denied、0 error，说明指标在正常路径也确实在采集 |
 | 19 | 网关重试会不会把写请求做两遍 | **已解决** | 只对 GET/HEAD/OPTIONS、无 body、且错误属于"连接未建立/未送达"（ECONNREFUSED、DNS 等）的请求重试一次；超时与取消一律不重试，因为请求可能已经到达下游 |
-| 20 | 网关是单点，且到下游走集群内明文 HTTP | **未解决（留到 M6）** | 本地与 kind 单副本可接受。上 K8s 后：多副本 + PDB + NetworkPolicy 限制只有网关能访问业务服务；是否需要 mTLS 在 M6 评估 |
+| 20 | 网关是单点，且到下游走集群内明文 HTTP | **待验证（清单已交付）** | Helm 已提供多副本（`replicas > 1` 时自动生成 PDB）、默认拒绝入站的 NetworkPolicy（只放行 ingress-controller 与同 release）与非 root/只读根文件系统。M6 评估后不引入 mTLS：服务同处一个集群信任域，边界由 NetworkPolicy 与 Service 账户收敛；若未来跨 namespace/跨集群调用再评估。`helm lint`/`helm template` 通过，但**没有真集群可 apply**，多副本行为未实测 |
 | 21 | 下游收到的 `X-Request-ID` 是否可信 | **已解决** | 网关用中间件生成/透传的 ID 覆盖入站值再转发；`X-Forwarded-*` 由 `ReverseProxy.Rewrite` 依据真实连接重写，客户端无法伪造 |
 | 22 | 登录时"账号存在但不在该租户"与"凭证错误"可区分 | **已解决** | 集成测试发现：密码正确但无成员关系时返回 403 + 明确文案，等于给了一份泄露密码的攻击者一个"密码正确"的判定点。已改为与其他登录失败一致的 401 `auth.unauthorized`；成员被停用仍返回 403（需要有效密码才可探测，属账号状态而非枚举） |
 | 23 | 集成测试依赖 Docker，无 Docker 时会被跳过 | **已解决（策略已落地）** | `testenv` 改为显式 `docker info` 门禁：设置 `EXPENSIO_REQUIRE_DOCKER=1` 时不可用即失败，未设置才允许跳过；`make test-integration` 固定启用。失败/跳过两条分支均已实测。CI 实际执行仍见风险 26 |
 | 24 | 测试容器启动过早，迁移时报 `unexpected EOF` | **已解决** | postgres 镜像首次启动会先起临时实例跑初始化脚本再重启。testcontainers v0.44 的 postgres 模块默认不等待，必须显式 `BasicWaitStrategies()`（等第二次 ready + 端口可连） |
 | 25 | Ryuk 回收器需要额外拉取镜像，代理不通时集成测试直接失败 | **已解决（明示取舍）** | 测试改为显式 `Terminate`，默认设置 `TESTCONTAINERS_RYUK_DISABLED=true`；CI 想启用 Ryuk 可显式改回。代价：测试进程被强杀时可能残留容器 |
-| 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | WSL2 本机（Linux 内核）已通过；GitHub Actions 尚未配置，M6 落地时以 runner 结果为准 |
-| 27 | `.env.example` 与 compose 含固定本地口令 | **未解决（已知取舍）** | 均为仅在 127.0.0.1 生效的本地演示值，不是生产密钥；但公开仓库中仍显眼。计划改为 `make env` 生成随机口令、compose 用 `:?` 强制注入，M6 前完成 |
+| 26 | 集成测试在 CI（Linux）尚未执行过 | **待验证** | `.github/workflows/ci.yml` 已包含 backend/frontend/helm/images/web-image/migrate-image 六个 job，backend 以 `EXPENSIO_REQUIRE_DOCKER=1` 执行 `-race -count=1`；本地 PyYAML 解析通过（6 jobs、26 steps）。**尚未在 GitHub runner 上实际运行**，首次 push/PR 后以 Actions 结果为准 |
+| 27 | `.env.example` 与 compose 含固定本地口令 | **已解决** | `make env`（`scripts/env.sh`）在全新环境为 DB app/migrator/postgres、JWT、billing webhook、内部 token、MinIO、Grafana 生成随机十六进制口令，`.env` 权限 600 且不入仓；已存在 `.env` 时只补齐缺失键，不覆盖现有值。compose 对 15 处应用密钥使用 `${VAR:?}` 强制注入，缺少即拒绝启动。`.env.example` 仍保留 `expensio_local_only` 作为演示值，但推荐路径不会使用它们；仅 127.0.0.1 可达的本地基础设施保留同名 fallback |
 | 28 | 技术栈声称使用 sqlc 与 wire，代码中均不存在 | **已解决（决策已记录）** | ADR-0002 明确：M1/M2 使用手写 pgx 与手工装配，M6 前决定"正式引入"或"从对外口径删除"；在此之前不得声称已使用 |
 | 29 | Kafka 生产者尚未对真实 broker 端到端验证 | **已解决（M3-5）** | `TestConsumerAppliesEventsAndDeduplicates` 用 `kafka.NewProducer` 对真实 broker 同步发送，消费者从真实主题读回并落库；`TestConsumerRoutesPermanentErrorsToDLQ` 验证 DLQ 写入与位点推进。M3-7 又在 `internal/e2e` 用真实费用 API → outbox → Kafka → report 消费者 → 报表 API 跑通完整链路 |
-| 30 | 业务事件主题未在 broker 上预先创建 | **待验证（集群侧留到 M6）** | franz-go 先取元数据，broker 的 `auto.create.topics.enable=true` 不会对这类请求生效；缺主题时投递器会持续退避重试且不丢事件（M4-6 实测）。本地新增 `scripts/topics.sh`，`make up` 会自动幂等创建四个主题并已实测；K8s 中需要同等的 init Job / 部署清单，随 M6 落地并验证 |
+| 30 | 业务事件主题未在 broker 上预先创建 | **已解决（本地实测；集群待验证）** | franz-go 先取元数据，broker 的 `auto.create.topics.enable=true` 不会对这类请求生效；缺主题时投递器会持续退避重试且不丢事件（M4-6 实测）。Compose `topics` Job 实测 `Exited (0)`，创建 expense/billing 主题与 DLQ；Helm 以 `pre-install,pre-upgrade` Hook 提供同等 Job，`helm template` 能渲染。**集群内 Job 未实际执行** |
+| 31 | notification 消费组首次启动会从最早位点回放，可能补发历史邮件 | **已解决** | 消费端新增 `OffsetReset`：report 保持 `ResetEarliest`（回放重建读模型），notification 两个主题改为 `ResetLatest`——全新消费组只消费组成立之后的事件，已有位点的重启不受影响。`TestResetLatestSkipsRecordsWrittenBeforeGroupExists` 对真实 broker 验证：组成立前写入的 `old` 不会被读到，之后写入的 `new` 正常消费；`-race -count=5` 通过。代价：重建通知库时不再自动补历史通知，需要时用专用运维消费者回放 |
+| 32 | 邮件投递是至少一次，崩溃窗口可能重复发送 | **已解决（明示取舍）** | 发送成功与标记 `sent` 之间进程崩溃，会在 5 分钟后被重新领取并重发同一封邮件；优先保证不丢。通知本身不是业务事实，重复邮件可接受；若要严格一次需要与 SMTP 供应商的幂等键，成本高于收益 |
+| 33 | 真实 SMTP 供应商（STARTTLS / 认证）尚未验证 | **待验证（M9）** | 集成测试用假 Mailer 验证退避与状态迁移，端到端联调用 Mailpit 收信；`RequireTLS`、`PlainAuth` 与证书校验只做了单元级覆盖，尚未对真实邮件服务验证。M7 范围是可观测性、M8 范围是前端与 E2E，本项均未动；M9 用真实供应商或启用了 STARTTLS 的本地中继补测 |
+| 34 | 前端首屏包体偏大 | **已解决（M8，首屏）** | 原构建 `index` 865.67 KB（gzip 276.04 KB）、`ReportsView` 510.52 KB（gzip 172.62 KB）。M8 改为逐组件注册 Element Plus（不再 `app.use(ElementPlus)`），并把 ECharts 拆成按需 `import()`。实测：`index` 469.16 KB（gzip 150.49 KB，原始体积 -45.8%、gzip -45.5%），`ReportsView` 5.07 KB，ECharts 独立为 `charts` 519.31 KB（gzip 175.39 KB），只在报表页真正有数据时下载。Vite 仍对 `charts` 报 >500 KB：这是按需 chunk，不影响首屏；若继续压缩需换更小的图表实现或拆分 zrender，暂不做 |
+| 35 | 没有成员邀请/入组接口，新租户只有 owner | **已解决（M10）** | M1 的"成员管理"原先只包含列表与角色调整；新租户注册后只有 owner，而自审批被禁止，真实审批流程必须先由运维写库补成员。M10 补齐：owner/admin 创建邀请（只有 owner 能邀请 owner），令牌 32 字节随机值、库内只存 SHA-256 摘要，同一租户同一邮箱最多一条待接受邀请，重复邀请撤销旧链接，默认 7 天过期；接受时必须验证密码（新邮箱设置、已有账号输入原密码），公开页与接受接口经网关 IP 限流；邮件经 notification 发件箱投递，入队失败仍返回可复制的一次性链接。详见 ADR-0010 与 M10 章节。遗留：链接是 bearer 凭据（新邮箱仍可凭链接入组）、无域名限制/批量邀请/撤销通知 |
+| 36 | 前端没有浏览器级端到端测试 | **已解决（M8）** | M8 新增 `e2e/`（独立 npm 工程，Playwright 1.64.1），在官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 容器里对 Compose 网络的 `web:8086` 跑真实 Chromium。覆盖：未登录路由守卫跳登录页；注册 → 建费用单 → 提交 → 报表出图 → 篡改 access token 后重载自动刷新。连续三轮全绿（2 passed；2.9s、4.4s、8.7s）。用例必须轮询 summary API 等报表读模型消费完事件，不能假设提交后立即可查（ADR-0004）。E2E 还发现并修掉一个真实缺陷，见 M8 章节。CI 尚未接入（风险 20/26） |
 
 ## 本次因"真的跑起来"而发现并修掉的问题
 
@@ -529,6 +535,14 @@ WSL2 环境迁移后发现：
 
 15. **Linux 下 make 所有目标启动即失败** —— Ubuntu 的 `/bin/sh` 是 dash，`-o pipefail` 是 bash 扩展；Makefile 原先只在 Windows 分支设置 `SHELL`。改为按平台固定 bash，并补 Linux 版 `preflight.sh`。
 16. **"Docker 不可用就跳过"与 CI 要求冲突** —— 原实现无条件跳过，CI 会以 0 退出。改为显式 `docker info` 门禁，`EXPENSIO_REQUIRE_DOCKER=1` 时失败；失败与跳过两条分支都实测过。
+
+M5 期间发现并修掉：
+
+17. **后台 context 在可失败构造之前创建** —— `go vet` 报 `lostcancel`：Mailer/Worker 构造失败直接返回时，`context.WithCancel` 的 cancel 永远不会被调用。把所有可失败的构造移到 `WithCancel` 之前，再统一启动循环。
+18. **`resource_type` 为 NULL 时扫描失败** —— `email_outbox` 之外的资源字段可空，`*string` 扫描报 `cannot scan NULL`。查询改为 `COALESCE(resource_type, '')`，空串表示没有可跳转资源。
+19. **共享测试库让 worker 领到上一条用例的邮件** —— 同一包里的多个用例共用一个 PostgreSQL，前一条留下的待发邮件被后一条领走（断言 2 封却得到 3 封）。改为在每条用例前用迁移连接 `TRUNCATE` 三张表；TRUNCATE 不受 RLS 影响。
+20. **网关没有断言 notification 路由** —— 路由表已加 `/api/v1/notifications`，但测试仍把未知下游回落到 identity，路径写错也不会被发现。补用例：无令牌 401 且不触达下游，有令牌只转发给 notification。
+21. **计费消费组从最早位点回放** —— 本地首次启动 notification 时，M4 的 3 条账单事件被重放成 3 封真实邮件。回放本身是重建派生数据的正确行为，但暴露了全新部署会补发历史邮件；已记录为风险 31，M6 决定部署时的位点策略。
 
 ## 当前开发环境（换机器需重做）
 
@@ -1115,27 +1129,697 @@ exit=0
 - M4 完成后的边界：billing 只负责订阅/账单/支付状态，不产生邮件；
   通知与前端留到 M5。
 
-## M4 完成情况（7/7）
+## M5 完成情况（7/7）
 
-M4 已全部完成。设计锁定在 ADR-0005，所有状态变更与 outbox 事件同事务，
-回调幂等依赖数据库唯一约束，租户只从数据库映射反查。
+设计锁定在 ADR-0006：通知是派生数据，消费事件后写 `app.notifications` 与
+`app.email_outbox`，邮件由独立 worker 领取并投递；收件人通过 identity 的
+签名服务令牌内部接口解析；前端管理台覆盖登录、费用、审批、预算、报表、
+账单、成员与通知。
 
 | 批次 | 内容 | 状态 |
 | --- | --- | --- |
-| M4-1 | ADR-0005、billing 核心迁移、RLS/约束/幂等 schema 测试 | 完成 |
-| M4-2 | billing 领域模型：套餐、订阅状态机、账单金额与周期规则 | 完成 |
-| M4-3 | 套餐与订阅 service/repository/HTTP | 完成 |
-| M4-4 | 出账（同周期幂等）与账单查询 API | 完成 |
-| M4-5 | 支付回调：验签、防重放、幂等落库、outbox 事件 | 完成 |
-| M4-6 | 网关 billing 路由、`cmd/billing` 装配与 HTTP 联调 | 完成 |
-| M4-7 | 全量回归、跨服务联调、PROGRESS 收尾 | 完成 |
+| M5-1 | ADR-0006、notification 迁移：RLS、幂等约束、`claim_emails` | 完成 |
+| M5-2 | identity 内部收件人接口 + `serviceauth` 签名令牌 | 完成 |
+| M5-3 | 费用/账单事件消费：渲染、幂等、永久错误进 DLQ | 完成 |
+| M5-4 | 站内收件箱 API：列表、未读数、标记已读/全部已读 | 完成 |
+| M5-5 | 邮件发件箱 worker：跨租户领取、SMTP、退避与上限 | 完成 |
+| M5-6 | `cmd/notification` 装配、网关路由、配置校验 | 完成 |
+| M5-7 | Vue 管理台、依赖实测、真实联调与全量回归 | 完成 |
 
-## 下一步：M5
+### M5-7 实际执行的验证（2026-10-27）
 
-前端管理台（Vue 3 + TS + Vite + Element Plus + Pinia + Router + ECharts + Axios，
-:5173）与 notification 服务：先核对 `npm ls` 的真实版本，再按登录、费用、
-审批、预算、报表、账单六个页面落地；通知消费 billing/expense 事件，但不作为
-任何业务事实的来源。
+前端依赖是实际安装后的版本，构建包含类型检查：
+
+```text
+$ npm ls --depth=0
+├── @element-plus/icons-vue@2.3.2
+├── @vitejs/plugin-vue@6.0.10
+├── axios@1.20.0
+├── echarts@6.1.0
+├── element-plus@2.14.7
+├── pinia@4.1.0
+├── typescript@5.9.3
+├── vite@8.3.5
+├── vue-router@5.4.0
+├── vue-tsc@3.3.13
+└── vue@3.5.44
+
+$ npm run build            # vue-tsc --noEmit && vite build
+✓ built in 3.59s
+（仅有 index 865.67 KB / ReportsView 510.52 KB 的 >500 KB 提示，见风险 34）
+```
+
+真实进程联调：gateway 8080、identity 8081、expense 8082、notification 8085，
+真实 PostgreSQL/Kafka/Mailpit（联调脚本是临时文件，不属于仓库）：
+
+```text
+probes: identity/expense/notification/gateway healthy
+register: slug=m5-1793031539 tenant=9ec483a3-5d89-4417-b5d4-fd4cb63c6b02
+member: 25798927-ff0e-4f0e-a850-05b80d6f2f9c <member-m5-1793031539@example.com>
+submit: submitted budget=03d30c15-17e5-4b29-ac80-7390d66ec818
+owner notification: expense.submitted | 新的费用待审批 | 有一笔差旅费用 234.56 USD 已提交，等待审批。
+owner unread before approval: 1
+POST /notifications/:id/read HTTP 204
+owner unread after read: 0
+approve: approved version=3
+member notification: expense.approved | 费用已通过审批 | 你提交的差旅费用 234.56 USD 已通过审批。
+mark all read updated: 1
+member unread after read-all: 0
+other tenant notifications: 0
+mailpit matched messages: 2
+  to: member-m5-1793031539@example.com | subject: [Expensio] 费用已通过审批
+  to: owner-m5-1793031539@example.com  | subject: [Expensio] 新的费用待审批
+processed=2
+notifications=2
+emails=2 sent=2
+kinds=expense.approved,expense.submitted
+notification error log lines: 0
+m5 live check: OK
+```
+
+里程碑收尾回归：
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout=25m
+ok  internal/billing                21.792s
+ok  internal/e2e                    31.712s
+ok  internal/expense                26.663s
+ok  internal/gateway                 7.561s
+ok  internal/identity               47.234s
+ok  internal/notification           16.660s
+ok  internal/platform/outbox        20.094s
+ok  internal/report                 65.806s
+ok  internal/platform/{apperr,bootstrap,config,events,health,httpx,
+    httpx/middleware,kafka,logger,money,server,serviceauth,tenantctx}
+exit=0
+```
+
+本轮验证到的事实：
+
+- 提交与审批两条通知都由真实事件驱动：member 提交后 owner 收到"新的费用待审批"，
+  owner 批准后 member 收到"费用已通过审批"；金额、类别与资源 ID 都正确。
+- 消费端幂等：同一租户 `processed_events=2`、`notifications=2`、`emails=2`
+  （按租户过滤），重复投递不会产生第二行；两封邮件均为 `sent`。
+- 收件人来自 identity 内部接口，notification 没有连 identity 的库；另一租户
+  用同一 API 查询得到 0 条，RLS 与用户过滤同时生效。
+- 邮件经真实 SMTP（Mailpit）投递，中文主题按 RFC 2047 编码后收件箱可读；
+  worker 从发件箱领取，消费事务里没有网络调用。
+- 联调时 billing 消费组首次从最早位点启动，把 M4 留下的 3 条账单事件重放成
+  3 条通知与 3 封邮件——回放确实能重建通知，但也说明生产全新部署会补发
+  历史邮件，已记为风险 31。
+- 网关新增 `/api/v1/notifications` 路由回归：无令牌 401 且不触达下游，
+  有令牌只转发给 notification，请求路径与查询串原样保留。
+
+## M6：容器化与部署（2026-10-27）
+
+### 镜像
+
+七个镜像全部在 WSL2 的 Docker 中构建成功（`docker compose --profile app build`
+退出码 0）。六个 Go 服务共用 `Dockerfile`，管理台用 `Dockerfile.web`：
+
+| 镜像 | 大小 | 内容大小 |
+| --- | --- | --- |
+| `expensio/gateway:dev` | 39.4 MB | 10.8 MB |
+| `expensio/identity:dev` | 50.3 MB | 13.5 MB |
+| `expensio/report:dev` | 57.1 MB | 15.3 MB |
+| `expensio/expense:dev` | 57.3 MB | 15.3 MB |
+| `expensio/billing:dev` | 57.3 MB | 15.3 MB |
+| `expensio/notification:dev` | 58 MB | 15.5 MB |
+| `expensio/web:dev` | 27.7 MB | 7.87 MB |
+| `expensio/migrate:m6-dev` | 84 MB | 20.2 MB |
+
+迁移镜像由 `Dockerfile.migrate` 单独构建（Helm Job 使用）；Compose 的迁移
+Job 直接挂载 `migrations/` 到上游 `migrate` 镜像，没有再构建一份。
+
+构建期踩到并修掉的两个问题：
+
+- 根 `Dockerfile` 的 `ARG SERVICE` / `ARG VERSION` 若写在 `go mod download`
+  之前，Docker 会把不同 SERVICE 算成不同缓存键，六个服务各下载一遍模块。
+  已把这两个参数移到下载之后，六个服务共享同一层。
+- `Dockerfile.web` 的 `ARG GO_VERSION` 曾写在两个 `FROM` 之间，Docker 只把
+  首个 `FROM` 之前的 `ARG` 当全局参数，报 `failed to parse stage name`。
+  已把 `NODE_VERSION` 与 `GO_VERSION` 都移到第一个 `FROM` 之前。
+
+### Compose 整栈
+
+```text
+$ docker compose --profile app up -d --wait --wait-timeout 420
+UP_EXIT:0
+
+$ docker compose --profile app ps -a
+migrate          Exited (0)
+topics           Exited (0)
+identity/expense/billing/report/notification/gateway/web   healthy
+```
+
+应用容器统一 `read_only: true`、`cap_drop: ALL`、`no-new-privileges`，
+以 UID 10001 运行；只有 gateway（宿主 8080）与 web（宿主 5173）发布端口，
+且都绑定 `127.0.0.1`。
+
+容器化端到端联调（临时脚本，真实容器）：
+
+```text
+web: index 200, app mount found
+web healthz: ok
+web readyz: ok
+web: SPA fallback /expenses/123 -> index
+web: /assets/index-CgfjUPje.js cache-control:public, max-age=31536000, immutable
+web: index cache-control:no-cache
+web: CSP present
+web: missing asset -> 404
+gateway: /healthz /readyz healthy
+web->gateway->identity register: slug=m6-1793033744 tenant=721e2a4c-09f0-4980-ba7f-d7036204efc3
+member inserted: 37cbd902-fe6d-4bac-a6b8-b9ba46b1f750 <member-m6-1793033744@example.com>
+login member: HTTP 200
+billing plans: 5 | first: starter-monthly
+budget: 5e588829-18f3-4781-a5bd-a0f0615731f8
+expense: de3b3f05-eba6-4571-a4da-e3bfd88836d0
+submit: submitted
+owner notification: expense.submitted | 新的费用待审批
+approve: approved
+member notification: expense.approved | 费用已通过审批
+report summary: all USD 23456 count 1
+mailpit matched messages: 2
+  to: member-m6-1793033744@example.com | subject: [Expensio] 费用已通过审批
+  to: owner-m6-1793033744@example.com  | subject: [Expensio] 新的费用待审批
+processed=2
+notifications=2
+emails=2 sent=2
+report_processed=2
+report_rows=1
+published: gateway -> 127.0.0.1:8080 | web -> 127.0.0.1:5173
+containers: all seven services healthy, rootfs read-only, uid 10001:10001
+m6 live check: OK
+```
+
+### Helm 与 CI
+
+`helm lint` 与 `helm template` 使用临时下载的 Helm v3.19.0 执行：
+
+```text
+$ helm lint deploy/helm/expensio
+1 chart(s) linted, 0 chart(s) failed
+
+$ helm template expensio deploy/helm/expensio --namespace expensio | grep -c '^kind:'
+24
+      1 kind: ConfigMap
+      7 kind: Deployment
+      1 kind: Ingress
+      2 kind: Job
+      3 kind: NetworkPolicy
+      2 kind: PodDisruptionBudget
+      7 kind: Service
+      1 kind: ServiceAccount
+```
+
+CI 工作流 `.github/workflows/ci.yml` 含六个 job（backend/frontend/helm/images/
+web-image/migrate-image），PyYAML 解析通过（26 个 step）。**尚未在 GitHub
+runner 上执行**，也没有 `actionlint`；见风险 26。
+
+### 里程碑收尾回归
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout=25m
+ok  internal/billing                25.867s
+ok  internal/e2e                    35.047s
+ok  internal/expense                25.712s
+ok  internal/gateway                10.547s
+ok  internal/identity               31.515s
+ok  internal/notification           22.783s
+ok  internal/platform/kafka         21.816s
+ok  internal/platform/outbox        23.309s
+ok  internal/report                 44.726s
+ok  internal/web                     1.075s
+（其余基础包全部 ok；TEST_EXIT:0）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout=25m
+ok  internal/billing                35.871s
+ok  internal/e2e                    48.359s
+ok  internal/expense                42.471s
+ok  internal/gateway                10.072s
+ok  internal/identity               73.022s
+ok  internal/notification           30.715s
+ok  internal/platform/kafka         27.911s
+ok  internal/platform/outbox        33.090s
+ok  internal/report                 95.844s
+ok  internal/web                     1.337s
+（其余基础包全部 ok；TEST_EXIT:0）
+```
+
+本轮验证到的事实：
+
+- 管理台镜像同时包含 Vite 产物与 Go 静态服务：`index` 为 `no-cache`、
+  hashed asset 为一年 `immutable`、未知资源 404、SPA 深链接回退到 index，
+  且响应带 CSP；`/api` 反代确实把注册请求送到 gateway → identity。
+- 容器间链路完整：web → gateway → expense → outbox → Kafka → notification
+  → identity 内部接口 → 站内通知 + 发件箱 → Mailpit；同时 report 消费者
+  写出读模型，billing 计划接口经网关可达。
+- 同一租户两个事件恰好产生 `processed=2`、`notifications=2`、`emails=2`，
+  两封邮件均为 `sent`；report 侧 `processed=2`、`fact=1`，没有重复行。
+- 七个服务全部 healthy，根文件系统只读、UID 10001；migrate 与 topics
+  Job 均以 0 退出；宿主只监听 127.0.0.1:8080 / 5173。
+- notification 改用 `ResetLatest` 后，新消费组不再补发历史邮件；report
+  仍从最早位点回放。两者由同一个 `OffsetReset` 选项区分，真实 broker 测试
+  在 `-race -count=5` 下通过。
+- Helm 渲染出 24 个清单；但**没有可用集群**，未执行 `kubectl apply`，
+  多副本、PDB、NetworkPolicy 的运行时行为仍是待验证项。
+
+## M7：可观测性与压测（2026-10-27）
+
+### 接入内容
+
+七个进程（六个 Go 服务 + 管理台）统一接 OTel SDK，经 OTLP/gRPC 发往
+Collector；Collector 把 trace 转 Tempo，把指标通过 Prometheus exporter
+暴露给 Prometheus。Grafana 预置 Prometheus/Tempo 数据源与
+`Expensio Overview` 看板。`otel.enabled` 默认关闭，Compose 显式打开。
+
+指标覆盖 HTTP 请求数/延迟/并发、Kafka 生产与消费、outbox 领取与投递、
+邮件发送、网关限流决策、pgx 连接池；健康检查不产生 span/指标，HTTP 路由
+使用低基数模板。HTTP 延迟直方图边界为 5ms–10s，Kafka 为 1ms–10s。
+告警规则 8 条。设计取舍、采样、outbox trace 断点见 ADR-0009。
+
+### k6 实测
+
+`make load` 对已启动整栈执行 3 VUs 业务循环（创建 → 提交 → 取消 → 列表 →
+报表汇总 → 通知列表），每轮 sleep 1.5s。三次 30s 运行：
+
+```text
+run 1: checks 362/362 100%, http_req_failed 0.00%, p(95)=20.26ms, 60 iter, 362 req (11.47/s)
+run 2: checks 362/362 100%, http_req_failed 0.00%, p(95)=25.31ms, 60 iter, 362 req (11.28/s)
+run 3: checks 344/344 100%, http_req_failed 0.00%, p(95)=86.28ms, 57 iter, 344 req (10.96/s)
+        avg=19.73ms med=8.09ms max=370.39ms（gateway 刚重建的冷启动）
+```
+
+三次阈值全部通过：`http_req_failed<1%`、`p(95)<500ms`、`checks>99%`。
+
+Prometheus 对最终一轮查询（2m 窗口）：
+
+```text
+HTTP P95 overall 69.67ms
+  gateway 92.5ms / expense 85.5ms / report 107.5ms
+  notification 53.75ms / identity 6.25ms
+直方图 le: 0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5
+  （亚秒分桶已生效；旧的 5/10/+Inf 序列在滚动窗口内自然退场）
+```
+
+原始计数器增量与 k6 精确对账（最终一轮，57 次迭代）：
+
+```text
+gateway 200 +285 / 201 +59 = 344，与 k6 的 344 次请求一致
+限流决策 344（tenant 343 + ip 1），全部 allowed，无 denied/error
+expense 201 +58（57 次创建 + 1 次预算）；累计 180
+Kafka producer +114；report / notification consumer 各 +114（累计各 354）
+outbox delivered submitted/cancelled 各 +57（累计各 177）；claimed 累计 354
+emails sent +57（只有 submit 发信，cancel 不发）；累计 177
+build_info = 7 个服务；pgx 连接池 idle=total；8 条规则 health=ok，无 firing
+```
+
+关于 Prometheus 数值的一个实测结论：`increase()/rate()` 会向窗口边界外推，
+短促流量下会高估（run 2 的 5m `increase` 为 472，而原始计数差值是 362）；
+counter 首次导出时样本已经非零，首个窗口又会低估。因此工作量对账用原始
+计数差值，延迟与错误率才用 `rate()`。
+
+### Trace 实测
+
+Tempo 搜索 `service.name=gateway` 返回真实 trace；同一条 trace 同时包含
+生产与两个消费组：
+
+```text
+trace 1a9add9e8be1f8ac289f84070a4c368b
+  expense       kafka.publish expensio.expense.events.v1      (root)
+  notification  kafka.consume expensio.expense.events.v1      (child)
+    notification HTTP GET
+      identity GET /api/v1/internal/tenant-contacts
+  report        kafka.consume expensio.expense.events.v1      (sibling)
+```
+
+说明 `traceparent` 经 Kafka 记录头传播，report 与 notification 两个消费组
+落在同一条 trace；outbox 边界仍断开（HTTP 请求的上下文没有随事件落库），
+这是 ADR-0009 记录的已知限制。
+
+环境事件：Docker Desktop/WSL 在镜像构建期间冻结过一次，恢复后 Tempo
+首次 `/ready` 返回 503（`waiting for 15s after being ready`），随后连续
+3 次 200，搜索 API 200；日志里的 frontend RPC 错误只出现在恢复瞬间。
+这是本地环境事件，不是业务缺陷，但说明本地可观测性栈不能当作生产就绪。
+
+### Helm 与配置校验
+
+```text
+$ helm lint deploy/helm/expensio
+1 chart(s) linted, 0 chart(s) failed
+
+$ helm template ...（默认 values）
+kinds=24；ConfigMap 含 EXPENSIO_OTEL_ENABLED="false"
+
+$ helm template ... --set otel.enabled=true --set otel.endpoint=...
+kinds=24；web Deployment 注入 EXPENSIO_OTEL_ENABLED/ENDPOINT/INSECURE
+
+$ promtool check config /etc/prometheus/prometheus.yml
+SUCCESS: 1 rule files found / valid config
+$ promtool check rules /etc/prometheus/rules.yml
+SUCCESS: 8 rules found
+```
+
+### 里程碑收尾回归（最终代码）
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout=25m
+23 个包全部 ok；最长 internal/report 33.194s；TEST1_EXIT:0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout=25m
+23 个包全部 ok；最长 internal/report 89.185s；TEST5_EXIT:0
+```
+
+M7 未关闭的项：生产采样与 Tempo 对象存储、outbox trace 续接、真实集群的
+Collector/Prometheus 部署（风险 20、26），以及风险 17 的 EdDSA 迁移。
+
+## M8：前端优化与浏览器级 E2E（2026-10-27）
+
+### 风险 34：首屏包体
+
+`frontend/src/main.ts` 不再 `app.use(ElementPlus)`，改为逐个注册模板实际
+用到的 34 个组件，`ElLoading` 指令单独 `app.use`；`App.vue` 用
+`ElConfigProvider` 保留 zh-CN 语言包。报表页的 ECharts 从静态 import 改为
+`@/utils/charts` 动态 `import()`，只在确实要画图时下载。
+
+实测 `npm run build`（脚本含 `vue-tsc --noEmit`）：
+
+```text
+index-C3ahQ0WK.js        469.16 kB │ gzip: 150.49 kB   （原 865.67 / 276.04）
+ReportsView-Bno0xF2Z.js    5.07 kB │ gzip:   2.54 kB   （原 510.52 / 172.62）
+charts-hvYY3Ft_.js       519.31 kB │ gzip: 175.39 kB   （按需懒加载）
+```
+
+`charts` 仍触发 Vite 的 >500 KB 警告，但它是懒加载 chunk，首屏不下载；
+保留并在 README 已知限制里说明。web 镜像重建后确认容器实际返回的
+`index.html` 引用 `index-C3ahQ0WK.js`，不是旧产物。
+
+### 风险 36：Playwright E2E
+
+新增 `e2e/` 独立 npm 工程（`@playwright/test 1.64.1`）。Compose 的 `e2e`
+profile 用官方 `mcr.microsoft.com/playwright:v1.64.1-noble` 镜像，跑在
+Compose 网络上；`make e2e` 会带上 `--profile app --profile e2e`
+（只给 e2e 会因 `web` 未定义而失败）。宿主不装浏览器：WSL 里缺
+`libnspr4` 且没有免密 sudo，容器方案同时解决系统依赖与 CI 可复现性。
+
+`e2e/playwright.config.ts`：单 worker、`baseURL` 由 `E2E_BASE_URL` 提供、
+失败保留 trace、只截失败图。每个用例注册全新租户，不依赖库内既有数据。
+
+实测（连续三轮，真实输出）：
+
+```text
+Running 2 tests using 1 worker
+  ✓  1 [chromium] › tests/expense-flow.spec.ts:56:1 › 未登录访问受保护路由会跳到登录页 (240ms)
+  ✓  2 [chromium] › tests/expense-flow.spec.ts:62:1 › 注册 → 建单 → 提交 → 报表 → access token 失效后自动刷新 (2.1s)
+  2 passed (2.9s)
+
+  ✓  1 … 未登录访问受保护路由会跳到登录页 (228ms)
+  ✓  2 … 注册 → 建单 → 提交 → 报表 → access token 失效后自动刷新 (3.6s)
+  2 passed (4.4s)
+
+  ✓  1 … 未登录访问受保护路由会跳到登录页 (750ms)
+  ✓  2 … 注册 → 建单 → 提交 → 报表 → access token 失效后自动刷新 (5.5s)
+  2 passed (8.7s)   ← 与 Go 全量回归并行，耗时偏高
+```
+
+报表断言先用 `expect.poll` 轮询 summary API 的 `currency_totals` 非空（20s），
+再进报表页等 `.chart canvas`：提交后事件要经 outbox → Kafka → report 消费者
+才落读模型（ADR-0004），固定 sleep 会偶发失败。轮询窗口取 UTC 前后各一天，
+避免浏览器时区与 UTC 跨日时漏查。
+
+### E2E 发现并修掉的真实缺陷
+
+首次跑通时报 `POST /api/v1/expenses` 400。原因是浏览器本地时间 07:46，
+前端把日期拼成当天 12:00 再 `toISOString()`，落在后端
+`maxOccurredSkew = 5m` 的未来时间窗口之外——任何用户在当地中午 12 点前
+建单都会失败，编辑草稿同样受影响；而单元/集成测试直接构造 UTC 时间，
+从未触发这个组合。
+
+修复：新增 `frontend/src/utils/format.ts#occurredAtISO`，日期是当天且尚未
+到 12:00 时用当前时间，其余保持中午 12:00；`ExpensesView` 创建与
+`ExpenseDetailView` 编辑都改用它。这是 M8 最直接的收益：浏览器级用例覆盖了
+API 测试看不到的本地时间组合。
+
+### M8 未关闭项
+
+风险 33（真实 SMTP STARTTLS）、风险 17（Ed25519/JWKS）本轮未做；
+风险 20/26（真实集群、CI runner）仍未验证。M8 没有改 Go 代码，但仍按
+里程碑收尾跑了一次全量回归，结果见下。
+
+### 里程碑收尾回归（M8 最终代码）
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+（无输出，GOFMT_EXIT:0 VET_EXIT:0 BUILD_EXIT:0）
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout=25m
+23 个包全部 ok；最长 internal/report 33.361s；TEST1_EXIT:0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout=25m
+23 个包全部 ok；最长 internal/report 80.781s；TEST5_EXIT:0
+```
+
+## M9：令牌签名迁移到 EdDSA / JWKS（2026-10-27）
+
+### 实现
+
+- `internal/platform/auth/jwt.go`：`IssuerConfig` / `TokenIssuer` 支持
+  EdDSA 签发（header 带 `kid` = 公钥 RFC 7638 thumbprint）与按 `kid` 验签；
+  解析用 `jwt.WithValidMethods` 锁定算法，`alg=none` 与 RS/HS 混淆被拒；
+  未知 `kid` 直接报错，不"试所有公钥"。HS256 只在显式配置且密钥 ≥32 字节、
+  `allow_hs256` 为真时可用。
+- `internal/platform/auth/jwtkeys.go`：JWKS 输出（`kty=OKP`、`crv=Ed25519`、
+  `use=sig`、`alg=EdDSA`，按 `kid` 排序）与私钥种子 / 公钥列表的 base64 解析。
+- identity 暴露 `/.well-known/jwks.json`（`Cache-Control: public, max-age=300`）；
+  `RegisterRoutes` 接收 `TokenSource`，签发票据与公布公钥共用同一份密钥配置。
+- 配置：`EXPENSIO_JWT_PRIVATE_KEY`（仅 identity，缺失时 identity 启动失败）、
+  `EXPENSIO_JWT_PUBLIC_KEYS`（逗号分隔多公钥，支持轮换）、
+  `EXPENSIO_JWT_ALLOW_HS256`。
+- 密钥分发：`scripts/env.sh` 用 openssl 生成 Ed25519 密钥对；Compose 与 Helm
+  都只给 identity 注入私钥，其余五个服务只挂公钥且关闭 HS256。
+
+### 静态检查与全量回归（M9 最终代码）
+
+```text
+$ gofmt -l . && go vet ./... && go build ./...
+GOFMT_EXIT:0 lines=0
+VET_EXIT:0
+BUILD_EXIT:0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout=25m
+23 个包全部 ok（identity 22.578s、e2e 29.129s、report 27.027s）；TEST1_EXIT:0 elapsed=38s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout=25m
+23 个包全部 ok；最长 internal/report 81.656s；TEST5_EXIT:0 elapsed=90s
+```
+
+### 运行期验证（六服务均为 m9 镜像且 healthy）
+
+```text
+=== JWKS（从 compose 网络内取；网关不代理该路径）===
+FETCH_EXIT:0 bytes=168
+  Cache-Control: public, max-age=300
+keys: 1
+kty=OKP crv=Ed25519 alg=EdDSA use=sig kid=7PJeSZ06dFOV… xlen=32 has_d=False
+
+=== 通过网关注册新租户 ===
+REGISTER_HTTP:201
+alg: EdDSA | kid: 7PJeSZ06dFOV… | has_kid: True
+
+=== EdDSA 令牌被验签服务接受 ===
+expense:  200
+identity: 200
+
+=== 用旧 HS256 密钥伪造的令牌必须被网关拒绝 ===
+gateway with HS256: 401
+```
+
+### 部署面
+
+```text
+$ helm lint deploy/helm/expensio
+1 chart(s) linted, 0 chart(s) failed
+
+$ helm template expensio deploy/helm/expensio --namespace expensio | grep -c '^kind:'
+24
+
+环境变量计数（默认 values）：PUBLIC_KEYS=6、PRIVATE_KEY=1、SECRET=1、ALLOW_HS256=6
+identity：PRIVATE_KEY + PUBLIC_KEYS + SECRET（optional）+ ALLOW_HS256=true
+其余五个：PUBLIC_KEYS + ALLOW_HS256=false
+```
+
+Compose 侧用 `docker compose --profile app config` 验证：identity 独有
+`EXPENSIO_JWT_PRIVATE_KEY` 与旧 `EXPENSIO_JWT_SECRET`，其余五个服务只有公钥。
+
+### 浏览器级 E2E
+
+```text
+✓ 未登录访问受保护路由会跳到登录页 (432ms)
+✓ 注册 → 建单 → 提交 → 报表 → access token 失效后自动刷新 (3.1s)
+2 passed (4.5s)
+```
+
+### 过程中发现的问题
+
+- Compose v5.1.4 的 `config` 只渲染已启用 profile 的服务：不给 `--profile`
+  时输出 `services: {}` 且退出码 0，容易被误读成"配置为空"。验收命令改为
+  `--profile app`。
+- Helm 的 identity 原先以非 optional 方式引用 `EXPENSIO_JWT_SECRET`，与
+  NOTES 里"迁移期可选"矛盾；已加 `optional: true`。
+- 并发跑六个镜像构建与 testcontainers 集成测试把 WSL2 / Docker 引擎拖垮
+  （引擎 500、`Wsl/Service/0x8007274c`）；终止后台任务、`wsl --shutdown`
+  后改为串行执行，全部检查通过。这是环境问题，不是代码问题。
+
+### M9 未关闭项
+
+- identity 的 HS256 兼容路径仍在（`allow_hs256=true` + 旧 secret），要等一个
+  access TTL 后关闭并删除该密钥与代码分支；
+- 多公钥并存的轮换演练未做（配置与 `kid` 选择已由单测覆盖）；
+- JWKS 由 identity 直接提供，网关不代理 `/.well-known/jwks.json`；
+- 风险 33（真实 SMTP）、风险 20/26（真实集群、CI runner）状态不变。
+
+## M10 完成情况：成员邀请
+
+设计取舍见 [ADR-0010](adr/0010-member-invitations.md)，本节只记录做了什么与
+实际跑出了什么。
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 邀请令牌 | 完成 | 32 字节 `crypto/rand` → base64url；库内只存 SHA-256；部分唯一索引限制每租户每邮箱一条待接受邀请 |
+| 状态机 | 完成 | 待接受 / 已接受 / 已撤销 / 已过期；分别返回 `410 invitation.accepted|revoked|expired`，未知令牌 `404` |
+| 接受流程 | 完成 | 新邮箱设置密码；已有账号必须输入原密码，复用原用户；租户事务内 `FOR UPDATE` 保证只成功一次 |
+| 权限 | 完成 | owner/admin 可邀请，只有 owner 能邀请 owner；member/viewer 无创建/列表权限 |
+| 邮件 | 完成 | identity → notification `POST /api/v1/internal/emails`（HMAC 短时令牌）→ `email_outbox` → worker；失败不回滚邀请 |
+| 网关 | 完成 | `/api/v1/invitations` 公开 + IP 限流；`/api/v1/internal/*` 不转发 |
+| 管理台 | 完成 | 成员页邀请弹窗、一次性链接复制、待接受列表与撤销；公开 `/invite/:token` 接受页。typecheck 与生产构建通过；**邀请页尚未纳入 Playwright E2E**（邮箱取链需要 Mailpit API） |
+| 审计 | 完成 | `member.invited`、`member.invitation_accepted`；元数据不含令牌/链接 |
+
+### 自动化测试
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/identity/ -run TestInvitation -race -count=1 -v
+--- PASS: TestInvitationLifecycleForNewUser (6.11s)
+--- PASS: TestInvitationPermissions (1.20s)
+--- PASS: TestInvitationReinviteAndRevoke (0.41s)
+--- PASS: TestInvitationExpires (0.31s)
+--- PASS: TestInvitationForExistingAccountRequiresPassword (1.01s)
+--- PASS: TestInvitationTargetRules (0.62s)
+--- PASS: TestInvitationUnknownToken (0.18s)
+ok  	github.com/edgerunner-fris/expensio/internal/identity	11.398s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/notification/ -run TestInternalEmail -race -count=1 -v
+--- PASS: TestInternalEmailRequiresSignedTenantToken (2.84s)
+--- PASS: TestInternalEmailQueuesUnderTenantFromToken (0.04s)
+--- PASS: TestInternalEmailValidatesPayload (0.03s)
+ok  	github.com/edgerunner-fris/expensio/internal/notification	4.416s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -p 1
+24 个包 ok；EXIT=0
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -p 1 -timeout=30m
+24 个包 ok；EXIT=0（identity 53.176s、report 53.450s）
+```
+
+`identity` 用例覆盖：新用户完整生命周期、owner/admin/member/viewer 权限、
+重复邀请使旧链接失效、撤销 204/409/404、过期 410、已有账号的错误密码
+401 与正确密码复用用户、已是成员/非法角色/非法邮箱、未知令牌。
+`notification` 用例覆盖：无令牌/伪造/篡改签名均 401、签名中的租户决定
+`email_outbox.tenant_id`、同租户同幂等键只写一行、跨租户互不可见、
+非法收件人/空主题/空幂等键/非 JSON 均 400。
+
+### 前端
+
+```text
+$ docker run --rm --network none -v .../frontend:/app -w /app node:24 \
+    ./node_modules/.bin/vue-tsc --noEmit
+TYPECHECK_EXIT=0
+
+$ docker run --rm --network none -v .../frontend:/app -w /app node:24 \
+    ./node_modules/.bin/vite build
+dist/assets/AcceptInviteView-BIalC-12.js    3.50 kB │ gzip: 1.88 kB
+dist/assets/MembersView-BHpd6kMI.js         7.74 kB │ gzip: 3.24 kB
+✓ built in 2.00s
+
+# 容器内的 web 服务实际返回了邀请页与对应 chunk
+GET /invite/probe-token                      → 200 text/html
+GET /assets/AcceptInviteView-BIalC-12.js     → 200 text/javascript
+```
+
+### 配置与部署面
+
+```text
+$ docker run --rm -v .../deploy/helm/expensio:/chart alpine/helm lint /chart
+1 chart(s) linted, 0 chart(s) failed
+
+$ helm template expensio ... | grep EXPENSIO_INVITE
+  EXPENSIO_INVITE_BASE_URL: "https://expensio.example.com"
+  EXPENSIO_INVITE_TTL: "168h"
+模板 kind 数：24（与 M9 相同）
+
+$ docker compose --profile app config（--format json 读取 identity.environment）
+EXPENSIO_INVITE_BASE_URL = http://localhost:5173
+EXPENSIO_NOTIFICATION_SERVICE_URL = http://notification:8085
+```
+
+### 整栈实跑（13 项全过）
+
+脚本从 compose 网络内访问 `gateway:8080` 与 `mailpit:8025`，不打印任何
+令牌或口令：
+
+```text
+PASS  注册新租户并拿到 owner 会话  status=201
+PASS  创建邀请返回 201 且邮件已入队  status=201 email_queued=True
+PASS  邀请链接只出现在创建响应里  link_present=True
+PASS  Mailpit 收到邀请邮件并能取出链接
+PASS  网关公开路由可查询邀请  status=200
+PASS  接受邀请后拿到 member 会话  status=200 role=member
+PASS  已接受的链接返回 410  status=410
+PASS  新成员可用设置的密码登录  status=200
+PASS  成员列表包含被邀请人  status=200 count=2
+PASS  创建待撤销邀请  status=201
+PASS  撤销邀请返回 204  status=204
+PASS  撤销后的链接返回 410  status=410
+PASS  网关不转发内部邮件接口  status=404
+
+13 passed, 0 failed
+```
+
+### 过程中发现的问题
+
+- **只重建部分镜像会留下旧二进制**：本地 `expense`/`billing`/`report` 镜像
+  还是 2026-10-26 构建的版本，重启后不认识 EdDSA 公钥配置，报
+  `jwt.secret 至少需要 32 字节` 并不断重启。重新构建这三个镜像后全部
+  healthy。结论：本地整栈验收前用 `make app-up`（会构建全部服务），
+  不要只 `docker compose build <个别服务>` 后重启。
+- **集成测试的固定邮箱在 `-count=5` 下暴露**：`TestInvitationLifecycleForNewUser`
+  第一轮把 `newbie@example.com` 注册成全局账号，第二轮同一邮箱就不再是
+  "新用户"，`account_exists` 断言失败（identity 包 `-count=5` 失败）。
+  改为每轮生成唯一邮箱后，该包 7 个邀请用例 `-count=5` 全绿（36.030s）。
+  教训：共享 Postgres 的包内用例不能用固定邮箱表示"新用户"。
+- **`--count=5` 全量回归**：修正测试邮箱后重跑，
+  `24 个包 ok；EXIT=0`，无失败（identity 53.176s、report 53.450s）。
+  第一次运行只失败 identity 一项，原因就是上面的固定邮箱。
+- **前端 typecheck 的容器选择**：挂载的 `node_modules` 是在 glibc 环境安装的，
+  `node:24-alpine` 缺 `@rolldown/binding-linux-x64-musl`，改用 `node:24`
+  后构建成功。这是本地验收命令的细节，不影响 `Dockerfile.web`（它自己
+  `npm ci`）。
+
+## 下一步
+
+1. 风险 33：用启用 STARTTLS 的真实 SMTP 中继补测认证与证书校验；
+2. EdDSA 收尾：一个 access TTL 后关闭 `EXPENSIO_JWT_ALLOW_HS256`、删除
+   HS256 兼容代码与共享密钥；补一次公钥轮换演练；
+3. 风险 20/26：在真实集群 apply Helm、在 GitHub runner 执行 CI（含 `make e2e`）；
+4. 最终验收：演示脚本、README 截图与全景回归。
 
 
 

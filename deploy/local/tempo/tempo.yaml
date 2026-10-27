@@ -1,0 +1,29 @@
+# Tempo 单进程本地配置。只用于开发/演示：本地文件后端、无对象存储、无多租户。
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    # 本地演示不需要长期保留；一天足够覆盖一次联调会话。
+    block_retention: 24h
+
+usage_report:
+  reporting_enabled: false

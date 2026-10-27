@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"time"
@@ -41,30 +42,77 @@ func (c *Claims) Tenant() (tenantctx.Tenant, error) {
 	return tenantctx.Tenant{ID: tenantID, UserID: userID, Role: role}, nil
 }
 
+// IssuerConfig 描述一个签发/校验器。
+//
+// PrivateKey 只有 identity 持有：持有它才能签发任意租户的令牌。
+// 其他服务只配置 PublicKeys，因此即使被攻破也无法伪造令牌——
+// 这正是从 HS256 迁移到 EdDSA 的目的。
+// HS256Secret 用于迁移期继续接受旧令牌；迁移完成后置空即可拒绝该算法。
+type IssuerConfig struct {
+	Issuer      string
+	HS256Secret string
+	PrivateKey  ed25519.PrivateKey
+	PublicKeys  []ed25519.PublicKey
+	AccessTTL   time.Duration
+	RefreshTTL  time.Duration
+}
+
 // TokenIssuer 负责签发与校验 access token。
 type TokenIssuer struct {
 	issuer     string
 	secret     []byte
+	signKey    ed25519.PrivateKey
+	verifyKeys map[string]ed25519.PublicKey
 	accessTTL  time.Duration
 	refreshTTL time.Duration
 	now        func() time.Time
 }
 
-func NewTokenIssuer(issuer, secret string, accessTTL, refreshTTL time.Duration) (*TokenIssuer, error) {
-	if issuer == "" {
+func NewTokenIssuer(cfg IssuerConfig) (*TokenIssuer, error) {
+	if cfg.Issuer == "" {
 		return nil, errors.New("auth: issuer 不能为空")
 	}
-	if len(secret) < 32 {
-		return nil, errors.New("auth: 签名密钥至少需要 32 字节")
-	}
-	if accessTTL <= 0 || refreshTTL <= accessTTL {
+	if cfg.AccessTTL <= 0 || cfg.RefreshTTL <= cfg.AccessTTL {
 		return nil, errors.New("auth: 令牌有效期非法")
 	}
+
+	hasEd25519 := cfg.PrivateKey != nil || len(cfg.PublicKeys) > 0
+	if !hasEd25519 && len(cfg.HS256Secret) < 32 {
+		return nil, errors.New("auth: 需要 Ed25519 公钥，或至少 32 字节的 HS256 密钥")
+	}
+	if cfg.HS256Secret != "" && len(cfg.HS256Secret) < 32 {
+		return nil, errors.New("auth: HS256 密钥至少需要 32 字节")
+	}
+	if cfg.PrivateKey != nil {
+		switch len(cfg.PrivateKey) {
+		case ed25519.SeedSize:
+			cfg.PrivateKey = ed25519.NewKeyFromSeed(cfg.PrivateKey)
+		case ed25519.PrivateKeySize:
+		default:
+			return nil, fmt.Errorf("auth: Ed25519 私钥长度非法: %d", len(cfg.PrivateKey))
+		}
+	}
+
+	keys := make(map[string]ed25519.PublicKey, len(cfg.PublicKeys)+1)
+	for _, pub := range cfg.PublicKeys {
+		if len(pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("auth: Ed25519 公钥长度非法: %d", len(pub))
+		}
+		keys[KeyID(pub)] = pub
+	}
+	// 签发者必须能校验自己刚签出的令牌，否则配置漏掉当前公钥时会立刻 401。
+	if cfg.PrivateKey != nil {
+		pub := cfg.PrivateKey.Public().(ed25519.PublicKey)
+		keys[KeyID(pub)] = pub
+	}
+
 	return &TokenIssuer{
-		issuer:     issuer,
-		secret:     []byte(secret),
-		accessTTL:  accessTTL,
-		refreshTTL: refreshTTL,
+		issuer:     cfg.Issuer,
+		secret:     []byte(cfg.HS256Secret),
+		signKey:    cfg.PrivateKey,
+		verifyKeys: keys,
+		accessTTL:  cfg.AccessTTL,
+		refreshTTL: cfg.RefreshTTL,
 		now:        time.Now,
 	}, nil
 }
@@ -73,11 +121,42 @@ func NewTokenIssuer(issuer, secret string, accessTTL, refreshTTL time.Duration) 
 func (i *TokenIssuer) RefreshTTL() time.Duration { return i.refreshTTL }
 
 // IssueAccess 签发 access token，同时返回过期时间。
+// 有私钥时用 EdDSA（header 带 kid），否则退化为迁移期的 HS256。
 func (i *TokenIssuer) IssueAccess(userID, tenantID uuid.UUID, role tenantctx.Role, sessionID uuid.UUID) (string, time.Time, error) {
 	now := i.now()
 	expiresAt := now.Add(i.accessTTL)
 
-	claims := Claims{
+	claims := i.claims(userID, tenantID, role, sessionID, now, expiresAt)
+
+	var (
+		method jwt.SigningMethod
+		key    any
+	)
+	switch {
+	case i.signKey != nil:
+		method = jwt.SigningMethodEdDSA
+		key = i.signKey
+	case len(i.secret) >= 32:
+		method = jwt.SigningMethodHS256
+		key = i.secret
+	default:
+		return "", time.Time{}, errors.New("auth: 当前配置没有签名密钥")
+	}
+
+	token := jwt.NewWithClaims(method, claims)
+	if i.signKey != nil {
+		token.Header["kid"] = KeyID(i.signKey.Public().(ed25519.PublicKey))
+	}
+
+	signed, err := token.SignedString(key)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("auth: 签发令牌失败: %w", err)
+	}
+	return signed, expiresAt, nil
+}
+
+func (i *TokenIssuer) claims(userID, tenantID uuid.UUID, role tenantctx.Role, sessionID uuid.UUID, now, expiresAt time.Time) Claims {
+	return Claims{
 		TenantID:  tenantID.String(),
 		Role:      string(role),
 		SessionID: sessionID.String(),
@@ -91,25 +170,33 @@ func (i *TokenIssuer) IssueAccess(userID, tenantID uuid.UUID, role tenantctx.Rol
 			ID:        uuid.NewString(),
 		},
 	}
-
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(i.secret)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("auth: 签发令牌失败: %w", err)
-	}
-	return signed, expiresAt, nil
 }
 
 // ParseAccess 校验签名、算法、签发方、受众与有效期。
-// 显式限制签名算法为 HS256：不校验算法就等于允许 alg=none 之类的降级攻击。
+// 显式限制允许的算法：不校验算法就等于允许 alg=none 之类的降级攻击。
+// EdDSA 令牌按 header 的 kid 选公钥，未知 kid 直接拒绝——
+// 不做"试所有公钥"，避免用错误密钥耗尽 CPU。
 func (i *TokenIssuer) ParseAccess(raw string) (*Claims, error) {
 	claims := &Claims{}
 	_, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
-		if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+		switch token.Method.Alg() {
+		case jwt.SigningMethodEdDSA.Alg():
+			kid, _ := token.Header["kid"].(string)
+			pub, ok := i.verifyKeys[kid]
+			if !ok {
+				return nil, fmt.Errorf("auth: 未知的签名密钥 %q", kid)
+			}
+			return pub, nil
+		case jwt.SigningMethodHS256.Alg():
+			if len(i.secret) < 32 {
+				return nil, errors.New("auth: 已禁用 HS256 令牌")
+			}
+			return i.secret, nil
+		default:
 			return nil, fmt.Errorf("auth: 非预期的签名算法 %q", token.Method.Alg())
 		}
-		return i.secret, nil
 	},
-		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithValidMethods(i.validMethods()),
 		jwt.WithIssuer(i.issuer),
 		jwt.WithAudience(audience),
 		jwt.WithExpirationRequired(),
@@ -120,4 +207,15 @@ func (i *TokenIssuer) ParseAccess(raw string) (*Claims, error) {
 		return nil, fmt.Errorf("auth: 令牌校验失败: %w", err)
 	}
 	return claims, nil
+}
+
+func (i *TokenIssuer) validMethods() []string {
+	methods := make([]string, 0, 2)
+	if len(i.verifyKeys) > 0 {
+		methods = append(methods, jwt.SigningMethodEdDSA.Alg())
+	}
+	if len(i.secret) >= 32 {
+		methods = append(methods, jwt.SigningMethodHS256.Alg())
+	}
+	return methods
 }

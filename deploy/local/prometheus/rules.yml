@@ -1,0 +1,85 @@
+# 告警规则的指标名来自 OTel Prometheus exporter 的命名转换：
+# 点号变下划线、counter 追加 _total、单位 s 变成 _seconds。
+# 修改指标名后必须同步 dashboard 与告警，否则会得到"永远不触发"的规则。
+groups:
+  - name: expensio-slo
+    rules:
+      - alert: ExpensioServiceMissing
+        expr: count(expensio_build_info) < 7
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "有服务未上报指标"
+          description: "期望 7 个服务（gateway/identity/expense/billing/report/notification/web），当前 {{ $value }} 个。"
+
+      - alert: ExpensioHigh5xxRate
+        expr: |
+          sum(rate(expensio_http_server_requests_total{http_response_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(expensio_http_server_requests_total[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP 5xx 比例超过 5%"
+          description: "最近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}。"
+
+      - alert: ExpensioHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(expensio_http_server_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP P95 超过 1s"
+          description: "最近 5 分钟 P95 为 {{ $value | humanizeDuration }}。"
+
+      - alert: ExpensioKafkaPublishFailures
+        expr: sum(rate(expensio_kafka_producer_records_total{outcome="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka 生产失败"
+          description: "持续有事件无法写入 Kafka，outbox 会积压。"
+
+      - alert: ExpensioOutboxDeliveryFailures
+        expr: sum(rate(expensio_outbox_events_delivered_total{outcome="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "outbox 投递失败"
+          description: "事件会按指数退避重试；持续失败通常意味着 Kafka 不可达或事件格式非法。"
+
+      - alert: ExpensioEmailFailures
+        expr: sum(rate(expensio_notification_emails_total{outcome="failed"}[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "通知邮件投递失败"
+          description: "站内通知不受影响；请检查 SMTP 与 email_outbox.last_error。"
+
+      - alert: ExpensioRateLimiterFailOpen
+        expr: sum(rate(expensio_gateway_rate_limit_decisions_total{outcome="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "限流器故障，网关正在放行全部请求"
+          description: "Redis 不可用时限流 fail-open。持续 5 分钟意味着配额保护已失效。"
+
+      - alert: ExpensioDBPoolSaturated
+        expr: |
+          max(expensio_db_pool_acquired_conns / clamp_min(expensio_db_pool_max_conns, 1)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据库连接池即将耗尽"
+          description: "连接池使用率 {{ $value | humanizePercentage }}，新请求会开始排队。"

@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -39,14 +40,38 @@ type Service struct {
 	// dummyHash 用于"用户不存在"时也走一遍完整的 argon2 校验。
 	// 否则登录耗时本身就是一个账号探测接口：存在 → 60ms，不存在 → 1ms。
 	dummyHash string
+	// 邀请：链接前缀、有效期与邮件投递端口。
+	// notifier 可以为 nil（测试场景），此时邀请仍会创建，只是不投递邮件。
+	notifier      EmailNotifier
+	inviteBaseURL string
+	inviteTTL     time.Duration
 }
 
-func NewService(database *db.DB, tokens *auth.TokenIssuer) (*Service, error) {
+// InvitationOptions 是邀请功能的外部依赖。BaseURL 必须与用户实际访问的
+// 站点一致，否则邮件里的链接指向错误的主机。
+type InvitationOptions struct {
+	Notifier EmailNotifier
+	BaseURL  string
+	TTL      time.Duration
+}
+
+func NewService(database *db.DB, tokens *auth.TokenIssuer, invites InvitationOptions) (*Service, error) {
 	dummy, err := auth.HashPassword("expensio-timing-equalizer")
 	if err != nil {
 		return nil, err
 	}
-	return &Service{database: database, repo: NewRepository(), tokens: tokens, dummyHash: dummy}, nil
+	base := strings.TrimRight(strings.TrimSpace(invites.BaseURL), "/")
+	if base == "" {
+		return nil, errors.New("identity: 邀请链接 base URL 不能为空")
+	}
+	ttl := invites.TTL
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	return &Service{
+		database: database, repo: NewRepository(), tokens: tokens, dummyHash: dummy,
+		notifier: invites.Notifier, inviteBaseURL: base, inviteTTL: ttl,
+	}, nil
 }
 
 type RegisterInput struct {

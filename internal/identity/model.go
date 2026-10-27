@@ -98,6 +98,50 @@ type AuditRecord struct {
 	Metadata    map[string]any
 }
 
+// Invitation 是待接受邀请的对外视图。令牌明文与摘要都不出现在这里。
+type Invitation struct {
+	ID        uuid.UUID `json:"id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	InvitedBy uuid.UUID `json:"invited_by"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// CreatedInvitation 是创建邀请的响应。
+// Link 只在这里出现一次：数据库里只有摘要，之后任何接口都无法再取回明文。
+type CreatedInvitation struct {
+	Invitation
+	Link string `json:"link"`
+	// EmailQueued 为 false 表示邀请已创建、链接可用，但邮件没能入队。
+	// 管理员可以直接复制 Link 转发；这比让整个创建操作失败更有用。
+	EmailQueued bool `json:"email_queued"`
+}
+
+// InvitationInfo 是公开的邀请元数据，供接受页展示。
+type InvitationInfo struct {
+	TenantName    string    `json:"tenant_name"`
+	TenantSlug    string    `json:"tenant_slug"`
+	Email         string    `json:"email"`
+	Role          string    `json:"role"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	AccountExists bool      `json:"account_exists"`
+}
+
+// invitationRecord 是仓储层的完整邀请记录，只在本包内部流转。
+type invitationRecord struct {
+	ID         uuid.UUID
+	TenantID   uuid.UUID
+	TenantSlug string
+	TenantName string
+	Email      string
+	Role       string
+	ExpiresAt  time.Time
+	AcceptedAt *time.Time
+	RevokedAt  *time.Time
+	CreatedAt  time.Time
+}
+
 // Session 是一次登录的结果。
 type Session struct {
 	AccessToken      string    `json:"access_token"`

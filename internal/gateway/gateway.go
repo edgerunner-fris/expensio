@@ -24,12 +24,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/httpx"
 	"github.com/edgerunner-fris/expensio/internal/platform/httpx/middleware"
+	"github.com/edgerunner-fris/expensio/internal/platform/telemetry"
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
+)
+
+// 限流决策单独计数：429 只能说明"拒绝过"，看不出 Redis 故障导致的 fail-open。
+// 这里把 allowed / denied / error 三种结果都暴露出来，告警才能区分
+// "正常限流" 与 "限流器已经失效、全站在裸奔"。
+var rateLimitDecisions = telemetry.NewCounter(
+	"expensio.gateway.rate_limit.decisions",
+	"网关限流决策数（按范围与结果）",
+	"{decision}",
 )
 
 // LimitScope 决定按什么维度限流。
@@ -59,6 +71,8 @@ type Rule struct {
 func DefaultRules() []Rule {
 	return []Rule{
 		{Prefix: "/api/v1/auth", Upstream: "identity", Auth: false, Scope: LimitByIP},
+		// 邀请接受页是公开的：令牌就是凭据，按 IP 限流防止令牌被暴力枚举。
+		{Prefix: "/api/v1/invitations", Upstream: "identity", Auth: false, Scope: LimitByIP},
 		{Prefix: "/api/v1/me", Upstream: "identity", Auth: true, Scope: LimitByTenant},
 		{Prefix: "/api/v1/tenants", Upstream: "identity", Auth: true, Scope: LimitByTenant},
 		{Prefix: "/api/v1/audit-logs", Upstream: "identity", Auth: true, Scope: LimitByTenant},
@@ -227,8 +241,13 @@ func (h *Handler) allow(c *gin.Context, rule Rule) bool {
 		perSec, burst = h.limits.AuthPerSecond, h.limits.AuthBurst
 	}
 
-	decision, err := h.limiter.Allow(c.Request.Context(), key, perSec, burst)
+	ctx := c.Request.Context()
+	decision, err := h.limiter.Allow(ctx, key, perSec, burst)
 	if err != nil {
+		rateLimitDecisions.Add(ctx, 1,
+			attribute.String("scope", scopeTag),
+			attribute.String("outcome", "error"),
+		)
 		h.log.Warn("gateway: 限流器不可用，本次放行",
 			zap.String("scope", scopeTag),
 			zap.String("path", c.Request.URL.Path),
@@ -237,9 +256,17 @@ func (h *Handler) allow(c *gin.Context, rule Rule) bool {
 		return true
 	}
 	if decision.Allowed {
+		rateLimitDecisions.Add(ctx, 1,
+			attribute.String("scope", scopeTag),
+			attribute.String("outcome", "allowed"),
+		)
 		return true
 	}
 
+	rateLimitDecisions.Add(ctx, 1,
+		attribute.String("scope", scopeTag),
+		attribute.String("outcome", "denied"),
+	)
 	c.Header("Retry-After", retryAfterHeader(decision.RetryAfter))
 	httpx.Error(c, apperr.New("common.rate_limited", http.StatusTooManyRequests,
 		"请求过于频繁，请稍后再试").WithDetail("scope", scopeTag))
@@ -298,7 +325,9 @@ func newUpstreamProxy(name, raw string, logg *zap.Logger) (*httputil.ReverseProx
 			pr.SetURL(target)
 			pr.SetXForwarded()
 		},
-		Transport:     &retryTransport{base: transport},
+		// 包在重试之外：每次实际下发（含重试）都有独立的 client span，
+		// 并把 traceparent 注入到下游请求头，业务服务才能续接同一条链路。
+		Transport:     &retryTransport{base: otelhttp.NewTransport(transport)},
 		FlushInterval: 100 * time.Millisecond,
 		// ReverseProxy 自带的日志会绕过 zap 的输出格式，直接丢弃，
 		// 由下面的 ErrorHandler 统一记录。

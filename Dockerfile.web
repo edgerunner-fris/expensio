@@ -1,0 +1,54 @@
+# 管理台镜像：Node 构建 Vite 产物 → Go 编译静态服务 → 最小运行镜像。
+#
+# 不用 nginx 的原因见 internal/web 与 docs/adr/0007-web-serving.md：
+# 构建环境拉不到 nginx 镜像，而静态服务 + 反代用标准库即可，且能复用
+# 现有的日志、优雅关闭与非 root 约束。
+
+# 两个基础镜像参数必须声明在第一个 FROM 之前：Docker 只把首个 FROM 之前的
+# ARG 当作全局参数，写在阶段之间的 ARG 不能用于后续 FROM。
+ARG NODE_VERSION=24
+ARG GO_VERSION=1.27
+
+FROM node:${NODE_VERSION}-alpine AS frontend
+
+# 网络受限时可用 --build-arg NPM_REGISTRY=https://registry.npmmirror.com/。
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund --registry="${NPM_REGISTRY}"
+COPY frontend/ ./
+RUN npm run build
+
+FROM golang:${GO_VERSION}-alpine AS build
+
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOPROXY=${GOPROXY} \
+    GOTOOLCHAIN=local
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+ARG VERSION=dev
+RUN go build -trimpath \
+      -ldflags "-s -w -X github.com/edgerunner-fris/expensio/internal/platform/version.Version=${VERSION}" \
+      -o /out/expensio-web ./cmd/web
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S -g 10001 expensio \
+    && adduser -S -u 10001 -G expensio -h /nonexistent -s /sbin/nologin expensio
+
+COPY --from=build /out/expensio-web /usr/local/bin/expensio-web
+COPY --from=frontend /src/frontend/dist /srv/web
+
+# 静态资源只读，配合 readOnlyRootFilesystem 使用；监听端口与后端服务错开。
+ENV EXPENSIO_WEB_ROOT=/srv/web \
+    EXPENSIO_WEB_ADDR=:8086
+
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/expensio-web"]

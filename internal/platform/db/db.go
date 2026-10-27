@@ -52,7 +52,10 @@ func Open(ctx context.Context, dsn string, maxConns int32) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("db: 连接数据库失败: %w", err)
 	}
-	return &DB{pool: pool}, nil
+	d := &DB{pool: pool}
+	// 指标注册失败不应阻止提供服务；错误在 RegisterMetrics 内部已隔离。
+	_ = d.RegisterMetrics()
+	return d, nil
 }
 
 func (d *DB) Close() {

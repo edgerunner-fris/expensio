@@ -1,0 +1,63 @@
+{{- if .Values.topics.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-topics" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: topics
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.topics.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.topics.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "expensio.labels" . | nindent 8 }}
+        app.kubernetes.io/component: topics
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "expensio.fullname" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: topics
+          image: "apache/kafka:3.9.2"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for t in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
+                       expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
+                i=0
+                while true; do
+                  if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "{{ .Values.kafka.brokers }}" \
+                       --create --if-not-exists --topic "$t" \
+                       --partitions {{ .Values.topics.partitions }} \
+                       --replication-factor {{ .Values.topics.replicationFactor }}; then
+                    break
+                  fi
+                  i=$((i + 1))
+                  if [ "$i" -ge 30 ]; then
+                    echo "Kafka 在 150 秒内仍不可用，放弃创建主题 $t" >&2
+                    exit 1
+                  fi
+                  sleep 5
+                done
+              done
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,220 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "reqps" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name) (rate(expensio_http_server_requests_total[5m]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP 请求速率（按服务）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(expensio_http_server_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{service_name}} p95",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP P95 延迟",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "percentunit", "max": 1 },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name) (rate(expensio_http_server_requests_total{http_response_status_code=~\"5..\"}[5m])) / clamp_min(sum by (service_name) (rate(expensio_http_server_requests_total[5m])), 0.001)",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP 5xx 比例",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name) (expensio_http_server_active_requests)",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "正在处理的请求",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "reqps" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name, messaging_destination_name, outcome) (rate(expensio_kafka_producer_records_total[5m]))",
+          "legendFormat": "producer {{service_name}} {{messaging_destination_name}} {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name, messaging_destination_name, outcome) (rate(expensio_kafka_consumer_records_total[5m]))",
+          "legendFormat": "consumer {{service_name}} {{messaging_destination_name}} {{outcome}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Kafka 生产 / 消费速率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 30, "lineWidth": 1, "showPoints": "never" }, "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (service_name, event_type, outcome) (rate(expensio_outbox_events_delivered_total[5m]))",
+          "legendFormat": "{{service_name}} {{event_type}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Outbox 投递结果",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 30, "lineWidth": 1, "showPoints": "never" }, "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "sum by (outcome, final) (rate(expensio_notification_emails_total[5m]))",
+          "legendFormat": "{{outcome}} final={{final}}",
+          "refId": "A"
+        }
+      ],
+      "title": "通知邮件投递结果",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }, "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+      "id": 8,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "max by (service_name) (expensio_db_pool_acquired_conns / clamp_min(expensio_db_pool_max_conns, 1))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "数据库连接池使用率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 7 } ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 30 },
+      "id": 9,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "expensio-prometheus" },
+          "editorMode": "code",
+          "expr": "count(expensio_build_info)",
+          "legendFormat": "services",
+          "refId": "A"
+        }
+      ],
+      "title": "上报指标的服务数（期望 7）",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["expensio", "m7"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Expensio Overview",
+  "uid": "expensio-overview",
+  "version": 1
+}

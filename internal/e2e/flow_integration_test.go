@@ -264,8 +264,10 @@ func TestExpenseEventsReachReportSummary(t *testing.T) {
 
 	assert.Equal(t, 5, processedCount(t, reportDB, tenantID), "每个事件只应被消费一次")
 
-	issuer, err := auth.NewTokenIssuer("expensio-e2e", e2eJWTSecret,
-		15*time.Minute, time.Hour)
+	issuer, err := auth.NewTokenIssuer(auth.IssuerConfig{
+		Issuer: "expensio-e2e", HS256Secret: e2eJWTSecret,
+		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
+	})
 	require.NoError(t, err)
 	token, _, err := issuer.IssueAccess(adminID, tenantID, tenantctx.RoleAdmin, uuid.New())
 	require.NoError(t, err)

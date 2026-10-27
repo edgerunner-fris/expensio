@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 首次创建数据卷时执行一次：建五个库，每库一对角色。
+# 首次创建数据卷时执行一次：建六个库，每库一对角色。
 #
 # 为什么要成对：
 #   {service}_migrator —— 库与表的属主，golang-migrate 用它执行 DDL；
@@ -50,5 +50,5 @@ SQL
       -c "ALTER DATABASE ${svc}_db SET search_path = app, public"
   done
 
-  echo "expensio: 五个数据库与角色已就绪"
+  echo "expensio: 六个数据库与角色已就绪"
 )

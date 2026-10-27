@@ -30,9 +30,20 @@ type Options struct {
 	NeedsKafka  bool
 	NeedsJWT    bool
 	NeedsMinIO  bool
+	// NeedsJWTSigner 只在 identity 为 true：它是唯一持有 Ed25519 私钥、
+	// 可以签发 access token 的服务。其他服务只拿公钥验签。
+	NeedsJWTSigner bool
 	// NeedsBillingWebhook 只在 billing 为 true：回调密钥与渠道名是运行必需项，
 	// 缺失时应在启动期失败，而不是等第一个回调进来才发现没配置。
 	NeedsBillingWebhook bool
+	// NeedsInternalAPI 只在 identity 为 true：服务间联系人接口必须校验内部令牌。
+	NeedsInternalAPI bool
+	// NeedsNotification 只在 notification 为 true：内部令牌、identity 地址与 SMTP
+	// 都是运行必需项，缺失时启动期就失败。
+	NeedsNotification bool
+	// NeedsNotificationClient 只在 identity 为 true：邀请邮件要投递到 notification
+	// 的内部接口，因此必须知道它的地址与对外站点地址（用于拼接邀请链接）。
+	NeedsNotificationClient bool
 	// NeedsUpstreams 只在网关为 true：其他服务是"被转发方"，没有下游地址可校验。
 	NeedsUpstreams bool
 }
@@ -50,8 +61,17 @@ type Config struct {
 	OTel      OTel      `mapstructure:"otel"`
 	MinIO     MinIO     `mapstructure:"minio"`
 	Billing   Billing   `mapstructure:"billing"`
+	Notify    Notify    `mapstructure:"notification"`
+	Invite    Invite    `mapstructure:"invite"`
 	Upstreams Upstreams `mapstructure:"upstreams"`
 	RateLimit RateLimit `mapstructure:"rate_limit"`
+}
+
+// Invite 是成员邀请的配置。BaseURL 只用于拼对外的接受链接，
+// 必须与用户实际访问的站点一致；TTL 决定链接在邮件里写明的有效期。
+type Invite struct {
+	BaseURL string        `mapstructure:"base_url"`
+	TTL     time.Duration `mapstructure:"ttl"`
 }
 
 // Upstreams 是网关转发目标。值是完整 base URL（scheme + host + port），
@@ -110,9 +130,20 @@ type JWT struct {
 	Secret     string        `mapstructure:"secret"`
 	AccessTTL  time.Duration `mapstructure:"access_ttl"`
 	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
+	// PrivateKey 是 base64 的 Ed25519 私钥（32 字节种子或 64 字节私钥），
+	// 只有 identity 配置。PublicKeys 是逗号分隔的 base64 公钥，
+	// 所有验签方配置；保留多个是为了轮换期同时接受新旧 kid。
+	PrivateKey string `mapstructure:"private_key"`
+	PublicKeys string `mapstructure:"public_keys"`
+	// AllowHS256 是迁移开关：为 true 时继续接受旧 HS256 令牌（并要求 Secret
+	// 至少 32 字节）；等所有旧 token 过期后置为 false，即可完全禁用 HMAC。
+	AllowHS256 bool `mapstructure:"allow_hs256"`
 }
 
+// OTel 控制 OTLP 导出。Enabled=false 时进程使用 noop provider，
+// 本地裸跑不要求先起 Collector；容器编排里显式打开。
 type OTel struct {
+	Enabled  bool   `mapstructure:"enabled"`
 	Endpoint string `mapstructure:"endpoint"`
 	Insecure bool   `mapstructure:"insecure"`
 }
@@ -130,6 +161,22 @@ type MinIO struct {
 type Billing struct {
 	WebhookProvider string `mapstructure:"webhook_provider"`
 	WebhookSecret   string `mapstructure:"webhook_secret"`
+}
+
+// Notify 是 notification 与 identity 之间共享的内部通知配置。
+// InternalToken 只从环境变量 / K8s Secret 读取；SMTP 口令同样不落库、不入仓。
+type Notify struct {
+	InternalToken string `mapstructure:"internal_token"`
+	IdentityURL   string `mapstructure:"identity_url"`
+	// ServiceURL 只有 identity 使用：它把邀请邮件投递到 notification 的内部接口。
+	ServiceURL   string `mapstructure:"service_url"`
+	EmailEnabled bool   `mapstructure:"email_enabled"`
+	SMTPAddr     string `mapstructure:"smtp_addr"`
+	SMTPFrom     string `mapstructure:"smtp_from"`
+	SMTPUsername string `mapstructure:"smtp_username"`
+	SMTPPassword string `mapstructure:"smtp_password"`
+	// SMTPUseTLS 为 true 时强制 STARTTLS；本地 Mailpit 不提供 TLS，默认关闭。
+	SMTPUseTLS bool `mapstructure:"smtp_use_tls"`
 }
 
 // Load 读取环境变量、应用默认值、反序列化并校验。
@@ -194,7 +241,11 @@ func defaults(opts Options) map[string]any {
 		"jwt.secret":      "",
 		"jwt.access_ttl":  "15m",
 		"jwt.refresh_ttl": "168h",
+		"jwt.private_key": "",
+		"jwt.public_keys": "",
+		"jwt.allow_hs256": true,
 
+		"otel.enabled":  false,
 		"otel.endpoint": "localhost:4317",
 		"otel.insecure": true,
 
@@ -206,6 +257,19 @@ func defaults(opts Options) map[string]any {
 
 		"billing.webhook_provider": "mockpay",
 		"billing.webhook_secret":   "",
+
+		"notification.internal_token": "",
+		"notification.identity_url":   "http://127.0.0.1:8081",
+		"notification.service_url":    "http://127.0.0.1:8085",
+		"notification.email_enabled":  true,
+		"notification.smtp_addr":      "localhost:1025",
+		"notification.smtp_from":      "no-reply@expensio.local",
+		"notification.smtp_username":  "",
+		"notification.smtp_password":  "",
+		"notification.smtp_use_tls":   false,
+
+		"invite.base_url": "http://127.0.0.1:5173",
+		"invite.ttl":      "168h",
 
 		// 网关下游：本地默认指向 make run-<service> 起的端口。
 		"upstreams.identity":     "http://127.0.0.1:8081",
@@ -283,10 +347,7 @@ func (c *Config) validate(opts Options) error {
 	}
 
 	if opts.NeedsJWT {
-		// HMAC-SHA256 的密钥短于 32 字节会削弱安全性，这里直接拒绝启动。
-		if len(c.JWT.Secret) < 32 {
-			errs = append(errs, errors.New("jwt.secret 至少需要 32 字节（EXPENSIO_JWT_SECRET）"))
-		}
+		hasEd25519 := c.JWT.PrivateKey != "" || strings.TrimSpace(c.JWT.PublicKeys) != ""
 		if c.JWT.Issuer == "" {
 			errs = append(errs, errors.New("jwt.issuer 不能为空（EXPENSIO_JWT_ISSUER）"))
 		}
@@ -295,6 +356,20 @@ func (c *Config) validate(opts Options) error {
 		}
 		if c.JWT.AccessTTL >= c.JWT.RefreshTTL {
 			errs = append(errs, errors.New("jwt.access_ttl 必须小于 jwt.refresh_ttl"))
+		}
+		if opts.NeedsJWTSigner && c.JWT.PrivateKey == "" {
+			errs = append(errs, errors.New("jwt.private_key 不能为空（EXPENSIO_JWT_PRIVATE_KEY）：签发方必须配置 Ed25519 私钥"))
+		}
+		if !hasEd25519 {
+			// 未配置 Ed25519 材料时退回迁移前的纯 HS256；密钥短于 32 字节直接拒绝启动。
+			if len(c.JWT.Secret) < 32 {
+				errs = append(errs, errors.New("jwt.secret 至少需要 32 字节（EXPENSIO_JWT_SECRET），或配置 jwt.public_keys 使用 EdDSA"))
+			}
+			if !c.JWT.AllowHS256 {
+				errs = append(errs, errors.New("jwt.allow_hs256=false 但没有配置 Ed25519 公钥：没有任何可用的验签方式"))
+			}
+		} else if c.JWT.AllowHS256 && c.JWT.Secret != "" && len(c.JWT.Secret) < 32 {
+			errs = append(errs, errors.New("jwt.allow_hs256=true 时 jwt.secret 至少需要 32 字节"))
 		}
 	}
 
@@ -315,6 +390,53 @@ func (c *Config) validate(opts Options) error {
 		}
 		if c.Billing.WebhookProvider == "" {
 			errs = append(errs, errors.New("billing.webhook_provider 不能为空（EXPENSIO_BILLING_WEBHOOK_PROVIDER）"))
+		}
+	}
+
+	if opts.NeedsInternalAPI || opts.NeedsNotification {
+		if len(c.Notify.InternalToken) < 32 {
+			errs = append(errs, errors.New("notification.internal_token 至少需要 32 字节（EXPENSIO_NOTIFICATION_INTERNAL_TOKEN）"))
+		}
+	}
+
+	if opts.NeedsNotificationClient {
+		parsed, err := url.Parse(c.Notify.ServiceURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") {
+			errs = append(errs, fmt.Errorf("notification.service_url 必须是完整的 http(s) 地址且不带路径，当前为 %q", c.Notify.ServiceURL))
+		}
+		invite, err := url.Parse(c.Invite.BaseURL)
+		if err != nil || invite.Scheme == "" || invite.Host == "" {
+			errs = append(errs, fmt.Errorf("invite.base_url 必须是完整的 http(s) 地址，当前为 %q", c.Invite.BaseURL))
+		}
+		if c.Invite.TTL < time.Hour || c.Invite.TTL > 30*24*time.Hour {
+			errs = append(errs, fmt.Errorf("invite.ttl 必须在 1h 到 720h 之间，当前为 %s", c.Invite.TTL))
+		}
+	}
+
+	if opts.NeedsNotification {
+		parsed, err := url.Parse(c.Notify.IdentityURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			errs = append(errs, fmt.Errorf("notification.identity_url 必须是完整的 http(s) 地址，当前为 %q", c.Notify.IdentityURL))
+		}
+		if c.Notify.EmailEnabled {
+			if _, port, err := net.SplitHostPort(c.Notify.SMTPAddr); err != nil {
+				errs = append(errs, fmt.Errorf("notification.smtp_addr 非法（应形如 host:port），当前为 %q", c.Notify.SMTPAddr))
+			} else if p, convErr := strconv.Atoi(port); convErr != nil || p < 1 || p > 65535 {
+				errs = append(errs, fmt.Errorf("notification.smtp_addr 端口非法，当前为 %q", c.Notify.SMTPAddr))
+			}
+			if !strings.Contains(c.Notify.SMTPFrom, "@") {
+				errs = append(errs, fmt.Errorf("notification.smtp_from 必须是邮箱地址，当前为 %q", c.Notify.SMTPFrom))
+			}
+		}
+	}
+
+	if c.OTel.Enabled {
+		// Endpoint 是 host:port，不带 scheme；带 scheme 的写法会被 gRPC 当作
+		// 拨号目标解析失败，只有等到第一次导出才报错，排查成本很高。
+		if _, port, err := net.SplitHostPort(c.OTel.Endpoint); err != nil {
+			errs = append(errs, fmt.Errorf("otel.endpoint 非法（应形如 host:4317），当前为 %q", c.OTel.Endpoint))
+		} else if p, convErr := strconv.Atoi(port); convErr != nil || p < 1 || p > 65535 {
+			errs = append(errs, fmt.Errorf("otel.endpoint 端口非法，当前为 %q", c.OTel.Endpoint))
 		}
 	}
 
@@ -372,8 +494,9 @@ func (r Redis) String() string {
 }
 
 func (j JWT) String() string {
-	return fmt.Sprintf("JWT{issuer:%s access_ttl:%s refresh_ttl:%s secret:***}",
-		j.Issuer, j.AccessTTL, j.RefreshTTL)
+	return fmt.Sprintf("JWT{issuer:%s access_ttl:%s refresh_ttl:%s secret:*** ed25519:%t hs256:%t}",
+		j.Issuer, j.AccessTTL, j.RefreshTTL,
+		j.PrivateKey != "" || j.PublicKeys != "", j.AllowHS256)
 }
 
 func (m MinIO) String() string {
@@ -386,7 +509,12 @@ func (b Billing) String() string {
 		b.WebhookProvider)
 }
 
+func (n Notify) String() string {
+	return fmt.Sprintf("Notify{identity_url:%s email_enabled:%t smtp_addr:%s smtp_from:%s internal_token:*** smtp_password:***}",
+		n.IdentityURL, n.EmailEnabled, n.SMTPAddr, n.SMTPFrom)
+}
+
 func (c Config) String() string {
-	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s billing:%s}",
-		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT, c.Billing)
+	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s billing:%s notify:%s}",
+		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT, c.Billing, c.Notify)
 }

@@ -1,0 +1,58 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate" (include "expensio.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    # 在应用 Pod 创建之前执行；升级时同样先迁移再滚动。
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "expensio.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "expensio.fullname" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ printf "%s:%s" .Values.images.migrate .Values.images.tag | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for svc in identity expense billing report notification; do
+                echo "==> migrate $svc"
+                migrate -path "/migrations/$svc" \
+                  -database "postgres://${svc}_migrator:${EXPENSIO_DB_MIGRATOR_PASSWORD}@{{ .Values.database.host }}:{{ .Values.database.port }}/${svc}_db?sslmode={{ .Values.database.sslmode }}" \
+                  up
+              done
+          env:
+            - name: EXPENSIO_DB_MIGRATOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.dbMigratorPassword }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

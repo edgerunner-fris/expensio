@@ -1,0 +1,8 @@
+# 迁移镜像：golang-migrate CLI + 仓库里的 migrations/。
+#
+# 为什么单独打镜像：K8s 的 pre-upgrade Job 不能挂载宿主机目录；把 SQL 塞进
+# ConfigMap 又会撞上 1MiB 限制，并失去迁移文件的版本历史。镜像与代码同版本，
+# 回滚 release 时迁移文件也一起回滚。
+FROM migrate/migrate:v4.18.3
+
+COPY migrations /migrations

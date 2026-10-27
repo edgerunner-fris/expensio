@@ -1,0 +1,16 @@
+# 仅作用于 `docker build -f Dockerfile.web .`。
+# 前端依赖在镜像内 `npm ci` 安装，宿主机的 node_modules 与旧 dist 必须排除，
+# 否则 COPY 会覆盖容器内的构建结果，镜像也会被拖大。
+
+.git
+.gitignore
+.env
+.env.*
+**/node_modules
+node_modules
+frontend/dist
+bin
+tmp
+*.log
+coverage.out
+docs

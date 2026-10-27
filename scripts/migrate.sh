@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 对五个库执行 golang-migrate。
+# 对六个库执行 golang-migrate。
 #
 # 用法：
 #   ./scripts/migrate.sh up         # 升到最新

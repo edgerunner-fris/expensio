@@ -13,13 +13,16 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/edgerunner-fris/expensio/internal/platform/health"
 	"github.com/edgerunner-fris/expensio/internal/platform/logger"
 	"github.com/edgerunner-fris/expensio/internal/platform/server"
+	"github.com/edgerunner-fris/expensio/internal/platform/telemetry"
 	"github.com/edgerunner-fris/expensio/internal/platform/version"
 )
 
@@ -66,6 +69,23 @@ func New(opts config.Options) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: 初始化日志失败: %w", err)
 	}
 
+	tp, err := telemetry.Setup(context.Background(), telemetry.Config{
+		Enabled:  cfg.OTel.Enabled,
+		Endpoint: cfg.OTel.Endpoint,
+		Insecure: cfg.OTel.Insecure,
+		Service:  cfg.Service,
+		Version:  version.Version,
+		Env:      cfg.Env,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: 初始化遥测失败: %w", err)
+	}
+
+	var httpMiddleware []gin.HandlerFunc
+	if tp.Enabled() {
+		httpMiddleware = append(httpMiddleware, telemetry.GinMiddleware())
+	}
+
 	reg := health.New(cfg.Service)
 
 	srv, err := server.New(server.Options{
@@ -78,8 +98,10 @@ func New(opts config.Options) (*App, error) {
 		DrainDelay:      cfg.HTTP.DrainDelay,
 		Logger:          lg,
 		Health:          reg,
+		Middleware:      httpMiddleware,
 	})
 	if err != nil {
+		_ = tp.Shutdown(context.Background())
 		return nil, fmt.Errorf("bootstrap: 初始化 HTTP 服务失败: %w", err)
 	}
 
@@ -88,9 +110,20 @@ func New(opts config.Options) (*App, error) {
 	lg.Info("config loaded",
 		zap.String("env", cfg.Env),
 		zap.String("addr", cfg.HTTP.Addr),
+		zap.Bool("otel_enabled", cfg.OTel.Enabled),
 	)
 
-	return &App{Config: cfg, Logger: lg, Health: reg, Server: srv}, nil
+	app := &App{Config: cfg, Logger: lg, Health: reg, Server: srv}
+	// 这里注册得最早，因此最后执行：此时 HTTP 已停止，业务连接池也已关闭，
+	// 再把缓冲的 span/metric 刷给 Collector。
+	app.OnStop(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tp.Shutdown(ctx); err != nil {
+			lg.Warn("telemetry shutdown failed", zap.Error(err))
+		}
+	})
+	return app, nil
 }
 
 // Main 是可执行文件的统一入口，返回进程退出码。

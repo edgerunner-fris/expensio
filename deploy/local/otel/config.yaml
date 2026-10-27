@@ -1,7 +1,11 @@
 # OTel Collector 本地配置。
 #
-# 现阶段只做两件事：接住服务的 OTLP 数据，并把指标以 Prometheus 格式暴露给
-# prometheus 抓取。trace 走 debug 输出，等 M7 接入 Tempo 后再换成 otlp exporter。
+# 数据流：
+#   服务 --OTLP gRPC--> Collector --otlphttp--> Tempo（trace）
+#                              --prometheus--> :8889（Prometheus 抓取）
+#
+# resource_to_telemetry_conversion 把 service.name / service.version 变成
+# Prometheus 标签，这样一张看板就能按服务拆分，不需要给每个服务建 target。
 receivers:
   otlp:
     protocols:
@@ -21,8 +25,8 @@ processors:
     send_batch_size: 1024
 
 exporters:
-  debug:
-    verbosity: basic
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
   prometheus:
     endpoint: 0.0.0.0:8889
     resource_to_telemetry_conversion:
@@ -33,12 +37,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlphttp/tempo]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [prometheus]
-    logs:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug]

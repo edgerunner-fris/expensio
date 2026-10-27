@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "expensio.fullname" . }}-config
+  labels:
+    {{- include "expensio.labels" . | nindent 4 }}
+data:
+  # 非敏感配置。密钥一律走 existingSecret，这里不出现任何 password/token。
+  EXPENSIO_ENV: {{ .Values.env | quote }}
+  EXPENSIO_LOG_LEVEL: {{ .Values.logLevel | quote }}
+
+  EXPENSIO_DB_HOST: {{ .Values.database.host | quote }}
+  EXPENSIO_DB_PORT: {{ .Values.database.port | quote }}
+  EXPENSIO_DB_SSLMODE: {{ .Values.database.sslmode | quote }}
+
+  EXPENSIO_REDIS_ADDR: {{ .Values.redis.addr | quote }}
+  EXPENSIO_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
+
+  EXPENSIO_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
+  EXPENSIO_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
+  EXPENSIO_OTEL_INSECURE: {{ .Values.otel.insecure | quote }}
+
+  EXPENSIO_JWT_ISSUER: "expensio"
+  EXPENSIO_BILLING_WEBHOOK_PROVIDER: {{ .Values.billing.webhookProvider | quote }}
+
+  EXPENSIO_NOTIFICATION_IDENTITY_URL: {{ printf "http://%s-identity:%v" (include "expensio.fullname" .) .Values.services.identity.port | quote }}
+  # identity 用它投递邀请邮件；与 identity_url 是同一套服务的两个方向。
+  EXPENSIO_NOTIFICATION_SERVICE_URL: {{ printf "http://%s-notification:%v" (include "expensio.fullname" .) .Values.services.notification.port | quote }}
+  EXPENSIO_INVITE_BASE_URL: {{ .Values.invite.baseURL | quote }}
+  EXPENSIO_INVITE_TTL: {{ .Values.invite.ttl | quote }}
+  EXPENSIO_NOTIFICATION_EMAIL_ENABLED: {{ .Values.notification.emailEnabled | quote }}
+  EXPENSIO_NOTIFICATION_SMTP_ADDR: {{ .Values.notification.smtpAddr | quote }}
+  EXPENSIO_NOTIFICATION_SMTP_FROM: {{ .Values.notification.smtpFrom | quote }}
+  EXPENSIO_NOTIFICATION_SMTP_USERNAME: {{ .Values.notification.smtpUsername | quote }}
+  EXPENSIO_NOTIFICATION_SMTP_USE_TLS: {{ .Values.notification.smtpUseTLS | quote }}
+
+  EXPENSIO_RATE_LIMIT_AUTH_PER_MINUTE: {{ .Values.rateLimit.authPerMinute | quote }}
+  EXPENSIO_RATE_LIMIT_AUTH_BURST: {{ .Values.rateLimit.authBurst | quote }}
+  EXPENSIO_RATE_LIMIT_API_PER_MINUTE: {{ .Values.rateLimit.apiPerMinute | quote }}
+  EXPENSIO_RATE_LIMIT_API_BURST: {{ .Values.rateLimit.apiBurst | quote }}
+
+  # 网关下游地址。服务名带 release 前缀，多环境部署在同一命名空间也不会串。
+  EXPENSIO_UPSTREAMS_IDENTITY: {{ printf "http://%s-identity:%v" (include "expensio.fullname" .) .Values.services.identity.port | quote }}
+  EXPENSIO_UPSTREAMS_EXPENSE: {{ printf "http://%s-expense:%v" (include "expensio.fullname" .) .Values.services.expense.port | quote }}
+  EXPENSIO_UPSTREAMS_BILLING: {{ printf "http://%s-billing:%v" (include "expensio.fullname" .) .Values.services.billing.port | quote }}
+  EXPENSIO_UPSTREAMS_REPORT: {{ printf "http://%s-report:%v" (include "expensio.fullname" .) .Values.services.report.port | quote }}
+  EXPENSIO_UPSTREAMS_NOTIFICATION: {{ printf "http://%s-notification:%v" (include "expensio.fullname" .) .Values.services.notification.port | quote }}

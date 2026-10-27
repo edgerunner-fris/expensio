@@ -1,0 +1,153 @@
+{{- $root := . }}
+{{- $secret := .Values.existingSecret }}
+{{- $keys := .Values.secretKeys }}
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-%s" (include "expensio.fullname" $root) $name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  replicas: {{ $svc.replicas | default 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "expensio.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "expensio.labels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $name }}
+      annotations:
+        # ConfigMap 变化时滚动重启，避免 Pod 继续用旧配置。
+        checksum/config: {{ include (print $root.Template.BasePath "/configmap.yaml") $root | sha256sum }}
+        {{- with $root.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "expensio.fullname" $root }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "expensio.image" (dict "root" $root "name" $name) | quote }}
+          imagePullPolicy: {{ $root.Values.images.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $svc.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "expensio.fullname" $root }}-config
+          env:
+            - name: EXPENSIO_HTTP_ADDR
+              value: ":{{ $svc.port }}"
+            {{- if $svc.db }}
+            - name: EXPENSIO_DB_NAME
+              value: {{ printf "%s_db" $name | quote }}
+            - name: EXPENSIO_DB_USER
+              value: {{ printf "%s_app" $name | quote }}
+            - name: EXPENSIO_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.dbAppPassword }}
+            {{- end }}
+            {{- if $svc.jwt }}
+            - name: EXPENSIO_JWT_PUBLIC_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.jwtPublicKeys }}
+            {{- if eq $name "identity" }}
+            - name: EXPENSIO_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.jwt }}
+                  # 迁移期可选：不提供时 identity 只签发/接受 EdDSA。
+                  optional: true
+            - name: EXPENSIO_JWT_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.jwtPrivateKey }}
+            # 迁移期：identity 继续接受旧的 HS256 令牌，等一个 access TTL 后改为 false。
+            - name: EXPENSIO_JWT_ALLOW_HS256
+              value: "true"
+            {{- else }}
+            # 验签方不持有 HMAC 密钥，也不接受 HS256——攻破单个服务无法伪造令牌。
+            - name: EXPENSIO_JWT_ALLOW_HS256
+              value: "false"
+            {{- end }}
+            {{- end }}
+            {{- if $svc.billingWebhook }}
+            - name: EXPENSIO_BILLING_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.billingWebhook }}
+            {{- end }}
+            {{- if $svc.internalToken }}
+            - name: EXPENSIO_NOTIFICATION_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.internalToken }}
+            {{- end }}
+            {{- if $svc.notification }}
+            - name: EXPENSIO_NOTIFICATION_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.smtpPassword }}
+                  # 允许本地/无认证 SMTP；生产 Secret 里应提供该键。
+                  optional: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml $root.Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+      {{- with $root.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

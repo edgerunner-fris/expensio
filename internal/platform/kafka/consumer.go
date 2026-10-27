@@ -48,6 +48,18 @@ type Publisher interface {
 	PublishRecord(ctx context.Context, rec *kgo.Record) error
 }
 
+// OffsetReset 决定消费组第一次出现（没有已提交位点）时从哪端开始。
+// 报表需要回放历史事件重建读模型，通知则相反：全新部署不应把保留期内的
+// 旧费用/账单事件补发成邮件。
+type OffsetReset int
+
+const (
+	// ResetEarliest 是零值：从最早位点开始。
+	ResetEarliest OffsetReset = iota
+	// ResetLatest 从最新位点开始，只消费消费组成立之后写入的事件。
+	ResetLatest
+)
+
 // ConsumerOptions 是消费端的全部外部依赖。
 type ConsumerOptions struct {
 	Brokers   []string
@@ -58,6 +70,8 @@ type ConsumerOptions struct {
 	Handler   Handler
 	Publisher Publisher
 	Logger    *zap.Logger
+	// Reset 只在消费组没有已提交位点时生效；已有位点不会被重置。
+	Reset OffsetReset
 	// RetryBase / RetryMax 控制瞬时错误的指数退避。
 	RetryBase time.Duration
 	RetryMax  time.Duration
@@ -108,6 +122,11 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		return nil, errors.New("kafka: retryMax 不能小于 retryBase")
 	}
 
+	reset := kgo.NewOffset().AtStart()
+	if opts.Reset == ResetLatest {
+		reset = kgo.NewOffset().AtEnd()
+	}
+
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(opts.Brokers...),
 		kgo.ClientID(opts.ClientID),
@@ -116,10 +135,10 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		// 位点只能由本包在业务提交之后显式提交，不能让后台自动提交
 		// "抢跑"——那会把还没落库的消息标记为已消费。
 		kgo.DisableAutoCommit(),
-		// 新的消费组从最早位点开始，测试与首次部署都能读到已有的历史事件。
+		// 新消费组的起点由调用方决定：报表回放历史，通知只看新事件。
 		// 心跳由 franz-go 的后台协程维持，所以处理单条消息再久，
 		// 只要进程活着就不会因为"没有及时 poll"被踢出消费组。
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.ConsumeResetOffset(reset),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: 创建消费者失败: %w", err)
@@ -192,6 +211,13 @@ func (c *Consumer) process(ctx context.Context, rec *kgo.Record) error {
 		Headers:   rec.Headers,
 	}
 
+	// span 覆盖整个重试循环：一次处理尝试的耗时才是运维关心的，
+	// 多次退避重试不应该被拆成互不相关的根 span。
+	ctx, span := startConsume(ctx, msg)
+	start := time.Now()
+	outcome := "success"
+	defer func() { finishConsume(ctx, span, msg.Topic, start, outcome) }()
+
 	backoff := c.retryBase
 	for {
 		err := c.handler.Handle(ctx, msg)
@@ -201,12 +227,14 @@ func (c *Consumer) process(ctx context.Context, rec *kgo.Record) error {
 		if ctx.Err() != nil {
 			// 关闭过程中不提交位点：消息会在下次启动时重放，
 			// 这比把"处理到一半"当成已处理安全。
+			outcome = "canceled"
 			return ctx.Err()
 		}
 
 		if IsPermanent(err) {
 			dlqErr := c.publishDLQ(ctx, msg, err)
 			if dlqErr == nil {
+				outcome = "dlq"
 				c.logger.Error("kafka message routed to DLQ",
 					zap.String("topic", msg.Topic),
 					zap.Int32("partition", msg.Partition),
@@ -215,6 +243,7 @@ func (c *Consumer) process(ctx context.Context, rec *kgo.Record) error {
 				return nil
 			}
 			if ctx.Err() != nil {
+				outcome = "canceled"
 				return ctx.Err()
 			}
 			err = fmt.Errorf("转投 DLQ 失败: %w", dlqErr)
@@ -231,6 +260,7 @@ func (c *Consumer) process(ctx context.Context, rec *kgo.Record) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			outcome = "canceled"
 			return ctx.Err()
 		case <-timer.C:
 		}

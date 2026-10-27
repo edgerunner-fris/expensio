@@ -1,0 +1,16 @@
+# 仅作用于 `docker build -f Dockerfile .`。
+# 同名 Dockerfile 专属忽略文件会取代仓库根的 .dockerignore，因此这里
+# 把构建不需要的东西完整列出来，而不是依赖根文件的内容。
+
+.git
+.gitignore
+.env
+.env.*
+**/node_modules
+node_modules
+frontend/dist
+bin
+tmp
+*.log
+coverage.out
+docs

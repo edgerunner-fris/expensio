@@ -3,13 +3,15 @@ package identity
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +36,10 @@ const (
 
 // testJWTSecret 只用于本地测试签发的短期令牌，不连接任何真实环境。
 // 长度 ≥32 字节，因为 TokenIssuer 会拒绝更短的 HMAC 密钥。
-var testJWTSecret = strings.Repeat("test-secret-", 4)
+const testJWTSecret = "test-secret-test-secret-test-secret-test-secret-test"
+
+// testInternalToken 只用于测试服务间令牌；生产值来自环境变量 / K8s Secret。
+const testInternalToken = "0123456789abcdef0123456789abcdef"
 
 func TestMain(m *testing.M) {
 	code := m.Run()
@@ -47,12 +52,41 @@ func TestMain(m *testing.M) {
 // 用应用角色（NOBYPASSRLS）连库是刻意的：换成一个能绕过 RLS 的账号，
 // 下面的隔离测试会全部"通过"，但什么也没证明。
 type harness struct {
-	t      *testing.T
-	db     *db.DB
-	svc    *Service
-	tokens *auth.TokenIssuer
-	server *httptest.Server
-	client *http.Client
+	t        *testing.T
+	db       *db.DB
+	svc      *Service
+	tokens   *auth.TokenIssuer
+	server   *httptest.Server
+	client   *http.Client
+	notifier *recordingNotifier
+}
+
+// recordingNotifier 记录邀请邮件，避免测试依赖真实 notification 服务。
+type recordingNotifier struct {
+	mu     sync.Mutex
+	emails []InvitationEmail
+	tenant []uuid.UUID
+	err    error
+}
+
+func (n *recordingNotifier) EnqueueInvitation(_ context.Context, tenantID uuid.UUID, in InvitationEmail) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.err != nil {
+		return n.err
+	}
+	n.emails = append(n.emails, in)
+	n.tenant = append(n.tenant, tenantID)
+	return nil
+}
+
+func (n *recordingNotifier) last() (InvitationEmail, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.emails) == 0 {
+		return InvitationEmail{}, false
+	}
+	return n.emails[len(n.emails)-1], true
 }
 
 func newHarness(t *testing.T) *harness {
@@ -64,24 +98,38 @@ func newHarness(t *testing.T) *harness {
 	require.NoError(t, err)
 	t.Cleanup(database.Close)
 
-	tokens, err := auth.NewTokenIssuer(testIssuer, testJWTSecret, testAccessTTL, testRefreshTTL)
+	_, signKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	tokens, err := auth.NewTokenIssuer(auth.IssuerConfig{
+		Issuer: testIssuer, PrivateKey: signKey, HS256Secret: testJWTSecret,
+		AccessTTL: testAccessTTL, RefreshTTL: testRefreshTTL,
+	})
 	require.NoError(t, err)
 
-	svc, err := NewService(database, tokens)
+	notifier := &recordingNotifier{}
+	svc, err := NewService(database, tokens, InvitationOptions{
+		Notifier: notifier,
+		BaseURL:  "http://invite.test",
+		TTL:      24 * time.Hour,
+	})
 	require.NoError(t, err)
+
+	handler := NewHandler(svc)
+	handler.EnableInternalAPI(testInternalToken)
 
 	engine := gin.New()
-	RegisterRoutes(engine, NewHandler(svc), tokens)
+	RegisterRoutes(engine, handler, tokens)
 	srv := httptest.NewServer(engine)
 	t.Cleanup(srv.Close)
 
 	return &harness{
-		t:      t,
-		db:     database,
-		svc:    svc,
-		tokens: tokens,
-		server: srv,
-		client: &http.Client{Timeout: 10 * time.Second},
+		t:        t,
+		db:       database,
+		svc:      svc,
+		tokens:   tokens,
+		server:   srv,
+		client:   &http.Client{Timeout: 10 * time.Second},
+		notifier: notifier,
 	}
 }
 

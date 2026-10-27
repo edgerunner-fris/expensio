@@ -1,10 +1,14 @@
-# Prometheus 本地抓取配置。
+# Prometheus 本地抓取与告警配置。
 #
-# 服务的 /metrics 端点在 M7 落地，届时在 expensio-services 下补 6 个目标；
-# 现在先抓 Collector，保证指标链路（服务 → Collector → Prometheus）是通的。
+# 服务不直接暴露 /metrics：它们通过 OTLP 推给 Collector，由 Collector 的
+# prometheus exporter 在 :8889 上转成拉取端点。好处是服务侧只需要一个
+# 推送通道，坏处是 Collector 成为单点——所以 alert 里先盯 build_info 数量。
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.yml
 
 scrape_configs:
   - job_name: prometheus

@@ -1,11 +1,15 @@
 package identity
 
 import (
+	"strings"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/httpx"
+	"github.com/edgerunner-fris/expensio/internal/platform/serviceauth"
 	"github.com/edgerunner-fris/expensio/internal/platform/tenantctx"
 )
 
@@ -17,9 +21,32 @@ const maxUserAgentLen = 512
 // 任何业务判断都不应该出现在这里，否则同一规则会在网关和前端各被复制一遍。
 type Handler struct {
 	svc *Service
+	// internalToken 只用于 /internal/* 接口，与用户 JWT 密钥分开配置。
+	internalToken string
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// EnableInternalAPI 注入服务间令牌密钥。空字符串时 internal 接口一律拒绝。
+func (h *Handler) EnableInternalAPI(token string) { h.internalToken = token }
+
+// TenantContacts 是服务间接口：租户来自签名令牌而不是 query/body/path。
+// 网关没有 /api/v1/internal 的转发规则，这个端点只应被集群内的
+// notification 服务调用；身份验证失败时不区分"格式错"与"过期"，避免探测。
+func (h *Handler) TenantContacts(c *gin.Context) {
+	raw := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	tenantID, err := serviceauth.Verify(h.internalToken, raw, time.Now())
+	if err != nil {
+		httpx.Error(c, apperr.Unauthorized("内部令牌无效"))
+		return
+	}
+	contacts, err := h.svc.TenantContacts(c.Request.Context(), tenantID)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, contacts)
+}
 
 func (h *Handler) Register(c *gin.Context) {
 	var in RegisterInput
@@ -124,6 +151,72 @@ func (h *Handler) UpdateMemberRole(c *gin.Context) {
 		return
 	}
 	httpx.OK(c, member)
+}
+
+func (h *Handler) CreateInvitation(c *gin.Context) {
+	var in CreateInvitationInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Error(c, apperr.InvalidArgument("请求体格式非法"))
+		return
+	}
+	out, err := h.svc.CreateInvitation(c.Request.Context(), in, requestMeta(c))
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.Created(c, out)
+}
+
+func (h *Handler) ListInvitations(c *gin.Context) {
+	var q httpx.PageQuery
+	if err := c.ShouldBindQuery(&q); err != nil {
+		httpx.Error(c, apperr.InvalidArgument("分页参数非法"))
+		return
+	}
+	page, err := h.svc.ListInvitations(c.Request.Context(), q)
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, page)
+}
+
+func (h *Handler) RevokeInvitation(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("invitationID"))
+	if err != nil {
+		httpx.Error(c, apperr.InvalidArgument("邀请 ID 非法"))
+		return
+	}
+	if err := h.svc.RevokeInvitation(c.Request.Context(), id, requestMeta(c)); err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.NoContent(c)
+}
+
+// InvitationInfo 与 AcceptInvitation 是公开端点：
+// 链接里的令牌就是凭据，不要求用户先登录。
+func (h *Handler) InvitationInfo(c *gin.Context) {
+	info, err := h.svc.InvitationInfo(c.Request.Context(), c.Param("token"))
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, info)
+}
+
+func (h *Handler) AcceptInvitation(c *gin.Context) {
+	var in AcceptInvitationInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Error(c, apperr.InvalidArgument("请求体格式非法"))
+		return
+	}
+	session, err := h.svc.AcceptInvitation(c.Request.Context(), c.Param("token"), in, requestMeta(c))
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, session)
 }
 
 func (h *Handler) ListAuditLogs(c *gin.Context) {

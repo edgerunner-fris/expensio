@@ -30,7 +30,10 @@ type envelope struct {
 func newHTTPTestServer(t *testing.T, database *db.DB) (*gin.Engine, *auth.TokenIssuer) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	issuer, err := auth.NewTokenIssuer("expensio-test", testJWTSecret, 15*time.Minute, 24*time.Hour)
+	issuer, err := auth.NewTokenIssuer(auth.IssuerConfig{
+		Issuer: "expensio-test", HS256Secret: testJWTSecret,
+		AccessTTL: 15 * time.Minute, RefreshTTL: 24 * time.Hour,
+	})
 	require.NoError(t, err)
 
 	engine := gin.New()

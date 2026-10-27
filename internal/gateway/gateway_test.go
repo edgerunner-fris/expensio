@@ -144,11 +144,13 @@ func TestGatewayRouting(t *testing.T) {
 	expense := newUpstream(t, "expense")
 	billingSvc := newUpstream(t, "billing")
 	reportSvc := newUpstream(t, "report")
+	notificationSvc := newUpstream(t, "notification")
 	upstreams := map[string]string{
-		"identity": identity.URL,
-		"expense":  expense.URL,
-		"billing":  billingSvc.URL,
-		"report":   reportSvc.URL,
+		"identity":     identity.URL,
+		"expense":      expense.URL,
+		"billing":      billingSvc.URL,
+		"report":       reportSvc.URL,
+		"notification": notificationSvc.URL,
 	}
 
 	t.Run("公开路由不要求令牌", func(t *testing.T) {
@@ -202,6 +204,22 @@ func TestGatewayRouting(t *testing.T) {
 		assert.Equal(t, path, reportSvc.lastURL)
 		assert.Contains(t, got.body, "report")
 		assert.Equal(t, before, identity.hits, "报表请求不能落到 identity")
+	})
+
+	t.Run("通知路由要求令牌且只转发给 notification", func(t *testing.T) {
+		beforeIdentity := identity.hits
+		srv := startGateway(t, upstreams, DefaultRules(), nil)
+		const path = "/api/v1/notifications?unread_only=true&page=1&page_size=20"
+
+		unauthenticated := call(t, srv, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusUnauthorized, unauthenticated.status)
+		assert.Equal(t, beforeIdentity, identity.hits, "未认证请求不能到达任何下游")
+
+		got := call(t, srv, http.MethodGet, path, map[string]string{"Authorization": "Bearer good"})
+		assert.Equal(t, http.StatusOK, got.status)
+		assert.Equal(t, path, notificationSvc.lastURL)
+		assert.Contains(t, got.body, "notification")
+		assert.Equal(t, beforeIdentity, identity.hits, "通知请求不能落到 identity")
 	})
 
 	t.Run("支付回调不要求令牌且只转发给 billing", func(t *testing.T) {

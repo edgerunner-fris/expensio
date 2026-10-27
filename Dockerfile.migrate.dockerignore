@@ -1,0 +1,4 @@
+# 迁移镜像只需要 migrations/；排除其余一切，避免把 node_modules 送进构建上下文。
+**
+!migrations
+!migrations/**
