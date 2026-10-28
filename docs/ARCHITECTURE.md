@@ -198,6 +198,9 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 - 本地没有 Docker 时允许跳过；CI 设置 `EXPENSIO_REQUIRE_DOCKER=1`，
   此时 Docker 不可用即失败，跳过不算通过。
 - 关键回归：RLS 隔离、令牌轮换与重放、RBAC 矩阵、状态机、预算并发与回滚。
+- 契约：`internal/contract` 启动五个服务的路由注册函数，与
+  `api/openapi.yaml` 双向比对（缺文档、僵尸端点、缺 operationId 都失败），
+  并检查每条文档化端点都有网关转发规则、每条网关规则都有真实端点。
 - 跨服务链路在 `internal/e2e` 单独回归：expense 真实写 outbox → 投递器发到
   真实 Kafka → report 消费者落读模型 → 报表 HTTP API 返回聚合，全程无假实现。
 - notification 另有独立集成用例：真实 Kafka 重复投递只落一行、契约错误进 DLQ、
@@ -227,6 +230,7 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M16 | 仪表盘、CSV 导出与报表 Redis 缓存 | 已完成（缓存失效与实测证据见 PROGRESS） |
 | M17 | 租户切换、个人设置、审计页与登录失败锁定 | 已完成（`self_membership_read` 策略、账号级锁定） |
 | M18 | 自动续费、模拟支付、租户删除、熔断与日志聚合 | 已完成（真实 PostgreSQL 续费/删除集成测试、Loki + Tempo 按 trace_id 联查实测） |
+| M19 | OpenAPI 契约、种子数据、安全扫描与 CD | 已完成（50 路径 / 62 操作 / 92 schema 与路由双向锁定；seed 重复执行 0 新建；govulncheck 0 可达漏洞；Trivy 扫描结果见 PROGRESS；`cd.yml` 的部署段未在真实集群执行） |
 
 ## ADR
 

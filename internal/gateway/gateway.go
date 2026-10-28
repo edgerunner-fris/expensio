@@ -86,8 +86,11 @@ func DefaultRules() []Rule {
 		// 拆到独立服务就只能靠分布式事务来保证一致。
 		{Prefix: "/api/v1/expenses", Upstream: "expense", Auth: true, Scope: LimitByTenant},
 		{Prefix: "/api/v1/budgets", Upstream: "expense", Auth: true, Scope: LimitByTenant},
+		// 分级审批策略也归 expense：它决定提交单据时是否进入二级审批，
+		// 和单据状态机在同一个服务里。漏了这条规则网关会直接 404，
+		// 但服务本身健康、OpenAPI 也有文档，最难察觉——由契约测试兜底。
+		{Prefix: "/api/v1/approval-policies", Upstream: "expense", Auth: true, Scope: LimitByTenant},
 
-		{Prefix: "/api/v1/invoices", Upstream: "billing", Auth: true, Scope: LimitByTenant},
 		{Prefix: "/api/v1/billing", Upstream: "billing", Auth: true, Scope: LimitByTenant},
 		// 支付回调没有 JWT，由 billing 校验签名与幂等键。
 		{Prefix: "/api/v1/webhooks", Upstream: "billing", Auth: false, Scope: LimitByIP},

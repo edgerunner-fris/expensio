@@ -36,7 +36,7 @@ web :8086 / :5173 ──静态资源 + /api 反代──▶ gateway :8080
 | notification | 8085 | `notification_db` | 站内通知、邮件发件箱与投递 |
 | web | 8086（宿主 5173） | - | 管理台静态资源、`/api` 反代 |
 
-技术栈：Go 1.27 / Gin / pgx v5 / zap / viper；PostgreSQL 16 / Redis 7 /
+技术栈：Go 1.27.3 / Gin / pgx v5 / zap / viper；PostgreSQL 16 / Redis 7 /
 Kafka 3.9 KRaft / MinIO；Vue 3 / TypeScript / Vite / Element Plus / Pinia /
 Vue Router / ECharts / Axios；Docker Compose、Kubernetes + Helm、
 GitHub Actions、golang-migrate；testify、testcontainers-go、k6、Playwright。
@@ -79,7 +79,7 @@ GitHub Actions、golang-migrate；testify、testcontainers-go、k6、Playwright�
 
 ## 快速开始
 
-前置：Docker Desktop（WSL2 后端）、Go 1.27、Node 24、GNU Make、bash。
+前置：Docker Desktop（WSL2 后端）、Go 1.27.3、Node 24、GNU Make、bash。
 Windows 还需 `scripts/preflight.ps1` 检查工具链；WSL/Linux 用
 `./scripts/preflight.sh`。
 
@@ -99,11 +99,24 @@ make app-up    # 构建并启动完整栈（含迁移、建主题、管理台）
 停止：`make app-down`。只起依赖、服务用宿主进程跑：
 `make up` + `make run-expense`（需要 `.env` 中的数据库配置）。
 
+### 演示数据
+
+```bash
+export EXPENSIO_SEED_PASSWORD='<至少 10 字节的口令>'   # 只从环境变量读取
+go run ./cmd/seed                                    # 默认 http://localhost:8080
+```
+
+`cmd/seed` 只调用公开 HTTP API，不直连数据库：注册 `demo-seed` 租户、邀请并
+提升审批人、建四条预算、把四张费用单驱动到已报销/已批准/待审批/已驳回，
+再建订阅与账单。重复执行只补齐缺失数据（第二次输出"本次新建 0"），
+口令与令牌不会打印。可选参数见 `go run ./cmd/seed -h`。
+
 ## 测试
 
 ```bash
 make test-integration   # EXPENSIO_REQUIRE_DOCKER=1，Docker 不可用即失败
 go test ./... -race -count=5 -timeout=25m
+make openapi-lint       # redocly + 契约与路由双向一致性
 make load K6_DURATION=30s
 ```
 
@@ -159,6 +172,8 @@ docs/           架构、部署、进度与 ADR
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 当前真实结构与边界
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) —— 本地与 Helm 部署
 - [docs/PROGRESS.md](docs/PROGRESS.md) —— 里程碑验收记录与风险清单
+- [docs/INTERVIEW.md](docs/INTERVIEW.md) —— 项目讲解、取舍与高频追问
+- [api/openapi.yaml](api/openapi.yaml) —— HTTP 契约（与路由双向锁定）
 - [docs/adr/](docs/adr/) —— 架构决策记录
 
 ## 已知限制

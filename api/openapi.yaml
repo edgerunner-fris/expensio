@@ -1,0 +1,2462 @@
+openapi: 3.0.3
+info:
+  title: Expensio API
+  version: 1.0.0
+  license:
+    name: Proprietary
+    url: https://github.com/edgerunner-fris/expensio
+  description: |
+    多租户 B2B 费用管理平台对外 API。
+
+    ## 统一响应体
+
+    所有 JSON 响应都是 `{code, message, request_id, data, details}`：
+    `code` 是业务码，前端按它分支，不解析 HTTP 状态码或文案；成功固定为 `ok`。
+    空响应（204）没有响应体。`request_id` 同时出现在 `X-Request-ID` 响应头，
+    它也会进入访问日志与 trace，可用于关联 Loki / Tempo。
+
+    ## 认证与租户
+
+    除注册、登录、刷新、登出、邀请页、支付回调外，所有请求都需要
+    `Authorization: Bearer <access_token>`。令牌为 EdDSA（Ed25519）JWT，
+    claims 含 `tid`（租户）、`role`（owner/admin/member/viewer）与 `sid`。
+    **租户只能来自令牌**：请求体、查询参数与路径里的租户字段一律不参与授权。
+    网关会剥离客户端伪造的 `X-Tenant-Id` / `X-User-Id` / `X-User-Role`。
+
+    ## 金额与日期
+
+    金额一律是 `int64` 最小货币单位（如分）加三位大写 ISO-4217 币种，
+    禁止浮点。计费周期、预算期间与报表日期是 `YYYY-MM-DD`（UTC 日粒度）；
+    时间戳是 RFC 3339。
+
+    ## 错误状态
+
+    - 400 参数非法（`*.invalid_argument` 或领域校验码）
+    - 401 缺少/无效令牌、密码错误
+    - 403 角色或资源所有权不足
+    - 404 资源不存在（跨租户访问同样返回 404，不暴露存在性）
+    - 409 状态机冲突、乐观锁版本冲突、唯一约束
+    - 429 网关限流（响应头 `Retry-After`）
+    - 500 内部错误（响应不含根因）
+    - 503 依赖不可用；网关熔断时返回 `common.upstream_circuit_open` 与 `Retry-After`
+
+    ## 不在本契约内
+
+    `/api/v1/internal/*` 是服务间接口（HMAC 短时令牌），网关不转发；
+    本文件只描述网关公开的 API。JWKS 由 identity 在根路径发布，网关不代理。
+servers:
+  - url: http://localhost:8080
+    description: 本地网关
+  - url: https://expensio.example.com/api
+    description: 生产入口（web 反代到网关；此 URL 已含 /api 前缀时按部署调整）
+
+tags:
+  - name: Auth
+    description: 注册、登录、令牌与租户切换
+  - name: Account
+    description: 当前账号与租户设置
+  - name: Members
+    description: 成员、角色与邀请
+  - name: Audit
+    description: 租户审计日志（owner/admin）
+  - name: Expenses
+    description: 费用单、审批动作与协作
+  - name: Budgets
+    description: 期间预算
+  - name: Billing
+    description: 套餐、订阅、账单
+  - name: Payments
+    description: 支付渠道回调（HMAC 签名，无 JWT）
+  - name: Reports
+    description: 报表、仪表盘与导出
+  - name: Notifications
+    description: 站内通知
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: 注册租户与 owner 账号
+      operationId: PostAuthRegister
+      description: |
+        一次事务内创建租户、账号与 owner 成员关系，返回可直接使用的会话。
+        租户 slug 全局唯一。成功后按 IP 限流桶计数，不受网关令牌校验。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+            example:
+              tenant_slug: acme
+              tenant_name: Acme Inc
+              email: owner@acme.test
+              password: correct-horse-battery
+              display_name: Alice
+      responses:
+        '201':
+          description: 创建成功，返回会话
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409':
+          description: 租户 slug 或邮箱已被占用（业务码 `auth.slug_taken` / `auth.email_taken`）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: 登录
+      operationId: PostAuthLogin
+      description: |
+        账号不存在与密码错误返回同一状态码与文案，并执行等价的哈希校验，
+        避免账号枚举。连续失败会触发账号级锁定（`auth.account_locked`，HTTP 423）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+            example: {tenant_slug: acme, email: owner@acme.test, password: correct-horse-battery}
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '423':
+          description: 账号因连续失败被临时锁定
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: 刷新会话
+      operationId: PostAuthRefresh
+      description: |
+        条件轮换刷新令牌：旧令牌被原子替换。旧令牌再次出现视为重放，
+        整条令牌链（family）被撤销，响应 401。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '200':
+          description: 新会话
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: 登出（撤销刷新令牌）
+      operationId: PostAuthLogout
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '204': {description: 已撤销（幂等，未知令牌同样返回 204）}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/auth/tenants:
+    get:
+      tags: [Auth]
+      summary: 列出当前账号加入的租户
+      operationId: GetAuthTenants
+      description: |
+        用于租户切换列表。成员关系按 `app.user_id` 的用户上下文读取，
+        只返回本人加入的租户；`current` 标记当前会话所在租户。
+      responses:
+        '200':
+          description: 成员关系列表
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TenantsEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/switch-tenant:
+    post:
+      tags: [Auth]
+      summary: 切换到另一个租户
+      operationId: PostAuthSwitchTenant
+      description: |
+        目标租户的角色与状态全部由服务端查询，客户端不能声明。签发新会话，
+        旧刷新令牌链保持有效（切换不是撤销）。不属于目标租户返回 403。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SwitchTenantRequest'}
+      responses:
+        '200':
+          description: 目标租户的新会话
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/auth/change-password:
+    post:
+      tags: [Account]
+      summary: 修改密码
+      operationId: PostAuthChangePassword
+      description: |
+        需要当前密码。成功后该账号的全部刷新令牌被撤销（当前 access token
+        在到期前仍可用于完成请求）。新旧密码相同时返回 400。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChangePasswordRequest'}
+      responses:
+        '204': {description: 已修改}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/me:
+    get:
+      tags: [Account]
+      summary: 当前账号与租户身份
+      operationId: GetMe
+      responses:
+        '200':
+          description: 当前身份
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    patch:
+      tags: [Account]
+      summary: 修改展示名
+      operationId: PatchMe
+      description: 账号是全局的，改名对所有租户生效；邮箱不可在此修改。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateProfileRequest'}
+      responses:
+        '200':
+          description: 更新后的身份
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/tenants/current:
+    delete:
+      tags: [Account]
+      summary: 删除当前租户
+      operationId: DeleteTenantsCurrent
+      description: |
+        仅 owner。请求体必须回写租户 slug 作为二次确认；租户始终取自令牌。
+        软删除租户与全部成员关系、撤销该租户刷新令牌、作废未接受邀请。
+        删除后 15 分钟内旧 access token 仍可通过网关签名校验，但服务端拒绝续签。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeleteTenantRequest'}
+      responses:
+        '200':
+          description: 删除结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeleteTenantEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: slug 与当前租户不匹配（业务码 `tenant.slug_mismatch`）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+  /api/v1/tenants/current/members:
+    get:
+      tags: [Members]
+      summary: 成员列表（owner/admin）
+      operationId: GetTenantsCurrentMembers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分页成员
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MemberPageEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/tenants/current/members/{userID}:
+    patch:
+      tags: [Members]
+      summary: 修改成员角色（owner/admin）
+      operationId: PatchTenantsCurrentMembersByUserID
+      description: |
+        只有 owner 能授予或撤销 owner；admin 不能把成员提升为 owner，
+        也不能修改 owner。自我降级返回 409。
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateMemberRoleRequest'}
+      responses:
+        '200':
+          description: 更新后的成员
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MemberEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/current/invitations:
+    get:
+      tags: [Members]
+      summary: 待接受邀请列表（owner/admin）
+      operationId: GetTenantsCurrentInvitations
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分页邀请
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvitationPageEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Members]
+      summary: 创建邀请（owner/admin）
+      operationId: PostTenantsCurrentInvitations
+      description: |
+        只有 owner 能邀请 owner。同一租户同一邮箱最多一条待接受邀请，
+        再次邀请会撤销旧链接。响应中的 `link` 只在这一次返回，数据库只存
+        令牌摘要。邮件入队失败不影响邀请创建，此时 `email_queued=false`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateInvitationRequest'}
+      responses:
+        '201':
+          description: 邀请与一次性链接
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedInvitationEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/tenants/current/invitations/{invitationID}:
+    delete:
+      tags: [Members]
+      summary: 撤销邀请（owner/admin）
+      operationId: DeleteTenantsCurrentInvitationsByInvitationID
+      parameters:
+        - name: invitationID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '204': {description: 已撤销}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/invitations/{token}:
+    get:
+      tags: [Members]
+      summary: 邀请详情（公开）
+      operationId: GetInvitationsByToken
+      description: 令牌即凭据，不要求登录。过期、已用或撤销的令牌返回 404。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: 邀请元数据
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvitationInfoEnvelope'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/invitations/{token}/accept:
+    post:
+      tags: [Members]
+      summary: 接受邀请（公开）
+      operationId: PostInvitationsByTokenAccept
+      description: |
+        任何情况下都必须验证密码：账号不存在时 `password` 用于创建账号，
+        已存在时必须等于原密码。成功后返回目标租户的会话，邀请一次性失效。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AcceptInvitationRequest'}
+      responses:
+        '200':
+          description: 接受成功，返回会话
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit]
+      summary: 审计日志（owner/admin）
+      operationId: GetAuditLogs
+      description: |
+        只返回当前租户的记录。`metadata` 只含非敏感上下文（字段名、状态等），
+        不含令牌、密码或完整请求体。
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分页审计记录
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPageEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/expenses:
+    get:
+      tags: [Expenses]
+      summary: 费用单列表
+      operationId: GetExpenses
+      description: |
+        admin/owner 默认看到全租户（`scope=all`，显式请求 `mine` 只看自己）；
+        member/viewer 只能看自己的，请求 `scope=all` 返回 403 而不是静默降级。
+        `inbox=true` 返回待当前用户审批的单（不含自己提交的）。
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: scope
+          in: query
+          schema: {type: string, enum: [mine, all]}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, submitted, approved, rejected, cancelled, reimbursed]
+        - name: inbox
+          in: query
+          description: 仅返回待我审批的费用单
+          schema: {type: boolean}
+      responses:
+        '200':
+          description: 分页费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpensePageEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Expenses]
+      summary: 创建草稿
+      operationId: PostExpenses
+      description: |
+        member 及以上可以创建。金额必须是正整数最小单位；`budget_id` 可选，
+        提交时才会预占预算。新单状态为 `draft`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateExpenseRequest'}
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/expenses/{expenseID}:
+    get:
+      tags: [Expenses]
+      summary: 费用单详情
+      operationId: GetExpensesByExpenseID
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      responses:
+        '200':
+          description: 费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Expenses]
+      summary: 修改草稿
+      operationId: PutExpensesByExpenseID
+      description: |
+        只有草稿提交人可改。请求体必须带当前 `version`；版本不匹配返回 409
+        （`expense.version_conflict`），不做"最后写入获胜"。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateExpenseRequest'}
+      responses:
+        '200':
+          description: 更新后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      tags: [Expenses]
+      summary: 删除草稿（软删）
+      operationId: DeleteExpensesByExpenseID
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+        - name: version
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '204': {description: 已删除}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/submit:
+    post:
+      tags: [Expenses]
+      summary: 提交审批
+      operationId: PostExpensesByExpenseIDSubmit
+      description: |
+        仅提交人本人。提交时按币种审批策略快照所需级数，并按预算预占额度；
+        预算不足返回 409（`expense.budget_unavailable`）。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExpenseActionRequest'}
+      responses:
+        '200':
+          description: 提交后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/approve:
+    post:
+      tags: [Expenses]
+      summary: 批准
+      operationId: PostExpensesByExpenseIDApprove
+      description: |
+        仅 admin/owner，且不能审批自己提交的单（含 owner，`expense.self_approval_forbidden`）。
+        两级审批时，门槛以上的单需要两位不同审批人；同一人重复批准返回
+        `expense.duplicate_approver`。中间级批准后单据仍为 `submitted`。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExpenseActionRequest'}
+      responses:
+        '200':
+          description: 批准后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/reject:
+    post:
+      tags: [Expenses]
+      summary: 驳回
+      operationId: PostExpensesByExpenseIDReject
+      description: admin/owner，禁止自审。驳回意见写入 `rejection_reason`。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExpenseActionRequest'}
+      responses:
+        '200':
+          description: 驳回后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/cancel:
+    post:
+      tags: [Expenses]
+      summary: 撤销已提交的费用单
+      operationId: PostExpensesByExpenseIDCancel
+      description: 提交人本人或 admin/owner。撤销会释放预算预占。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExpenseActionRequest'}
+      responses:
+        '200':
+          description: 撤销后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/reimburse:
+    post:
+      tags: [Expenses]
+      summary: 标记已报销
+      operationId: PostExpensesByExpenseIDReimburse
+      description: 仅 admin/owner。预占转为实际支出并写入报表读模型。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExpenseActionRequest'}
+      responses:
+        '200':
+          description: 报销后的费用单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExpenseEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/expenses/{expenseID}/approvals:
+    get:
+      tags: [Expenses]
+      summary: 审批进度与逐级批准记录
+      operationId: GetExpensesByExpenseIDApprovals
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      responses:
+        '200':
+          description: 进度与记录
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApprovalListEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/expenses/{expenseID}/comments:
+    get:
+      tags: [Expenses]
+      summary: 评论列表
+      operationId: GetExpensesByExpenseIDComments
+      description: 能查看该单即可查看评论。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      responses:
+        '200':
+          description: 评论
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CommentListEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Expenses]
+      summary: 新增评论
+      operationId: PostExpensesByExpenseIDComments
+      description: member 及以上；任何状态的单据都可评论。正文 1–2000 字符。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateCommentRequest'}
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CommentEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/expenses/{expenseID}/comments/{commentID}:
+    delete:
+      tags: [Expenses]
+      summary: 删除评论（作者或管理岗，软删）
+      operationId: DeleteExpensesByExpenseIDCommentsByCommentID
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+        - name: commentID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '204': {description: 已删除}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/expenses/{expenseID}/attachments:
+    get:
+      tags: [Expenses]
+      summary: 附件列表
+      operationId: GetExpensesByExpenseIDAttachments
+      description: 每个附件的 `download_url` 是现签的短时 URL。未配置对象存储时返回 503。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      responses:
+        '200':
+          description: 附件（含下载 URL）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentListEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+    post:
+      tags: [Expenses]
+      summary: 确认上传
+      operationId: PostExpensesByExpenseIDAttachments
+      description: |
+        对象已直传成功后调用。`object_key` 必须与 presign 返回的一致，
+        服务端校验对象存在、大小与类型后才落库。仅草稿提交人。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmAttachmentRequest'}
+      responses:
+        '201':
+          description: 已登记
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/expenses/{expenseID}/attachments/presign:
+    post:
+      tags: [Expenses]
+      summary: 获取直传 URL
+      operationId: PostExpensesByExpenseIDAttachmentsPresign
+      description: |
+        仅草稿提交人。返回一次性 PUT 指令（对象键、URL、方法、必须携带的头、
+        过期时间）。文件本体不经过本服务，浏览器直传对象存储。
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PresignAttachmentRequest'}
+      responses:
+        '200':
+          description: 上传指令
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PresignEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/expenses/{expenseID}/attachments/{attachmentID}:
+    delete:
+      tags: [Expenses]
+      summary: 删除附件（仅草稿提交人）
+      operationId: DeleteExpensesByExpenseIDAttachmentsByAttachmentID
+      parameters:
+        - $ref: '#/components/parameters/ExpenseID'
+        - name: attachmentID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '204': {description: 已删除}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/budgets:
+    get:
+      tags: [Budgets]
+      summary: 预算列表（全租户可读）
+      operationId: GetBudgets
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: category
+          in: query
+          schema: {type: string, enum: [travel, meals, office, software, other]}
+      responses:
+        '200':
+          description: 分页预算
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetPageEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Budgets]
+      summary: 创建预算（owner/admin）
+      operationId: PostBudgets
+      description: 期间不得与同类别同币种的既有预算重叠（`budget.period_overlap`）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateBudgetRequest'}
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/budgets/{budgetID}:
+    get:
+      tags: [Budgets]
+      summary: 预算详情
+      operationId: GetBudgetsByBudgetID
+      parameters:
+        - $ref: '#/components/parameters/BudgetID'
+      responses:
+        '200':
+          description: 预算
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Budgets]
+      summary: 修改预算（owner/admin）
+      operationId: PutBudgetsByBudgetID
+      description: 类别与币种不可改。金额不得低于已占用与已支出之和。
+      parameters:
+        - $ref: '#/components/parameters/BudgetID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateBudgetRequest'}
+      responses:
+        '200':
+          description: 更新后的预算
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+    delete:
+      tags: [Budgets]
+      summary: 删除预算（owner/admin，软删）
+      operationId: DeleteBudgetsByBudgetID
+      parameters:
+        - $ref: '#/components/parameters/BudgetID'
+        - name: version
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '204': {description: 已删除}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: 有未结束的费用占用（`budget.in_use`）或版本冲突
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+  /api/v1/approval-policies:
+    get:
+      tags: [Budgets]
+      summary: 审批策略列表（owner/admin）
+      operationId: GetApprovalPolicies
+      responses:
+        '200':
+          description: 按币种的门槛
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PolicyListEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/approval-policies/{currency}:
+    put:
+      tags: [Budgets]
+      summary: 设置某币种的二级审批门槛（owner/admin）
+      operationId: PutApprovalPoliciesByCurrency
+      description: 金额大于等于门槛时要求两级审批。按自然键 upsert，重复保存不会产生重复策略。
+      parameters:
+        - name: currency
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[A-Z]{3}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpsertPolicyRequest'}
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PolicyEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    delete:
+      tags: [Budgets]
+      summary: 取消某币种的分级审批（owner/admin）
+      operationId: DeleteApprovalPoliciesByCurrency
+      parameters:
+        - name: currency
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[A-Z]{3}$'}
+      responses:
+        '204': {description: 已取消（不存在也返回 204）}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/billing/plans:
+    get:
+      tags: [Billing]
+      summary: 套餐目录
+      operationId: GetBillingPlans
+      description: 全租户可读的全局目录；价格按"每席位每周期"。
+      responses:
+        '200':
+          description: 套餐数组（直接是数组，不是分页对象）
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlanListEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/billing/subscription:
+    get:
+      tags: [Billing]
+      summary: 当前订阅
+      operationId: GetBillingSubscription
+      description: 没有有效订阅时返回 404（业务码 `billing.no_subscription`）。
+      responses:
+        '200':
+          description: 当前订阅
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubscriptionEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/billing/subscriptions:
+    get:
+      tags: [Billing]
+      summary: 订阅列表
+      operationId: GetBillingSubscriptions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分页订阅
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubscriptionPageEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Billing]
+      summary: 开通订阅（owner/admin）
+      operationId: PostBillingSubscriptions
+      description: |
+        同一租户只能有一条非取消订阅；已有有效订阅返回 409。计费周期从当天开始，
+        `anchor_day` 取首次周期开始日，后续续费按它推进。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSubscriptionRequest'}
+      responses:
+        '201':
+          description: 已开通
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubscriptionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/billing/subscriptions/{subscriptionID}:
+    get:
+      tags: [Billing]
+      summary: 订阅详情
+      operationId: GetBillingSubscriptionsBySubscriptionID
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionID'
+      responses:
+        '200':
+          description: 订阅
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubscriptionEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/billing/subscriptions/{subscriptionID}/cancel:
+    post:
+      tags: [Billing]
+      summary: 取消订阅（owner/admin）
+      operationId: PostBillingSubscriptionsBySubscriptionIDCancel
+      description: 取消是终态；已取消再取消返回 409。请求体必须带当前 version。
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CancelSubscriptionRequest'}
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubscriptionEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/billing/subscriptions/{subscriptionID}/invoices:
+    post:
+      tags: [Billing]
+      summary: 手工出账（owner/admin）
+      operationId: PostBillingSubscriptionsBySubscriptionIDInvoices
+      description: 为当前周期开具账单；同一周期重复出账返回 409。
+      parameters:
+        - $ref: '#/components/parameters/SubscriptionID'
+      responses:
+        '201':
+          description: 新账单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvoiceEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/billing/invoices:
+    get:
+      tags: [Billing]
+      summary: 账单列表
+      operationId: GetBillingInvoices
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: {type: string, enum: [open, paid]}
+      responses:
+        '200':
+          description: 分页账单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvoicePageEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/billing/invoices/{invoiceID}:
+    get:
+      tags: [Billing]
+      summary: 账单详情
+      operationId: GetBillingInvoicesByInvoiceID
+      parameters:
+        - $ref: '#/components/parameters/InvoiceID'
+      responses:
+        '200':
+          description: 账单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvoiceEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/webhooks/payments:
+    post:
+      tags: [Payments]
+      summary: 支付渠道回调
+      operationId: PostWebhooksPayments
+      description: |
+        无 JWT。信任来自 `X-Billing-Signature`：
+        `hex(HMAC-SHA256(secret, X-Billing-Timestamp + "." + 原始请求体))`，
+        时间戳与服务器相差超过 5 分钟即拒绝。渠道名必须与配置一致。
+        租户不在请求体里，由 `invoice_id` 在数据库里反查。
+        `event_id` 是幂等键：重复投递返回 `status=duplicate`，不再改变状态。
+        请求体必须精确匹配字段，未知字段会被拒绝。
+      security: []
+      parameters:
+        - name: X-Billing-Provider
+          in: header
+          required: true
+          schema: {type: string, example: mockpay}
+        - name: X-Billing-Timestamp
+          in: header
+          required: true
+          description: Unix 秒
+          schema: {type: string}
+        - name: X-Billing-Signature
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PaymentWebhookRequest'}
+            example:
+              event_id: evt-1
+              event_type: payment.succeeded
+              invoice_id: 3f3a1a2e-0000-4000-8000-000000000000
+              payment_id: mockpay-1
+              amount_minor: 9900
+              currency: USD
+      responses:
+        '200':
+          description: 已处理或重复投递
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentWebhookEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/reports/expenses/summary:
+    get:
+      tags: [Reports]
+      summary: 费用汇总
+      operationId: GetReportsExpensesSummary
+      description: |
+        按 `group_by`（category/status）分组，每组按币种分别求和；不同币种永不求和。
+        `from` 与 `to` 必填且按自然日闭区间，范围不超过 365 天。
+        管理岗默认 `scope=all`，成员/查看者只能 `mine`。
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: scope
+          in: query
+          schema: {type: string, enum: [mine, all]}
+        - name: group_by
+          in: query
+          schema: {type: string, enum: [category, status], default: category}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [submitted, approved, rejected, cancelled, reimbursed]
+        - name: category
+          in: query
+          schema: {type: string, enum: [travel, meals, office, software, other]}
+      responses:
+        '200':
+          description: 汇总
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SummaryEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/reports/dashboard:
+    get:
+      tags: [Reports]
+      summary: 仪表盘聚合
+      operationId: GetReportsDashboard
+      description: 币种合计、状态分布、类别分布与按日趋势；四组查询在同一事务内完成。
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: scope
+          in: query
+          schema: {type: string, enum: [mine, all]}
+      responses:
+        '200':
+          description: 仪表盘数据
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DashboardEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/reports/expenses.csv:
+    get:
+      tags: [Reports]
+      summary: 导出费用明细 CSV
+      operationId: GetReportsExpensesCsv
+      description: |
+        过滤条件与 summary 完全一致。最多 50000 行，超过返回 400 并要求缩小范围
+        （不静默截断）。响应带 UTF-8 BOM，Excel 可直接识别中文表头。
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          required: true
+          schema: {type: string, format: date}
+        - name: scope
+          in: query
+          schema: {type: string, enum: [mine, all]}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [submitted, approved, rejected, cancelled, reimbursed]
+        - name: category
+          in: query
+          schema: {type: string, enum: [travel, meals, office, software, other]}
+      responses:
+        '200':
+          description: CSV 文件
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+              description: 'attachment; filename="expenses-<from>-<to>.csv"'
+            Cache-Control:
+              schema: {type: string, example: no-store}
+          content:
+            text/csv:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      summary: 我的通知
+      operationId: GetNotifications
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: unread_only
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: 分页通知
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationPageEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: 未读数
+      operationId: GetNotificationsUnreadCount
+      responses:
+        '200':
+          description: 未读数量
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnreadEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: 全部标记已读
+      operationId: PostNotificationsReadAll
+      responses:
+        '200':
+          description: 受影响行数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UpdatedEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/notifications/{notificationID}/read:
+    post:
+      tags: [Notifications]
+      summary: 标记单条已读
+      operationId: PostNotificationsByNotificationIDRead
+      description: 只能标记自己的通知；他人的通知返回 404。
+      parameters:
+        - name: notificationID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '204': {description: 已标记}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /.well-known/jwks.json:
+    get:
+      tags: [Auth]
+      summary: JWKS（identity 根路径）
+      operationId: GetWellKnownJwksJson
+      description: |
+        由 identity 直接发布，网关不代理这个路径（部署时经 identity 的 Service 访问）。
+        只含公钥；轮换后验签方按 `kid`（RFC 7638 指纹）取新公钥。
+        响应不是统一 envelope：这是标准 JWKS 文档。
+      security: []
+      servers:
+        - url: http://localhost:8081
+          description: 本地 identity
+      responses:
+        '200':
+          description: JWK Set
+          headers:
+            Cache-Control:
+              schema: {type: string, example: "public, max-age=300"}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JWKS'}
+        '404':
+          description: 该 identity 实例未启用 JWKS 路由
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT (EdDSA)
+      description: identity 签发的 Ed25519 JWT，只接受 EdDSA，拒绝 alg=none 与对称算法。
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 从 1 开始；非法值收敛为 1
+      schema: {type: integer, minimum: 1, default: 1}
+    PageSize:
+      name: page_size
+      in: query
+      description: 默认 20，上限 100；超出上限按 100 处理
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    ExpenseID:
+      name: expenseID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    BudgetID:
+      name: budgetID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    SubscriptionID:
+      name: subscriptionID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    InvoiceID:
+      name: invoiceID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    BadRequest:
+      description: 请求参数或请求体非法
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unauthorized:
+      description: 缺少、无效或过期的凭据
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Forbidden:
+      description: 角色或资源所有权不足
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: 资源不存在（含跨租户访问）
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Conflict:
+      description: 状态机、乐观锁或唯一约束冲突
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    TooManyRequests:
+      description: 网关限流
+      headers:
+        Retry-After:
+          schema: {type: integer}
+          description: 建议重试等待秒数
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    InternalError:
+      description: 内部错误（响应不含根因）
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    ServiceUnavailable:
+      description: 依赖不可用（对象存储未配置、下游熔断等）
+      headers:
+        Retry-After:
+          schema: {type: integer}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+  schemas:
+    Envelope:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: 成功固定为 ok；失败为稳定业务码
+        message:
+          type: string
+          description: 面向用户的文案；失败时才有
+        request_id:
+          type: string
+          description: 与 X-Request-ID 响应头一致
+        details:
+          type: object
+          additionalProperties: true
+          description: 结构化错误上下文（不含敏感信息）
+    ErrorEnvelope:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: 稳定业务码，例如 auth.invalid_credentials、expense.state_conflict
+          example: expense.state_conflict
+        message:
+          type: string
+          example: 费用单当前状态不允许该操作
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+          example: {status: approved, action: submit}
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_slug, tenant_name, email, password, display_name]
+      properties:
+        tenant_slug:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'
+          description: 全局唯一；小写字母、数字与连字符
+          example: acme
+        tenant_name: {type: string, minLength: 1, maxLength: 120}
+        email: {type: string, format: email}
+        password:
+          type: string
+          minLength: 10
+          maxLength: 128
+          description: 10–128 字节；argon2id 存储
+        display_name: {type: string, minLength: 1, maxLength: 64}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_slug, email, password]
+      properties:
+        tenant_slug: {type: string}
+        email: {type: string, format: email}
+        password: {type: string}
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: 32 字节随机值；数据库只存 SHA-256 摘要
+    SwitchTenantRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id]
+      properties:
+        tenant_id: {type: string, format: uuid}
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password: {type: string}
+        new_password: {type: string, minLength: 10, maxLength: 128}
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 64}
+    DeleteTenantRequest:
+      type: object
+      additionalProperties: false
+      required: [slug]
+      properties:
+        slug:
+          type: string
+          description: 必须等于当前租户 slug
+    Profile:
+      type: object
+      required: [user_id, email, display_name, tenant_id, tenant_slug, tenant_name, role]
+      properties:
+        user_id: {type: string, format: uuid}
+        email: {type: string, format: email}
+        display_name: {type: string}
+        tenant_id: {type: string, format: uuid}
+        tenant_slug: {type: string}
+        tenant_name: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+    Role:
+      type: string
+      enum: [owner, admin, member, viewer]
+    Session:
+      type: object
+      required: [access_token, access_expires_at, refresh_token, refresh_expires_at, profile]
+      properties:
+        access_token:
+          type: string
+          description: EdDSA JWT；claims 含 tid/role/sid
+        access_expires_at: {type: string, format: date-time}
+        refresh_token: {type: string}
+        refresh_expires_at: {type: string, format: date-time}
+        profile: {$ref: '#/components/schemas/Profile'}
+    TenantMembership:
+      type: object
+      required: [tenant_id, slug, name, role, status, tenant_status, current]
+      properties:
+        tenant_id: {type: string, format: uuid}
+        slug: {type: string}
+        name: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+        status: {type: string, enum: [active, disabled]}
+        tenant_status: {type: string, enum: [active, disabled, deleted]}
+        current: {type: boolean}
+    Member:
+      type: object
+      required: [user_id, email, display_name, role, status, created_at]
+      properties:
+        user_id: {type: string, format: uuid}
+        email: {type: string, format: email}
+        display_name: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+        status: {type: string, enum: [active, disabled]}
+        created_at: {type: string, format: date-time}
+    UpdateMemberRoleRequest:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role: {$ref: '#/components/schemas/Role'}
+    Invitation:
+      type: object
+      required: [id, email, role, invited_by, expires_at, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        email: {type: string, format: email}
+        role: {$ref: '#/components/schemas/Role'}
+        invited_by: {type: string, format: uuid}
+        expires_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+    CreatedInvitation:
+      allOf:
+        - $ref: '#/components/schemas/Invitation'
+        - type: object
+          required: [link, email_queued]
+          properties:
+            link:
+              type: string
+              format: uri
+              description: 一次性接受链接；只在创建响应中出现
+            email_queued:
+              type: boolean
+              description: false 表示邀请有效但邮件未入队，需要管理员手动转发链接
+    CreateInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [email, role]
+      properties:
+        email: {type: string, format: email}
+        role: {$ref: '#/components/schemas/Role'}
+    AcceptInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          description: 新账号用于设置密码；已有账号必须等于原密码
+        display_name:
+          type: string
+          description: 仅新账号使用
+    InvitationInfo:
+      type: object
+      required: [tenant_name, tenant_slug, email, role, expires_at, account_exists]
+      properties:
+        tenant_name: {type: string}
+        tenant_slug: {type: string}
+        email: {type: string, format: email}
+        role: {$ref: '#/components/schemas/Role'}
+        expires_at: {type: string, format: date-time}
+        account_exists: {type: boolean}
+    DeleteTenantResult:
+      type: object
+      required: [sessions_revoked]
+      properties:
+        sessions_revoked: {type: integer, format: int64}
+    AuditEntry:
+      type: object
+      required: [id, action, metadata, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        actor_user_id: {type: string, format: uuid, nullable: true}
+        action: {type: string, example: expense.approved}
+        target_type: {type: string}
+        target_id: {type: string}
+        ip: {type: string, example: 203.0.113.10}
+        user_agent: {type: string}
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at: {type: string, format: date-time}
+    ExpenseStatus:
+      type: string
+      enum: [draft, submitted, approved, rejected, cancelled, reimbursed]
+    Category:
+      type: string
+      enum: [travel, meals, office, software, other]
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      example: USD
+    Expense:
+      type: object
+      required:
+        - id
+        - submitter_id
+        - status
+        - category
+        - currency
+        - amount_minor
+        - merchant
+        - description
+        - occurred_at
+        - version
+        - required_approval_levels
+        - approval_level
+        - created_at
+        - updated_at
+      properties:
+        id: {type: string, format: uuid}
+        submitter_id: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/ExpenseStatus'}
+        category: {$ref: '#/components/schemas/Category'}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000000000
+          description: 最小货币单位；禁止浮点
+        merchant: {type: string}
+        description: {type: string}
+        occurred_at: {type: string, format: date-time}
+        budget_id: {type: string, format: uuid, nullable: true}
+        decided_by: {type: string, format: uuid, nullable: true}
+        decided_at: {type: string, format: date-time, nullable: true}
+        rejection_reason: {type: string}
+        version: {type: integer}
+        required_approval_levels:
+          type: integer
+          enum: [1, 2]
+          description: 提交时按币种审批策略快照
+        approval_level:
+          type: integer
+          description: 已完成的批准级数
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CreateExpenseRequest:
+      type: object
+      additionalProperties: false
+      required: [category, currency, amount_minor, merchant, description, occurred_at]
+      properties:
+        category: {$ref: '#/components/schemas/Category'}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64, minimum: 1, maximum: 1000000000000}
+        merchant: {type: string, minLength: 1}
+        description: {type: string, minLength: 1}
+        occurred_at: {type: string, format: date-time}
+        budget_id: {type: string, format: uuid, nullable: true}
+    UpdateExpenseRequest:
+      allOf:
+        - $ref: '#/components/schemas/CreateExpenseRequest'
+        - type: object
+          required: [version]
+          properties:
+            version: {type: integer, minimum: 1}
+    ExpenseActionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        comment:
+          type: string
+          description: 可选意见；驳回时写入 rejection_reason
+    ApprovalItem:
+      type: object
+      required: [level, actor_id, created_at]
+      properties:
+        level: {type: integer}
+        actor_id: {type: string, format: uuid}
+        comment: {type: string}
+        created_at: {type: string, format: date-time}
+    ApprovalList:
+      type: object
+      required: [required_levels, approved_levels, items]
+      properties:
+        required_levels: {type: integer}
+        approved_levels: {type: integer}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ApprovalItem'}
+    Comment:
+      type: object
+      required: [id, author_id, body, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        author_id: {type: string, format: uuid}
+        body: {type: string}
+        created_at: {type: string, format: date-time}
+    CreateCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body: {type: string, minLength: 1, maxLength: 2000}
+    Attachment:
+      type: object
+      required:
+        - id
+        - file_name
+        - content_type
+        - size_bytes
+        - uploaded_by
+        - created_at
+        - download_url
+        - download_expires_at
+      properties:
+        id: {type: string, format: uuid}
+        file_name: {type: string}
+        content_type: {type: string}
+        size_bytes: {type: integer, format: int64}
+        uploaded_by: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+        download_url: {type: string, format: uri}
+        download_expires_at: {type: string, format: date-time}
+    PresignAttachmentRequest:
+      type: object
+      additionalProperties: false
+      required: [file_name, content_type, size_bytes]
+      properties:
+        file_name: {type: string, maxLength: 200}
+        content_type: {type: string, example: image/png}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+    PresignUpload:
+      type: object
+      required: [object_key, upload_url, method, headers, expires_at]
+      properties:
+        object_key: {type: string}
+        upload_url: {type: string, format: uri}
+        method: {type: string, example: PUT}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        expires_at: {type: string, format: date-time}
+    ConfirmAttachmentRequest:
+      type: object
+      additionalProperties: false
+      required: [object_key, file_name, content_type, size_bytes]
+      properties:
+        object_key: {type: string}
+        file_name: {type: string}
+        content_type: {type: string}
+        size_bytes: {type: integer, format: int64}
+    Budget:
+      type: object
+      required:
+        - id
+        - name
+        - category
+        - currency
+        - period_start
+        - period_end
+        - amount_minor
+        - reserved_minor
+        - spent_minor
+        - available_minor
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        category: {$ref: '#/components/schemas/Category'}
+        currency: {$ref: '#/components/schemas/Currency'}
+        period_start: {type: string, format: date}
+        period_end: {type: string, format: date}
+        amount_minor: {type: integer, format: int64}
+        reserved_minor: {type: integer, format: int64}
+        spent_minor: {type: integer, format: int64}
+        available_minor:
+          type: integer
+          format: int64
+          description: amount - reserved - spent，由服务端计算
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CreateBudgetRequest:
+      type: object
+      additionalProperties: false
+      required: [name, category, currency, period_start, period_end, amount_minor]
+      properties:
+        name: {type: string, minLength: 1}
+        category: {$ref: '#/components/schemas/Category'}
+        currency: {$ref: '#/components/schemas/Currency'}
+        period_start: {type: string, format: date}
+        period_end: {type: string, format: date}
+        amount_minor: {type: integer, format: int64, minimum: 1, maximum: 1000000000000}
+    UpdateBudgetRequest:
+      type: object
+      additionalProperties: false
+      required: [version, name, period_start, period_end, amount_minor]
+      properties:
+        version: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1}
+        period_start: {type: string, format: date}
+        period_end: {type: string, format: date}
+        amount_minor: {type: integer, format: int64, minimum: 1}
+    ApprovalPolicy:
+      type: object
+      required: [currency, second_level_threshold_minor, updated_at]
+      properties:
+        currency: {$ref: '#/components/schemas/Currency'}
+        second_level_threshold_minor: {type: integer, format: int64}
+        updated_at: {type: string, format: date-time}
+    UpsertPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [second_level_threshold_minor]
+      properties:
+        second_level_threshold_minor: {type: integer, format: int64, minimum: 1}
+    Plan:
+      type: object
+      required: [code, name, price_minor, currency, interval]
+      properties:
+        code: {type: string, example: team-monthly}
+        name: {type: string}
+        price_minor: {type: integer, format: int64}
+        currency: {$ref: '#/components/schemas/Currency'}
+        interval: {type: string, enum: [monthly, yearly]}
+    SubscriptionStatus:
+      type: string
+      enum: [active, past_due, canceled]
+    Subscription:
+      type: object
+      required:
+        - id
+        - plan_code
+        - seats
+        - status
+        - current_period_start
+        - current_period_end
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id: {type: string, format: uuid}
+        plan_code: {type: string}
+        seats: {type: integer, minimum: 1, maximum: 1000}
+        status: {$ref: '#/components/schemas/SubscriptionStatus'}
+        current_period_start: {type: string, format: date}
+        current_period_end: {type: string, format: date}
+        version: {type: integer}
+        canceled_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CreateSubscriptionRequest:
+      type: object
+      additionalProperties: false
+      required: [plan_code, seats]
+      properties:
+        plan_code: {type: string}
+        seats: {type: integer, minimum: 1, maximum: 1000}
+    CancelSubscriptionRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: {type: integer, minimum: 1}
+    InvoiceStatus:
+      type: string
+      enum: [open, paid]
+    Invoice:
+      type: object
+      required:
+        - id
+        - subscription_id
+        - number
+        - status
+        - period_start
+        - period_end
+        - currency
+        - amount_minor
+        - due_on
+        - issued_at
+        - version
+      properties:
+        id: {type: string, format: uuid}
+        subscription_id: {type: string, format: uuid}
+        number: {type: string}
+        status: {$ref: '#/components/schemas/InvoiceStatus'}
+        period_start: {type: string, format: date}
+        period_end: {type: string, format: date}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64}
+        due_on: {type: string, format: date}
+        issued_at: {type: string, format: date-time}
+        paid_at: {type: string, format: date-time, nullable: true}
+        version: {type: integer}
+    PaymentWebhookRequest:
+      type: object
+      additionalProperties: false
+      required: [event_id, event_type, invoice_id]
+      properties:
+        event_id: {type: string, maxLength: 200}
+        event_type: {type: string, enum: [payment.succeeded, payment.failed]}
+        invoice_id: {type: string, format: uuid}
+        payment_id:
+          type: string
+          maxLength: 200
+          description: payment.succeeded 必填
+        amount_minor:
+          type: integer
+          format: int64
+          description: payment.succeeded 必填，必须等于账单金额
+        currency:
+          $ref: '#/components/schemas/Currency'
+    PaymentWebhookResult:
+      type: object
+      required: [status, event_type, invoice_id, duplicate]
+      properties:
+        status: {type: string, enum: [processed, duplicate]}
+        event_type: {type: string, enum: [payment.succeeded, payment.failed]}
+        invoice_id: {type: string, format: uuid}
+        duplicate: {type: boolean}
+    CurrencyTotal:
+      type: object
+      required: [currency, amount_minor, expense_count]
+      properties:
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64}
+        expense_count: {type: integer, format: int64}
+    GroupTotal:
+      type: object
+      required: [group, currency, amount_minor, expense_count]
+      properties:
+        group: {type: string}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64}
+        expense_count: {type: integer, format: int64}
+    StatusTotal:
+      type: object
+      required: [status, currency, amount_minor, expense_count]
+      properties:
+        status: {$ref: '#/components/schemas/ExpenseStatus'}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64}
+        expense_count: {type: integer, format: int64}
+    DailyTotal:
+      type: object
+      required: [date, currency, amount_minor, expense_count]
+      properties:
+        date: {type: string, format: date}
+        currency: {$ref: '#/components/schemas/Currency'}
+        amount_minor: {type: integer, format: int64}
+        expense_count: {type: integer, format: int64}
+    Summary:
+      type: object
+      required: [scope, group_by, from, to, currency_totals, groups]
+      properties:
+        scope: {type: string, enum: [mine, all]}
+        group_by: {type: string, enum: [category, status]}
+        from: {type: string, format: date}
+        to: {type: string, format: date}
+        currency_totals:
+          type: array
+          items: {$ref: '#/components/schemas/CurrencyTotal'}
+        groups:
+          type: array
+          items: {$ref: '#/components/schemas/GroupTotal'}
+    Dashboard:
+      type: object
+      required: [scope, from, to, currency_totals, status_totals, category_totals, daily_totals]
+      properties:
+        scope: {type: string, enum: [mine, all]}
+        from: {type: string, format: date}
+        to: {type: string, format: date}
+        currency_totals:
+          type: array
+          items: {$ref: '#/components/schemas/CurrencyTotal'}
+        status_totals:
+          type: array
+          items: {$ref: '#/components/schemas/StatusTotal'}
+        category_totals:
+          type: array
+          items: {$ref: '#/components/schemas/GroupTotal'}
+        daily_totals:
+          type: array
+          items: {$ref: '#/components/schemas/DailyTotal'}
+    Notification:
+      type: object
+      required: [id, kind, title, body, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, example: expense.submitted}
+        title: {type: string}
+        body: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string, format: uuid, nullable: true}
+        read_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+    JWKS:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, crv, x, kid, use, alg]
+            properties:
+              kty: {type: string, example: OKP}
+              crv: {type: string, example: Ed25519}
+              x: {type: string}
+              kid: {type: string, description: RFC 7638 指纹}
+              use: {type: string, example: sig}
+              alg: {type: string, example: EdDSA}
+    # ---- 成功响应 envelope ----
+    SessionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Session'}}
+    ProfileEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Profile'}}
+    TenantsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/TenantMembership'}
+    MemberEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Member'}}
+    MemberPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Member'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    InvitationPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Invitation'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    CreatedInvitationEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/CreatedInvitation'}}
+    InvitationInfoEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/InvitationInfo'}}
+    DeleteTenantEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/DeleteTenantResult'}}
+    AuditPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/AuditEntry'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    ExpenseEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Expense'}}
+    ExpensePageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Expense'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    ApprovalListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/ApprovalList'}}
+    CommentEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Comment'}}
+    CommentListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Comment'}
+    AttachmentEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [id, file_name, content_type, size_bytes, uploaded_by, created_at]
+              properties:
+                id: {type: string, format: uuid}
+                file_name: {type: string}
+                content_type: {type: string}
+                size_bytes: {type: integer, format: int64}
+                uploaded_by: {type: string, format: uuid}
+                created_at: {type: string, format: date-time}
+    AttachmentListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Attachment'}
+    PresignEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/PresignUpload'}}
+    BudgetEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Budget'}}
+    BudgetPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Budget'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    PolicyEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/ApprovalPolicy'}}
+    PolicyListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/ApprovalPolicy'}
+    PlanListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: {$ref: '#/components/schemas/Plan'}
+    SubscriptionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Subscription'}}
+    SubscriptionPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Subscription'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    InvoiceEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Invoice'}}
+    InvoicePageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Invoice'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    PaymentWebhookEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/PaymentWebhookResult'}}
+    SummaryEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Summary'}}
+    DashboardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties: {data: {$ref: '#/components/schemas/Dashboard'}}
+    NotificationPageEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items, total, page, page_size]
+              properties:
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/Notification'}
+                total: {type: integer, format: int64}
+                page: {type: integer}
+                page_size: {type: integer}
+    UnreadEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [unread]
+              properties:
+                unread: {type: integer, format: int64}
+    UpdatedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [updated]
+              properties:
+                updated: {type: integer, format: int64}

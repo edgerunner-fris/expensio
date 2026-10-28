@@ -7,7 +7,7 @@
 # 两个基础镜像参数必须声明在第一个 FROM 之前：Docker 只把首个 FROM 之前的
 # ARG 当作全局参数，写在阶段之间的 ARG 不能用于后续 FROM。
 ARG NODE_VERSION=24
-ARG GO_VERSION=1.27
+ARG GO_VERSION=1.27.3
 
 FROM node:${NODE_VERSION}-alpine AS frontend
 

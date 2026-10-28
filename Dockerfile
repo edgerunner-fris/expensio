@@ -4,7 +4,10 @@
 # 六个 Go 服务共用一份多阶段构建：SERVICE 选择 cmd/<name>。
 # 运行镜像只含静态二进制与 CA 证书，以非 root 用户运行；
 # 服务本身不写本地磁盘，因此可以在 K8s 里配 readOnlyRootFilesystem。
-ARG GO_VERSION=1.27
+# 固定到补丁版本：1.27.0 命中多个标准库漏洞（net/http、crypto/tls 等），
+# 1.27.3 修复。构建镜像与 go.mod 的 go 指令保持一致，避免"本地修好了、
+# 镜像还在用旧补丁"。
+ARG GO_VERSION=1.27.3
 FROM golang:${GO_VERSION}-alpine AS build
 
 # GOPROXY 必须声明在 go mod download 之前；SERVICE / VERSION 则故意放到后面：

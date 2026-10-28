@@ -229,6 +229,37 @@ kubectl -n expensio port-forward svc/expensio-web 8086:8086
 curl -fsS http://127.0.0.1:8086/healthz
 ```
 
+## 发布流程（tag → 镜像 → Helm）
+
+`.github/workflows/cd.yml` 在推送 `v*` tag 时触发，分三段：
+
+1. **verify**：在 tag 指向的提交上重跑 gofmt / vet / build、真实依赖集成测试、
+   前端构建与 OpenAPI lint。不假设"它曾经在 main 上绿过"。
+2. **images**：构建六个服务、`web` 与 `migrate` 共八个镜像，同时推
+   `vX.Y.Z` 与 commit sha 两个 tag，并为每个镜像生成 SPDX SBOM（构建产物，
+   不落仓库）。
+3. **deploy**：`environment: production`（可配 required reviewers）下执行
+   `helm upgrade --install --wait`。集群凭据从 `KUBE_CONFIG` Secret 读取；
+   未配置时跳过部署并打印 notice，不影响镜像发布。
+
+依赖（PostgreSQL / Redis / Kafka / MinIO）、命名空间与 `expensio-secrets`
+仍由平台预先提供，见本文前面的 Secret 小节。
+
+回滚：
+
+```bash
+helm -n expensio history expensio
+helm -n expensio rollback expensio <REVISION>
+```
+
+镜像 tag 是不可变的 commit sha 或语义化版本，回滚不需要重建镜像；
+迁移镜像随 release 一起回退，但**已执行的迁移不会自动回退**，
+破坏性变更必须写成向前兼容的两步迁移。
+
+> 待验证：deploy 段在真实托管集群上没有执行过（本仓库没有目标集群与
+> `KUBE_CONFIG`）；命令形态与 CI 里 k3d 验收的 `helm upgrade --install`
+> 相同。首次接入真实集群时按本文"集群验收"小节先跑一遍。
+
 ## 集群验收（可复现）
 
 `deploy/cluster/acceptance/` 是一套在真实集群上验证 chart 行为的清单与脚本，

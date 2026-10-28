@@ -97,6 +97,41 @@ jobs:
             -strict -summary -kubernetes-version 1.31.0 \
             < /tmp/expensio-manifests.yaml
 
+  security:
+    name: 依赖漏洞扫描
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      # 只看代码实际会执行到的漏洞路径；govulncheck 发现可达漏洞时退出码非 0。
+      # 未调用到的模块漏洞仍会打印，但不会让流水线失败。
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  openapi:
+    name: OpenAPI 契约校验
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # 契约与路由的一致性由 backend 里的 internal/contract 测试保证；
+      # 这里只校验文档本身（结构、命名、引用、示例）。
+      - name: redocly lint
+        run: npx --yes @redocly/cli@1.34.3 lint api/openapi.yaml
+
   images:
     name: 镜像 ${{ matrix.service }}
     needs: [backend, frontend]

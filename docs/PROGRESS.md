@@ -2639,22 +2639,177 @@ trace_id=7a61cefb9ea7f5dceb28c88ec76225cd span_id=170065e28a2c0b58 status=401 pa
 | Loki 生产单副本 | 设计如此 | 数据在对象存储，Pod 重建不丢；查询会短暂不可用 |
 | `mockpay` 不做自动重试 | 设计如此 | 非 2xx 退出码 1，是否重试由调用脚本决定 |
 
+## M19：OpenAPI 契约、种子数据、安全扫描与发布流水线
+
+M18 结束时，接口只存在于 Go 路由和前端调用里：调用方没有可读的契约，路由
+漂移也没有测试能发现。演示数据要靠手工点页面，无法在 CI 或新环境重现。
+依赖漏洞只在本地偶尔跑一次，镜像里的旧 Go 标准库和 grpc 则一直带着已知
+CVE。发布只有 CI，没有 tag 触发的镜像与部署。
+
+设计取舍见
+[ADR-0015](adr/0015-openapi-seed-security-and-release.md)。
+
+### 交付内容
+
+| 层 | 文件 | 内容 |
+| --- | --- | --- |
+| 契约 | `api/openapi.yaml` | OpenAPI 3.0.3：50 条路径 / 62 个操作 / 92 个 schema，统一成功与错误信封、Bearer 安全方案、分页参数 |
+| 契约测试 | `internal/contract/openapi_test.go` | 从真实 gin 路由（含五个服务的 `RegisterRoutes`）提取端点，与规范双向比对：文档多写的、代码多写的都失败 |
+| 契约测试 | `internal/contract/gateway_test.go` | 规范中的每个路径都必须被网关 `DefaultRules()` 转发；每条网关规则也必须对应文档化端点，防止"服务健康但网关 404"和残留规则 |
+| 种子 | `cmd/seed/main.go` | 全部经公开 HTTP API 造数（真实鉴权、RLS、状态机、预算预占），口令只读 `EXPENSIO_SEED_PASSWORD`；预算按名称+期间、费用单按 seed 标记、成员按邮箱幂等匹配，账单已有 open 时复用 |
+| 种子 | `cmd/seed/main_test.go`、`Makefile` | 单元测试覆盖匹配与幂等判定；`make seed` 入口 |
+| 安全 | `.github/workflows/ci.yml` | 新增 `security` job：`govulncheck ./...`，任何**代码可达**漏洞让流水线失败 |
+| 发布 | `.github/workflows/cd.yml` | tag `v*` 触发：verify（gofmt/vet/build/全量 race 测试/前端构建/OpenAPI lint）→ images（八镜像矩阵，SBOM）→ deploy（Helm，`environment: production`，KUBE_CONFIG 未配置时明确跳过并说明原因） |
+| 镜像 | `Dockerfile.migrate` | 改为从源码编译 golang-migrate v4.18.3，去掉上游镜像里旧 Go 构建的标准库 CVE；运行时 alpine 3.22 + `USER 65534` |
+| 镜像 | `Dockerfile` / `Dockerfile.web` / `go.mod` | Go 1.27.3；otel 1.45.0、grpc 1.83.2、x/net 0.62.0、quic-go 0.59.1、moby/go-archive 0.3.0 |
+| 运维 | `scripts/backup-drill.sh` | 逐库 `pg_dump` → 恢复到 `<db>_drill` → 比对表集合、总行数、迁移版本 → 删除临时库；失败退出码非 0 |
+| 文档 | `docs/INTERVIEW.md`、`docs/DEPLOYMENT.md`、`README.md`、`docs/ARCHITECTURE.md` | 项目讲解与演示脚本、tag 发布流程与回滚、演示数据说明、M19 里程碑状态 |
+
+### 关键约束
+
+- OpenAPI 是**被测对象**，不是注释：契约测试直接调用各服务的路由注册函数，
+  规范与代码任一方向漂移都会失败；
+- 种子数据必须走公开 API，不允许直连数据库，否则绕过 RLS 与状态机的演示
+  数据没有说服力；
+- 种子口令只从环境变量读取，不提供命令行参数（避免进入 shell 历史与 `ps`）；
+- CD 的 deploy 段在 `KUBE_CONFIG` 缺失时不会假装成功：跳过并输出原因；
+- 备份脚本只验证逻辑备份可恢复，不等于生产备份方案（生产由对象存储 + PITR
+  负责）。
+
+### 验收（2026-10-28 实测）
+
+```text
+$ go version
+go version go1.27.3 linux/amd64
+
+$ gofmt -l internal cmd          # 无输出
+$ go build ./... && go vet ./...
+BUILD_OK
+VET_OK
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout 30m
+（全部包 ok，含 internal/contract、internal/e2e、internal/gateway、cmd/seed）
+FULL_EXIT=0
+
+$ govulncheck ./...
+No vulnerabilities found.
+Your code is affected by 0 vulnerabilities.
+
+$ actionlint                     # 三个 workflow，退出码 0
+$ docker run --rm -v "$PWD:/spec" -w /spec redocly/cli:1.34.3 lint api/openapi.yaml
+Woohoo! Your API description is valid. 🎉
+paths=50 operations=62 schemas=92
+```
+
+镜像扫描（`trivy image --severity HIGH,CRITICAL --ignore-unfixed`）：
+
+```text
+expensio/identity:dev      (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/expense:dev       (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/billing:dev       (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/report:dev        (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/notification:dev  (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/gateway:dev       (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio/web:dev           (alpine 3.22.7)  Total: 0 (HIGH: 0, CRITICAL: 0)
+expensio-migrate:m19                        Total: 0 (HIGH: 0, CRITICAL: 0)
+```
+
+重建前后对比：旧镜像有 `google.golang.org/grpc v1.82.0` 的
+`CVE-2026-84304`（HTTP/2 DATA 帧碎片化 DoS，HIGH），升级到 1.83.2 并
+用 Go 1.27.3 重建后消失。重建后的整栈以新镜像重启，七个服务全部 healthy，
+种子数据重跑输出现有账单号未变、新建 0：
+
+```text
+$ docker compose --profile app up -d --no-build --wait --wait-timeout 420
+compose_exit=0
+expensio-identity-1 ... (healthy)   expensio-gateway-1 ... (healthy)
+expensio-expense-1 ... (healthy)    expensio-web-1 ... (healthy)
+expensio-billing-1 ... (healthy)    expensio-report-1 ... (healthy)
+expensio-notification-1 ... (healthy)
+
+$ EXPENSIO_SEED_PASSWORD=*** go run ./cmd/seed
+seed: 完成
+  租户      demo-seed（demo-seed）
+  预算      4 个（本次新建 0）
+  费用单    4 张（本次新建 0）：已报销 1、已批准 1、待审批 1、已驳回 1
+  账单      INV-202610-2B753BAD / USD 14500 / 到期 2026-11-11（open）
+```
+
+文件系统扫描（`trivy fs --scanners vuln,misconfig,secret --severity
+HIGH,CRITICAL --ignore-unfixed`）：仓库自身 Go 依赖与密钥检查无发现，剩余
+12 条 HIGH 全部在 `deploy/cluster/acceptance/deps.yaml`：
+
+```text
+deploy/cluster/acceptance/deps.yaml (kubernetes)
+Tests: 35 (SUCCESSES: 23, FAILURES: 12)
+AVD-KSV-0014 (HIGH) ×4：postgres / redis / kafka / minio 未设 readOnlyRootFilesystem
+AVD-KSV-0118 (HIGH) ×8：上述 Deployment 与容器未设 securityContext
+```
+
+这 12 条是**已接受**的：该文件只是 k3d 验收用的第三方演示依赖，生产由托管
+PostgreSQL / Kafka / 对象存储替代；应用自身 chart 的 pod 与容器安全上下文
+（`runAsUser: 10001`、禁止提权、`readOnlyRootFilesystem: true`）在
+`deploy/helm/expensio/values.yaml` 中已配置。
+
+备份恢复演练：
+
+```text
+$ bash scripts/backup-drill.sh
+==> identity_db
+    OK dump=159128B tables=8 rows=466 schema_version=5:false
+==> expense_db
+    OK dump=746891B tables=10 rows=1306 schema_version=5:false
+==> billing_db
+    OK dump=31242B tables=10 rows=25 schema_version=3:false
+==> report_db
+    OK dump=145805B tables=3 rows=757 schema_version=2:false
+==> notification_db
+    OK dump=312287B tables=4 rows=1072 schema_version=2:false
+BACKUP_DRILL: PASS
+```
+
+### 过程中发现并修复的问题
+
+1. **网关漏配 `/api/v1/approval-policies` 导致 404**：服务健康、OpenAPI 有
+   文档、直连 expense 正常，只有经过网关才 404，最容易被忽略。补规则的同时
+   新增规范 ↔ 网关的双向契约测试；测试还发现一条早已删除的
+   `/api/v1/invoices` 残留规则，一并删除。
+2. **镜像里的旧标准库与 grpc**：Trivy 在旧镜像上报 Go 标准库与 grpc 1.82.0
+   的 HIGH（有修复版本）。把所有镜像的 Go 固定到 1.27.3 并升级模块后重建，
+   八镜像扫描归零；`Dockerfile.migrate` 不再使用上游预编译二进制。
+3. **备份脚本的口令变量被外层 shell 吞掉**：嵌套 `bash -c` 里 `"$SUPERUSER"`
+   被外层展开成空串，`psql -U ""` 报错。改为脚本文件传参后复现并修正；
+   同时把 psql 的 NOTICE 噪音重定向，结果行不再与数据库名交错。
+4. **Trivy fs 扫描超时**：直接扫 WSL 9p 挂载下的仓库时卡在 `node_modules`
+   的目录遍历，不是扫描本身的问题；改为先 `tar` 排除重目录再扫。
+5. **种子脚本重复执行**：第一次 404 是因为运行中的 expense 容器还是旧代码
+   （`approval-policies` 路由是新加的），重建容器后通过；第二次执行新建 0，
+   账单号不变，确认幂等。
+
+### 风险
+
+| 风险 | 状态 | 说明 |
+| --- | --- | --- |
+| `cd.yml` 的 deploy 段未在真实集群执行 | 待验证 | 需要 `KUBE_CONFIG` 与目标集群；verify 与 images 两段可在任何 tag 上运行 |
+| 验收依赖清单 12 条 HIGH 未修 | 已接受 | 第三方演示镜像需要可写根目录；生产用托管服务替代，应用 chart 已加固 |
+| 镜像扫描使用 `--ignore-unfixed` | 设计如此 | 没有修复版本的 CVE 无法通过升级消除；`govulncheck` 单独保证代码可达漏洞为零 |
+| 备份演练只覆盖逻辑备份 | 待验证 | 未覆盖 PITR、对象存储跨区与恢复演练；属于托管云环境（M20） |
+| 种子数据是演示用 | 设计如此 | 依赖运行中的完整栈；口令共享，不适合真实租户环境 |
+| OpenAPI 只描述 HTTP 契约 | 设计如此 | 不描述 Kafka 事件 schema；事件结构由共享的 `internal/platform/events` 锁定 |
+
 ## 下一步
 
-M18 已收口。剩余工作分两类。
+M19 已收口。M20 只剩"换环境"而非"补功能"的工作，且都依赖真实云资源：
 
-功能面（内部审计提出，按里程碑推进）：
-
-1. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
-   安全扫描、`cd.yml`；
-2. M20：托管云、TLS、HPA 与备份演练。
-
-环境面（"换环境"而非"补功能"）：
-
-1. 托管云集群（EKS/AKS/GKE）：替换 `deps.yaml` 为托管 PostgreSQL / Kafka，
-   验证存储类、负载均衡器与 NetworkPolicy 在各 CNI 下的行为；
+1. 托管云集群（EKS/AKS/GKE）：替换 `deploy/cluster/acceptance/deps.yaml`
+   为托管 PostgreSQL / Kafka，验证存储类、负载均衡器与 NetworkPolicy 在
+   各 CNI 下的行为；
 2. Ingress TLS 终止与 cert-manager（chart 已有 `ingress.tls` 开关，未实测）；
-3. 按集群 Pod CIDR 复核 `http.trustedProxies`（风险 37；k3d 上填的是
+3. HPA 与真实负载下的扩缩容验证（chart 目前只有固定副本数与 PDB，
+   HPA 模板需要新增）；
+4. 生产备份：对象存储 + PITR，并把 `scripts/backup-drill.sh` 的逻辑备份
+   演练扩展为云端恢复演练；
+5. 按集群 Pod CIDR 复核 `http.trustedProxies`（风险 37；k3d 上填的是
    `10.42.0.0/16`）。
 
 

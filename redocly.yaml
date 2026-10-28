@@ -1,0 +1,9 @@
+# OpenAPI lint 配置（`make openapi-lint` 与 CI 共用）。
+#
+# 只关掉一条规则：本地 server 就是 localhost，生产地址由部署覆盖。
+# 其余 recommended 规则全部保留，包括 operationId、4xx 响应与组件引用检查。
+extends:
+  - recommended
+
+rules:
+  no-server-example.com: off

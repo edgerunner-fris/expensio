@@ -1,0 +1,201 @@
+name: CD
+
+# 发布只在打 tag 时发生：main 上的每次提交由 CI 验证并推送 sha 标签镜像，
+# 但只有人工打 `vX.Y.Z` 才代表"这批镜像可以部署"。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION_FILE: go.mod
+  NODE_VERSION: "24"
+  REGISTRY: ghcr.io
+
+jobs:
+  # tag 可能指向任意提交（包括未合并的分支），所以发布前在 tag 上重跑一次
+  # 完整校验，不假设"它曾经在 main 上绿过"。
+  verify:
+    name: 发布前校验
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "以下文件未格式化："
+            echo "$files"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: 集成测试（真实 PostgreSQL / Redis / Kafka）
+        env:
+          EXPENSIO_REQUIRE_DOCKER: "1"
+        run: go test ./... -race -count=1 -timeout=30m
+
+      - name: 前端构建
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: OpenAPI lint
+        run: npx --yes @redocly/cli@1.34.3 lint api/openapi.yaml
+
+  images:
+    name: 发布镜像 ${{ matrix.service }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [identity, expense, billing, report, notification, gateway, web, migrate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # web 与 migrate 的 Dockerfile 和构建参数与六个服务不同，用 include 展开
+      # 会让矩阵难读，这里用两个表达式选择。
+      - name: 选择构建参数
+        id: build
+        run: |
+          case "${{ matrix.service }}" in
+            web)
+              echo "file=Dockerfile.web" >> "$GITHUB_OUTPUT"
+              echo "repo=${{ github.repository }}/web" >> "$GITHUB_OUTPUT"
+              ;;
+            migrate)
+              echo "file=Dockerfile.migrate" >> "$GITHUB_OUTPUT"
+              echo "repo=${{ github.repository }}-migrate" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "file=Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "repo=${{ github.repository }}/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.build.outputs.file }}
+          # SERVICE 对 web/migrate 是未使用参数，BuildKit 只会告警；这样矩阵
+          # 里的构建参数只有一套，不用为每个镜像写分支。
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ github.ref_name }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.build.outputs.repo }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ steps.build.outputs.repo }}:${{ github.sha }}
+          cache-from: type=gha,scope=cd-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=cd-${{ matrix.service }}
+
+      # SBOM 与镜像一起归档：出漏洞时能回答"这个 tag 里到底有哪些依赖"，
+      # 而不是重新构建后再猜一遍。
+      - name: 生成 SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ steps.build.outputs.repo }}:${{ github.ref_name }}
+          artifact-name: sbom-${{ matrix.service }}.spdx.json
+          output-file: sbom-${{ matrix.service }}.spdx.json
+
+  deploy:
+    name: Helm 部署（生产环境）
+    needs: images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # environment 上可配置 required reviewers 与部署分支/标签保护，
+    # 没有审批就不能落地。
+    environment:
+      name: production
+      url: https://expensio.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      # 没有配置 KUBE_CONFIG 时跳过部署而不是让整个流水线变红：
+      # 仓库是公开的，不是每个 fork/演示环境都有集群凭据。
+      - name: 检查集群凭据
+        id: creds
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -n "$KUBE_CONFIG" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 KUBE_CONFIG，跳过部署步骤"
+          fi
+
+      - name: 写入 kubeconfig
+        if: steps.creds.outputs.present == 'true'
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$KUBE_CONFIG" > "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      # 依赖（PostgreSQL / Redis / Kafka / MinIO）、命名空间与 Secret 由平台
+      # 预先提供；chart 只部署无状态服务与迁移 Hook，见 docs/DEPLOYMENT.md。
+      #
+      # 待验证：这一步在真实托管集群上没有执行过（没有目标集群），
+      # 命令形态与 CI 里 k3d 验收的 helm upgrade 一致。
+      - name: helm upgrade --install
+        if: steps.creds.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          helm upgrade --install expensio deploy/helm/expensio \
+            -n expensio --create-namespace \
+            --wait --timeout 15m \
+            --set images.registry="${{ env.REGISTRY }}/${{ github.repository }}" \
+            --set images.tag="${{ github.ref_name }}" \
+            --set images.migrate="${{ env.REGISTRY }}/${{ github.repository }}-migrate"
+
+      - name: 部署后探活
+        if: steps.creds.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          kubectl -n expensio rollout status deploy --all --timeout=300s
+          kubectl -n expensio get pods -o wide

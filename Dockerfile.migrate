@@ -3,6 +3,33 @@
 # 为什么单独打镜像：K8s 的 pre-upgrade Job 不能挂载宿主机目录；把 SQL 塞进
 # ConfigMap 又会撞上 1MiB 限制，并失去迁移文件的版本历史。镜像与代码同版本，
 # 回滚 release 时迁移文件也一起回滚。
-FROM migrate/migrate:v4.18.3
+#
+# 为什么自己编译 CLI：上游 migrate/migrate 镜像里的二进制用旧版 Go 构建，
+# Trivy 会报标准库 HIGH（net/http、crypto/tls），升 tag 也没有修复版本。
+# 用与业务服务相同的 Go 补丁版本编译，既消掉这些告警，也让供应链只剩
+# 一条 Go 工具链。
+ARG GO_VERSION=1.27.3
+FROM golang:${GO_VERSION}-alpine AS build
 
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOPROXY=${GOPROXY} \
+    GOTOOLCHAIN=local
+
+# postgres 构建标签注册 PostgreSQL 驱动；不装其他数据库驱动。
+RUN GOBIN=/out go install -tags postgres \
+      github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+
+FROM alpine:3.22
+
+# 生产库 sslmode=require/verify-full 时需要 CA 证书。
+RUN apk add --no-cache ca-certificates
+
+COPY --from=build /out/migrate /usr/local/bin/migrate
 COPY migrations /migrations
+
+# 迁移只需要读 /migrations 和连数据库，用 nobody 即可；Helm 的 migration Job
+# 会用 podSecurityContext 覆盖成 10001，这里让镜像单独运行时也不是 root。
+USER 65534:65534
+ENTRYPOINT ["migrate"]

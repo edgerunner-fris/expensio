@@ -24,7 +24,7 @@ LDFLAGS := -s -w -X github.com/edgerunner-fris/expensio/internal/platform/versio
 -include .env
 export
 
-.PHONY: help preflight env tidy fmt vet lint test test-integration test-race build up down ps logs migrate migrate-version topics smoke clean app-build app-up app-down load e2e
+.PHONY: help preflight env tidy fmt vet lint openapi-lint test test-integration test-race build up down ps logs migrate migrate-version topics smoke seed clean app-build app-up app-down load e2e
 
 help: ## 列出所有可用目标
 	@grep -hE '^[a-zA-Z_%:-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; !seen[$$1]++ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' || true
@@ -51,6 +51,10 @@ vet: ## 静态检查
 
 lint: ## golangci-lint
 	golangci-lint run ./...
+
+openapi-lint: ## 用 redocly 校验 api/openapi.yaml，并检查与真实路由一致
+	docker run --rm -v "$(CURDIR):/spec" -w /spec redocly/cli:1.34.3 lint api/openapi.yaml
+	$(GO) test ./internal/contract/ -count=1
 
 test: ## 单元 + 集成测试（本地无 Docker 时跳过集成用例）
 	$(GO) test ./... -count=1
@@ -112,6 +116,9 @@ migrate-version: ## 查看迁移版本
 
 smoke: ## 冒烟：打所有服务的 healthz/readyz
 	./scripts/smoke.sh
+
+seed: ## 通过公开 API 造演示数据（需 EXPENSIO_SEED_PASSWORD，可重复执行）
+	$(GO) run ./cmd/seed
 
 clean: ## 清理构建产物
 	rm -rf bin
