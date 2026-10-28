@@ -1,14 +1,29 @@
 {{- if .Values.ingress.enabled }}
+{{- $cm := .Values.ingress.certManager }}
+{{- if and $cm.enabled (not .Values.ingress.tls.enabled) }}
+{{- fail "ingress.certManager.enabled=true 需要同时开启 ingress.tls.enabled：证书要写进 tls.secretName" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "expensio.fullname" . }}
   labels:
     {{- include "expensio.labels" . | nindent 4 }}
+  {{- if or .Values.ingress.annotations $cm.enabled }}
   annotations:
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+    {{- if $cm.enabled }}
+    {{- if $cm.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ $cm.clusterIssuer | quote }}
+    {{- else if $cm.issuer }}
+    cert-manager.io/issuer: {{ $cm.issuer | quote }}
+    {{- else }}
+    {{- fail "ingress.certManager.enabled=true 需要设置 clusterIssuer 或 issuer" }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}

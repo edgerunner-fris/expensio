@@ -33,15 +33,46 @@ spec:
         - name: topics
           image: "apache/kafka:3.9.2"
           imagePullPolicy: {{ .Values.images.pullPolicy }}
+          {{- if or .Values.kafka.tls .Values.kafka.saslMechanism }}
+          env:
+            - name: KAFKA_SASL_MECHANISM
+              value: {{ .Values.kafka.saslMechanism | quote }}
+            - name: KAFKA_SASL_USERNAME
+              value: {{ .Values.kafka.saslUsername | quote }}
+            {{- if .Values.kafka.saslMechanism }}
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.kafkaSASLPassword }}
+            {{- end }}
+          {{- end }}
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
+              # 托管 Kafka 需要客户端配置；本地 compose 保持无参数。
+              # 配置写在 emptyDir 的 /tmp，不落镜像层，也不会被日志打印。
+              CONFIG=""
+              if [ -n "${KAFKA_SASL_MECHANISM:-}" ]; then
+                MECH=$(printf '%s' "$KAFKA_SASL_MECHANISM" | tr '[:lower:]' '[:upper:]')
+                case "$MECH" in
+                  PLAIN) CLASS=org.apache.kafka.common.security.plain.PlainLoginModule ;;
+                  *)     CLASS=org.apache.kafka.common.security.scram.ScramLoginModule ;;
+                esac
+                printf 'security.protocol=SASL_SSL\nsasl.mechanism=%s\nsasl.jaas.config=%s required username="%s" password="%s";\n' \
+                  "$MECH" "$CLASS" "$KAFKA_SASL_USERNAME" "$KAFKA_SASL_PASSWORD" > /tmp/client.properties
+                CONFIG="--command-config /tmp/client.properties"
+              elif [ "{{ .Values.kafka.tls }}" = "true" ]; then
+                printf 'security.protocol=SSL\n' > /tmp/client.properties
+                CONFIG="--command-config /tmp/client.properties"
+              fi
               for t in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
                        expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
                 i=0
                 while true; do
                   if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "{{ .Values.kafka.brokers }}" \
+                       $CONFIG \
                        --create --if-not-exists --topic "$t" \
                        --partitions {{ .Values.topics.partitions }} \
                        --replication-factor {{ .Values.topics.replicationFactor }}; then

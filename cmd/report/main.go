@@ -70,7 +70,13 @@ func setup(app *bootstrap.App) error {
 		report.NewHandler(report.NewServiceWithCache(database, cache)), issuer)
 
 	// DLQ 与业务事件共用同一个生产者：两者对 acks=all 的要求一致。
-	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
+	sec := kafka.Security{
+		TLS:           cfg.Kafka.TLS,
+		SASLMechanism: cfg.Kafka.SASLMechanism,
+		SASLUsername:  cfg.Kafka.SASLUsername,
+		SASLPassword:  cfg.Kafka.SASLPassword,
+	}
+	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service, sec)
 	if err != nil {
 		return fmt.Errorf("report: 初始化 Kafka 生产者失败: %w", err)
 	}
@@ -90,6 +96,7 @@ func setup(app *bootstrap.App) error {
 		Logger:    app.Logger,
 		ClientID:  cfg.Service,
 		Cache:     cache,
+		Security:  sec,
 	})
 	if err != nil {
 		return fmt.Errorf("report: 初始化报表消费者失败: %w", err)

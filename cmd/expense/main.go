@@ -71,7 +71,13 @@ func setup(app *bootstrap.App) error {
 
 	// 事件投递是后台链路：Kafka 不可用不影响 HTTP 服务启动，
 	// 也不参与 readiness。事件已经在 outbox 里，进程活着就会继续重试。
-	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
+	sec := kafka.Security{
+		TLS:           cfg.Kafka.TLS,
+		SASLMechanism: cfg.Kafka.SASLMechanism,
+		SASLUsername:  cfg.Kafka.SASLUsername,
+		SASLPassword:  cfg.Kafka.SASLPassword,
+	}
+	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service, sec)
 	if err != nil {
 		return fmt.Errorf("expense: 初始化 Kafka 生产者失败: %w", err)
 	}

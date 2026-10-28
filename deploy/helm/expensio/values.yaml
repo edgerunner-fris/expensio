@@ -29,6 +29,10 @@ secretKeys:
   dbAppPassword: EXPENSIO_DB_APP_PASSWORD
   dbMigratorPassword: EXPENSIO_DB_MIGRATOR_PASSWORD
   billingWebhook: EXPENSIO_BILLING_WEBHOOK_SECRET
+  # 只在 kafka.saslMechanism 非空时注入到需要 Kafka 的服务。
+  kafkaSASLPassword: EXPENSIO_KAFKA_SASL_PASSWORD
+  # 托管 Redis（ElastiCache AUTH / Azure Cache）需要；本地无认证时可省略。
+  redisPassword: EXPENSIO_REDIS_PASSWORD
   internalToken: EXPENSIO_NOTIFICATION_INTERNAL_TOKEN
   smtpPassword: EXPENSIO_NOTIFICATION_SMTP_PASSWORD
   # 对象存储凭据只给 expense 挂载；桶由服务启动时确保存在。
@@ -49,6 +53,14 @@ redis:
 
 kafka:
   brokers: kafka.example.internal:9092
+  # 托管 Kafka 几乎都要求 TLS；本地 compose 为 false。
+  tls: false
+  # 空表示不做 SASL。可选 plain / scram-sha-256 / scram-sha-512：
+  # AWS MSK 常用 SCRAM，Event Hubs / Confluent Cloud 用 PLAIN。
+  # 开启后必须同时设置 tls（配置层会拒绝 SASL_PLAINTEXT）。
+  saslMechanism: ""
+  saslUsername: ""
+  # 口令不放在 values 里，见 secretKeys.kafkaSASLPassword。
 
 # 附件对象存储。chart 不部署 MinIO：桶由平台提供，启动时自动创建。
 # publicEndpoint 是浏览器地址，只影响 presigned URL 的 Host 与签名；
@@ -151,6 +163,25 @@ web:
   replicas: 2
   port: 8086
 
+# 水平扩缩容。开启后 Deployment 不再写死 replicas（否则 Helm 与 HPA 会互相
+# 覆盖），由 HPA 按 CPU（可选内存）利用率调整。需要集群已安装 metrics-server
+# 或 Prometheus Adapter；没有指标源时 HPA 会停在 <unknown>，不会扩容。
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # 达到 requests 的百分之多少时扩容。必须设置 resources.requests.cpu，
+  # 否则 CPU 利用率没有分母。
+  targetCPUUtilizationPercentage: 70
+  # 留空表示不按内存扩缩；内存指标抖动大，通常不建议单独作为扩容依据。
+  targetMemoryUtilizationPercentage: null
+  # 可选：直接透传给 HPA v2 的 behavior（扩缩容速率限制）。
+  behavior: {}
+  # 按服务覆盖，键名与 services 相同；web 用 autoscaling.web。
+  # 例：gateway: {minReplicas: 3, maxReplicas: 20, targetCPUUtilizationPercentage: 60}
+  services: {}
+  web: {}
+
 ingress:
   enabled: true
   className: nginx
@@ -159,6 +190,13 @@ ingress:
   tls:
     enabled: true
     secretName: expensio-tls
+  # cert-manager 自动签发证书。只写注解，Issuer/ClusterIssuer 由平台预先创建。
+  # 必须同时开启 ingress.tls，否则证书没有地方存放（模板会直接报错）。
+  certManager:
+    enabled: false
+    # 二选一；clusterIssuer 优先。
+    clusterIssuer: ""
+    issuer: ""
 
 migration:
   enabled: true

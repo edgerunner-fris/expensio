@@ -1,0 +1,19 @@
+{{- $as := .Values.autoscaling }}
+{{- if $as.enabled }}
+{{- range $name, $svc := .Values.services }}
+{{- $override := index ($as.services | default dict) $name | default dict }}
+{{- $enabled := true }}
+{{- if hasKey $override "enabled" }}{{ $enabled = $override.enabled }}{{ end }}
+{{- if $enabled }}
+---
+{{ include "expensio.hpa" (dict "root" $ "name" $name "override" $override) }}
+{{- end }}
+{{- end }}
+{{- $webOverride := $as.web | default dict }}
+{{- $webEnabled := true }}
+{{- if hasKey $webOverride "enabled" }}{{ $webEnabled = $webOverride.enabled }}{{ end }}
+{{- if $webEnabled }}
+---
+{{ include "expensio.hpa" (dict "root" . "name" "web" "override" $webOverride) }}
+{{- end }}
+{{- end }}

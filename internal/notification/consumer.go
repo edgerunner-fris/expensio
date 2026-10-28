@@ -46,6 +46,9 @@ type ConsumerOptions struct {
 	ConsumerName string
 
 	RetryBase time.Duration
+
+	// Security 是 Kafka 连接的安全参数；零值表示本地明文、无认证。
+	Security kafka.Security
 }
 
 // Consumer 实现 kafka.Handler。一个实例只消费一个主题。
@@ -137,6 +140,7 @@ func newConsumer(opts ConsumerOptions, kind topicKind) (*Consumer, error) {
 		// 避免把保留期内的历史事件补发成邮件。已有位点的重启不受影响。
 		Reset:     kafka.ResetLatest,
 		RetryBase: opts.RetryBase,
+		Security:  opts.Security,
 	})
 	if err != nil {
 		return nil, err

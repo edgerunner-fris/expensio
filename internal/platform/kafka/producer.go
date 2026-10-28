@@ -21,14 +21,29 @@ type Producer struct {
 
 // NewProducer 建立客户端。构造成功不代表 broker 可达：
 // Kafka 故障不应阻止 expense 启动，投递器会在后台持续重试。
-func NewProducer(brokers []string, clientID string) (*Producer, error) {
+//
+// security 为可选参数：零值表示明文、无认证（本地 compose）；托管 Kafka
+// 传入 TLS + SASL。用可变参数是为了不破坏既有调用方与测试。
+func NewProducer(brokers []string, clientID string, security ...Security) (*Producer, error) {
 	if len(brokers) == 0 {
 		return nil, errors.New("kafka: brokers 不能为空")
 	}
 	if clientID == "" {
 		return nil, errors.New("kafka: clientID 不能为空")
 	}
-	client, err := kgo.NewClient(
+	if len(security) > 1 {
+		return nil, errors.New("kafka: security 至多传一个")
+	}
+	var sec Security
+	if len(security) == 1 {
+		sec = security[0]
+	}
+	secOpts, err := sec.options()
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID(clientID),
 		// 全量 ISR 确认：宁可等，也不要把"可能丢失"的事件当成已投递。
@@ -36,11 +51,13 @@ func NewProducer(brokers []string, clientID string) (*Producer, error) {
 		// 幂等写是 franz-go 的默认行为（除非显式 DisableIdempotentWrite）：
 		// broker 重试不会在分区内产生重复。跨进程崩溃仍可能重复
 		// （已发送未标记），消费端必须幂等。
-		kgo.ProducerLinger(5*time.Millisecond),
+		kgo.ProducerLinger(5 * time.Millisecond),
 		kgo.RecordRetries(5),
-		kgo.RecordDeliveryTimeout(10*time.Second),
+		kgo.RecordDeliveryTimeout(10 * time.Second),
 		kgo.MaxBufferedRecords(4096),
-	)
+	}
+	opts = append(opts, secOpts...)
+	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: 创建客户端失败: %w", err)
 	}

@@ -2797,20 +2797,135 @@ BACKUP_DRILL: PASS
 | 种子数据是演示用 | 设计如此 | 依赖运行中的完整栈；口令共享，不适合真实租户环境 |
 | OpenAPI 只描述 HTTP 契约 | 设计如此 | 不描述 Kafka 事件 schema；事件结构由共享的 `internal/platform/events` 锁定 |
 
+## M20：托管 Kafka 认证、HPA 与 Ingress 证书
+
+M19 之后，本地与 k3d 已经能完整运行，但离托管云还差三处：Kafka 客户端只支持
+PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；chart 只有固定
+副本数；Ingress 只声明 `tls.secretName`，没有证书签发的接线。M20 补上代码与
+模板，并把无法在本仓库验证的部分明确标出来。
+
+设计取舍见 [ADR-0016](adr/0016-cloud-kafka-hpa-certmanager.md)。
+
+### 交付内容
+
+| 层 | 文件 | 内容 |
+| --- | --- | --- |
+| 配置 | `internal/platform/config/config.go` | `kafka.tls` / `sasl_mechanism` / `sasl_username` / `sasl_password`；机制白名单、凭据成对、SASL 必须配 TLS |
+| Kafka | `internal/platform/kafka/security.go` | `Security.options()`：TLS 1.2+、PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512；构造客户端前再校验一次 |
+| Kafka | `producer.go` / `consumer.go` / report / notification | 生产者用可变参数接收 `Security`，消费选项新增同名字段；四个需要 Kafka 的服务在 `cmd/*` 装配处传入 |
+| Chart | `templates/hpa.yaml`、`_helpers.tpl` | `autoscaling/v2` HPA；全局值 + 按服务覆盖；开启后 Deployment 不渲染 `replicas` |
+| Chart | `templates/ingress.yaml` | cert-manager 注解（clusterIssuer 优先），缺少 TLS 或 issuer 时模板失败 |
+| Chart | `values.yaml`、`deployments.yaml` | Kafka TLS/SASL 只注入四个 Kafka 服务，口令来自 Secret；gateway 可选 Redis 口令；chart 版本 0.2.0 |
+| 文档 | `docs/DEPLOYMENT.md` | HPA、cert-manager、EKS/AKS/GKE 依赖与网络对照、迁移顺序 |
+
+### 关键约束
+
+- SASL 必须同时开启 TLS：SASL 只保护认证，不保护数据；拒绝
+  SASL_PLAINTEXT 是有意的；
+- Kafka 口令只从 Secret 注入，且只挂给真正使用 Kafka 的服务；
+- HPA 开启后副本数由 HPA 独占，避免 Helm 与 HPA 互相覆盖；
+- Chart 不创建 Issuer / Certificate：ACME 账号与 solver 属于集群管理员；
+- 托管云差异通过 values 注入，不为三家云各维护一套 manifest。
+
+### 验收（2026-10-28 实测）
+
+```text
+$ gofmt -l internal cmd                 # 无输出
+$ go build ./... && go vet ./...
+BUILD_OK
+VET_OK
+
+$ go test ./internal/platform/config/... ./internal/platform/kafka/... -count=1
+ok  	github.com/edgerunner-fris/expensio/internal/platform/config	0.013s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	12.005s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout 30m
+ok  	github.com/edgerunner-fris/expensio/internal/billing	25.764s
+ok  	github.com/edgerunner-fris/expensio/internal/contract	1.215s
+ok  	github.com/edgerunner-fris/expensio/internal/e2e	34.519s
+ok  	github.com/edgerunner-fris/expensio/internal/expense	29.948s
+ok  	github.com/edgerunner-fris/expensio/internal/gateway	6.473s
+ok  	github.com/edgerunner-fris/expensio/internal/identity	47.165s
+ok  	github.com/edgerunner-fris/expensio/internal/notification	21.763s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	21.569s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/outbox	22.069s
+ok  	github.com/edgerunner-fris/expensio/internal/report	41.784s
+... 其余有测试的包均 ok；无测试文件的包显示 [no test files]
+FULL_EXIT=0
+
+$ helm lint deploy/helm/expensio
+1 chart(s) linted, 0 chart(s) failed
+```
+
+HPA 渲染（`autoscaling.enabled=true`，`min=3/max=12/CPU=65`，gateway 覆盖
+`max=20`）：
+
+```text
+hpa_count=7
+deploy_replicas=0
+expensio-billing       min 3 max 12 metrics [('cpu', 65)]
+expensio-expense       min 3 max 12 metrics [('cpu', 65)]
+expensio-gateway       min 3 max 20 metrics [('cpu', 65)]
+expensio-identity      min 3 max 12 metrics [('cpu', 65)]
+expensio-notification  min 3 max 12 metrics [('cpu', 65)]
+expensio-report        min 3 max 12 metrics [('cpu', 65)]
+expensio-web           min 3 max 12 metrics [('cpu', 65)]
+```
+
+负例必须失败：
+
+```text
+minReplicas=10 > maxReplicas=5
+Error: execution error at (expensio/templates/hpa.yaml:9:3):
+autoscaling: billing 的 minReplicas(10) 大于 maxReplicas(5)
+
+certManager.enabled=true 且 tls.enabled=false
+Error: execution error at (expensio/templates/ingress.yaml:4:4):
+ingress.certManager.enabled=true 需要同时开启 ingress.tls.enabled
+```
+
+Kafka SASL 渲染（`tls=true`、`scram-sha-512`）：四个 Kafka 服务拿到
+`EXPENSIO_KAFKA_TLS`、`EXPENSIO_KAFKA_SASL_MECHANISM` 与
+`EXPENSIO_KAFKA_SASL_PASSWORD`（Secret 引用）；gateway / identity / web
+没有任何 Kafka 认证变量。
+
+```text
+$ helm template ... | kubeconform -strict -kubernetes-version 1.31.0
+Summary: 31 resources found in 1 file - Valid: 31, Invalid: 0, Errors: 0, Skipped: 0
+```
+
+未执行（需要外部环境）：
+
+- 真实 EKS/AKS/GKE：托管 PostgreSQL / Redis / Kafka / 对象存储、各 CNI 的
+  NetworkPolicy 行为、负载均衡器；
+- cert-manager 的 ACME 签发与续期；
+- HPA 在 metrics-server 下的加压扩缩容；
+- 真实 SASL broker 的连接与端到端事件。
+
+### 风险
+
+| 风险 | 状态 | 说明 |
+| --- | --- | --- |
+| 托管云流程未执行 | 未解决 | 没有云账号与集群凭据；chart 渲染与 k3d 行为不能替代云上验证 |
+| Kafka SASL 未连过真实 broker | 待验证 | 选项构造有单元测试；首次接入 MSK/Event Hubs 时验证 `Ping` 与一条事件 |
+| HPA 未做真实扩缩容 | 待验证 | 未验证扩缩容期间的事件消费再平衡与连接排空 |
+| cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
+| 托管 PG 只能到 `sslmode=require` | 未解决 | `verify-full` 需要 CA 挂载与自定义 DSN，chart 未实现 |
+| Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级 |
+
 ## 下一步
 
-M19 已收口。M20 只剩"换环境"而非"补功能"的工作，且都依赖真实云资源：
+项目的代码、文档与本地/集群（k3d）验收已收口。M20 之后剩下的都是需要外部
+资源的验证工作，继续做必须提供相应环境：
 
-1. 托管云集群（EKS/AKS/GKE）：替换 `deploy/cluster/acceptance/deps.yaml`
-   为托管 PostgreSQL / Kafka，验证存储类、负载均衡器与 NetworkPolicy 在
-   各 CNI 下的行为；
-2. Ingress TLS 终止与 cert-manager（chart 已有 `ingress.tls` 开关，未实测）；
-3. HPA 与真实负载下的扩缩容验证（chart 目前只有固定副本数与 PDB，
-   HPA 模板需要新增）；
-4. 生产备份：对象存储 + PITR，并把 `scripts/backup-drill.sh` 的逻辑备份
-   演练扩展为云端恢复演练；
-5. 按集群 Pod CIDR 复核 `http.trustedProxies`（风险 37；k3d 上填的是
-   `10.42.0.0/16`）。
+1. 托管云（EKS/AKS/GKE）：按 `docs/DEPLOYMENT.md` 的对照表准备依赖与
+   Secret，跑 `deploy/cluster/acceptance/smoke.sh` 的断言，记录各 CNI 的
+   NetworkPolicy 差异；
+2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
+3. metrics-server 下的 HPA 加压测试（扩容、缩容、再平衡）；
+4. 真实 SASL Kafka（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
+5. 托管 PostgreSQL 的 `verify-full`：挂载 CA、改用自定义 DSN；
+6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 
 
 

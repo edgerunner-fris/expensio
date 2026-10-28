@@ -1,12 +1,13 @@
 # 部署
 
 本文只描述当前真实可执行的路径。K8s 部分除 `helm lint`、`helm template`
-与 kubeconform（K8s 1.31 schema，24/24 valid）外，已在真实 k3d 集群
+与 kubeconform（K8s 1.31 schema，31/31 valid）外，已在真实 k3d 集群
 （k3s v1.31.5，双节点）完成 `helm upgrade --install --wait` 与行为验收：
 迁移/建主题 Hook 实际执行、Ingress 可达、NetworkPolicy 放行与拒绝符合预期、
 ServiceAccount 无 API 权限、事件链路在集群内跑通。验收清单与 smoke 脚本
 见 [`deploy/cluster/acceptance/`](../deploy/cluster/acceptance/)，实测输出见
-`docs/PROGRESS.md` 的 M14。托管云集群与 Ingress TLS 终止仍未验证，见文末
+`docs/PROGRESS.md` 的 M14。HPA 与 cert-manager 只做了模板渲染与 schema
+校验，托管云集群、ACME 签发与真实负载下的扩缩容仍未验证，见文末
 「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险清单里，不在这里
 含糊带过。
 
@@ -114,6 +115,8 @@ kubectl -n expensio create secret generic expensio-secrets \
   --from-literal=EXPENSIO_BILLING_WEBHOOK_SECRET="$(openssl rand -hex 32)" \
   --from-literal=EXPENSIO_NOTIFICATION_INTERNAL_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=EXPENSIO_NOTIFICATION_SMTP_PASSWORD='...'
+# 使用托管 Kafka 的 SASL 认证时再加一个键（本地/无认证 Kafka 不需要）：
+#   --from-literal=EXPENSIO_KAFKA_SASL_PASSWORD='...'
 ```
 
 必需键见 `values.yaml` 的 `secretKeys`。JWT 只支持 EdDSA：identity 需要
@@ -121,6 +124,7 @@ kubectl -n expensio create secret generic expensio-secrets \
 不存在 `EXPENSIO_JWT_SECRET` 或 HS256 开关（M12 已删除）。
 SMTP 密码是可选键：没有认证的 SMTP 可以不提供，但
 `notification.emailEnabled=true` 时必须保证 SMTP 可用。
+Kafka SASL 口令只在 `kafka.saslMechanism` 非空时被挂载。
 
 轮换公钥按「验签端先行、签发端后动、旧钥最后退役」的顺序做，`kid` 是公钥的
 RFC 7638 指纹，验签端按 `kid` 选钥，不依赖顺序：
@@ -158,8 +162,27 @@ database:
 
 redis:
   addr: redis.internal:6379
+
 kafka:
   brokers: kafka.internal:9092
+  # 托管 Kafka：TLS 必开；SASL 机制按供应商选择
+  # （MSK 常用 scram-sha-512，Event Hubs / Confluent Cloud 用 plain）。
+  tls: true
+  saslMechanism: scram-sha-512
+  saslUsername: expensio
+  # 口令来自 Secret 键 EXPENSIO_KAFKA_SASL_PASSWORD，不在 values 里。
+
+# 水平扩缩容：需要集群有 metrics-server（EKS 需安装 managed add-on，
+# AKS/GKE 默认自带）。开启后 Deployment 不再写死 replicas。
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  services:
+    gateway:
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 60
 
 otel:
   # Chart 不部署 Collector；地址必须由平台提供且集群内可达。
@@ -189,6 +212,9 @@ ingress:
   host: expensio.example.com
   tls:
     secretName: expensio-tls
+  certManager:
+    enabled: true
+    clusterIssuer: letsencrypt-prod
 ```
 
 写入 `my-values.yaml`，不要提交真实地址与密钥。
@@ -228,6 +254,173 @@ kubectl -n expensio logs job/expensio-migrate
 kubectl -n expensio port-forward svc/expensio-web 8086:8086
 curl -fsS http://127.0.0.1:8086/healthz
 ```
+
+## 自动扩缩容（HPA）
+
+`autoscaling.enabled=true` 后，chart 为六个服务与管理台各创建一个
+`autoscaling/v2` HPA，并按 CPU（可选内存）利用率扩缩容。开启时 Deployment
+**不再渲染 `replicas`**——否则 Helm 每次同步都会把副本数改回 values 里的值，
+与 HPA 互相覆盖。
+
+前置条件：集群必须有 metrics-server（EKS 需安装 managed add-on，AKS/GKE
+默认自带）；没有指标源时 HPA 的 Targets 显示 `<unknown>`，不会扩容。
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # 可选：HPA v2 behavior，限制扩容/缩容速率
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  # 按服务覆盖；键名与 services 相同，web 用 autoscaling.web
+  services:
+    gateway:
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 60
+```
+
+模板会拒绝 `minReplicas > maxReplicas` 以及缺少 CPU 目标的配置。按内存扩容
+默认关闭：内存指标抖动大，通常只适合有明确堆上限的服务。
+
+```bash
+kubectl -n expensio get hpa
+kubectl -n expensio describe hpa expensio-gateway
+```
+
+> 待验证：HPA 只做过 `helm template` 与 kubeconform 校验，没有在真实集群
+> 上跑过"加压 → 扩容 → 减压 → 缩容"的完整过程。
+
+## Ingress TLS 与 cert-manager
+
+Chart 只渲染 Ingress 注解，Issuer / ClusterIssuer 由平台安装：
+
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm upgrade --install cert-manager jetstack/cert-manager \
+  -n cert-manager --create-namespace --set crds.enabled=true --wait
+
+# ClusterIssuer 示例（邮箱与 solver 按环境改）
+cat <<'EOF' | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ops@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+EOF
+```
+
+values：
+
+```yaml
+ingress:
+  enabled: true
+  host: expensio.example.com
+  tls:
+    enabled: true
+    # 必须与 cert-manager 写入的 secretName 一致
+    secretName: expensio-tls
+  certManager:
+    enabled: true
+    # clusterIssuer 与 issuer 二选一，前者优先
+    clusterIssuer: letsencrypt-prod
+```
+
+模板在 `certManager.enabled=true` 但 `tls.enabled=false`、或两个 issuer 都
+为空时直接 `fail`，避免 Ingress 起来后证书永远不签发。HTTP-01 要求域名解析
+到集群入口且公网可达；内网或通配符证书改用 DNS-01。
+
+```bash
+kubectl -n expensio get certificate,secret expensio-tls
+curl -fsS https://expensio.example.com/healthz
+```
+
+> 待验证：ACME 签发需要真实域名与公网入口，本仓库的 CI 与 k3d 验收都没有
+> 执行过完整签发/续期流程。
+
+## 托管云（EKS / AKS / GKE）
+
+Chart 本身与云厂商无关，差异集中在依赖服务、身份与网络三处。下面是一张
+对照表，不是"一键部署"脚本。
+
+| 能力 | AWS | Azure | GCP |
+| --- | --- | --- | --- |
+| 集群 | EKS | AKS | GKE |
+| PostgreSQL | RDS / Aurora PostgreSQL | Database for PostgreSQL Flexible Server | Cloud SQL for PostgreSQL |
+| Redis | ElastiCache（开启 AUTH + TLS） | Azure Cache for Redis | Memorystore |
+| Kafka | MSK（SCRAM-SHA-512 + TLS） | Event Hubs Kafka 端点（SASL/PLAIN + TLS） | 无托管 Kafka：Confluent Cloud / Redpanda |
+| 对象存储 | S3 | Blob（需 S3 兼容网关） | GCS（需 S3 互操作端点） |
+| 密钥 | Secrets Manager + External Secrets / CSI（IRSA） | Key Vault + Workload Identity | Secret Manager + Workload Identity |
+| 网络策略 | VPC CNI network policy 或 Calico | Azure NPM 或 Calico | Dataplane V2 或 Calico |
+| 入口 | AWS Load Balancer Controller + ingress-nginx | Application Gateway 或 ingress-nginx | GCE Ingress 或 ingress-nginx |
+
+### 1. 数据库
+
+托管 PostgreSQL 需要先用管理员账号执行
+[`deploy/local/postgres/init/01-bootstrap.sh`](../deploy/local/postgres/init/01-bootstrap.sh)：
+它创建五个业务库、`*_migrator` / `*_app` 角色与权限。迁移 Job 随后以
+`{service}_migrator` 连接各库。
+
+`database.sslmode` 托管环境至少用 `require`。`verify-full` 需要 CA 文件与
+自定义 DSN，chart 目前不挂载 CA——这是已知限制，不在 values 里假装支持。
+
+### 2. Kafka 认证
+
+M20 之前客户端只支持明文 PLAINTEXT，托管 Kafka 接不上。现在
+`internal/platform/kafka/security.go` 支持：
+
+| 配置 | 说明 |
+| --- | --- |
+| `kafka.tls` | 对 broker 连接启用 TLS 1.2+ |
+| `kafka.saslMechanism` | `plain` / `scram-sha-256` / `scram-sha-512` |
+| `kafka.saslUsername` | 用户名（非敏感） |
+| Secret `EXPENSIO_KAFKA_SASL_PASSWORD` | 口令，只注入需要 Kafka 的四个服务 |
+
+配置层与客户端都会拒绝"SASL 但不启用 TLS"：SASL 只保护认证，不保护数据；
+托管服务的 SASL 端点也都要求 TLS。SASL 选项的构造有单元测试，但**没有对
+真实 SASL broker 做过连接验证**，首次接入 MSK / Event Hubs 时先跑一次
+生产者的 `Ping` 与一条端到端事件。
+
+### 3. 身份与网络
+
+- Pod 不挂 ServiceAccount 令牌（`automountServiceAccountToken=false`），
+  云身份只能用节点实例角色或工作负载身份；如果引入 External Secrets，
+  需要单独给它的 ServiceAccount 绑定 IRSA / Workload Identity；
+- NetworkPolicy 只限制入站；各 CNI 的实现差异见上表，迁移前先跑
+  `deploy/cluster/acceptance/smoke.sh` 的三种放行/拒绝断言；
+- `http.trustedProxies` 必须按集群 Pod CIDR 填写（EKS 常见
+  `10.100.0.0/16`，AKS 常见 `10.0.0.0/8`），否则按 IP 的限流与审计来源
+  都会退化成整个 web Pod；
+- 负载均衡器注解（如 `service.beta.kubernetes.io/aws-load-balancer-type`）
+  属于 ingress controller 的 values，不写进本 chart。
+
+### 4. 迁移与验收顺序
+
+```bash
+# 1) 平台依赖就绪：数据库/Redis/Kafka/对象存储、Secret、metrics-server
+# 2) 安装 ingress controller 与 cert-manager
+# 3) 用托管依赖的地址覆盖 values（不要提交到仓库）
+helm upgrade --install expensio deploy/helm/expensio \
+  -n expensio --create-namespace -f my-values.yaml --wait --timeout 15m
+# 4) 复用验收脚本的断言（把 deps 相关的检查跳过）
+NAMESPACE=expensio INGRESS_HOST=expensio.example.com \
+  BASE_URL=https://expensio.example.com bash deploy/cluster/acceptance/smoke.sh
+```
+
+> 待验证：以上流程没有在真实 EKS/AKS/GKE 上执行过；本仓库没有云账号与
+> 集群凭据。已完成的验证是 chart 渲染、kubeconform schema 校验与 k3d 上的
+> chart 行为验收，不能替代云环境验证。
 
 ## 发布流程（tag → 镜像 → Helm）
 
@@ -321,8 +514,16 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
 
 - **只在 k3d 上验证过**：验收集群是 k3d v5.8.3（k3s v1.31.5，双节点）加
   单节点 PostgreSQL/Redis/Kafka。托管云（EKS/AKS/GKE）、各 CNI 的
-  NetworkPolicy 实现、Ingress TLS 终止与 cert-manager、PDB 驱逐演练均未验证；
-  `deploy/cluster/acceptance/` 提供了可复用的断言，迁移到新环境时应先跑一遍。
+  NetworkPolicy 实现、PDB 驱逐演练均未验证；`deploy/cluster/acceptance/`
+  提供了可复用的断言，迁移到新环境时应先跑一遍。
+- **HPA 未做真实扩缩容**：模板与 schema 校验通过，但没有 metrics-server
+  下的加压测试；也没有验证扩缩容期间的事件消费再平衡。
+- **cert-manager 未走完整 ACME**：注解与 Issuer 二选一、缺少 TLS 时模板
+  直接失败；但签发与续期依赖真实域名，未在 CI 中执行。
+- **Kafka SASL 未连过真实 broker**：TLS + PLAIN/SCRAM 选项有单元测试，
+  托管服务的连接参数仍需首次接入时验证。
+- **`verify-full` 不可直接配置**：chart 只透传 `sslmode`，没有挂载 CA 与
+  `sslrootcert`，托管数据库目前止步于 `require`。
 - **出站未做白名单**：NetworkPolicy 只限制入站。数据库/Kafka/SMTP 地址由
   平台提供，写死 CIDR 会让 chart 无法跨环境复用；需要时由集群级策略补足。
 - **HSTS**：web 在 Ingress 终止 TLS 时看不到 `r.TLS`，因此 HSTS 应由

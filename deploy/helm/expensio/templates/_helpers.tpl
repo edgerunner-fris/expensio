@@ -41,3 +41,66 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "expensio.image" -}}
 {{- printf "%s/%s:%s" .root.Values.images.registry .name .root.Values.images.tag -}}
 {{- end -}}
+
+{{/*
+一个 HorizontalPodAutoscaler。调用方传入 root、name 与该服务的覆盖值 map。
+
+为什么集中在一个 helper：六个业务服务与管理台的 HPA 结构完全相同，差异只有
+名称与覆盖值；复制七份模板只会在改阈值时漏改其中一份。min/max 与 CPU 目标
+在这里校验——写错时 HPA 会被 API Server 拒绝或永远不扩容，提早在模板阶段
+失败更容易定位。
+*/}}
+{{- define "expensio.hpa" -}}
+{{- $root := .root -}}
+{{- $as := $root.Values.autoscaling -}}
+{{- $o := .override | default dict -}}
+{{- $min := $as.minReplicas -}}
+{{- $max := $as.maxReplicas -}}
+{{- $cpu := $as.targetCPUUtilizationPercentage -}}
+{{- $mem := $as.targetMemoryUtilizationPercentage -}}
+{{- if hasKey $o "minReplicas" }}{{ $min = $o.minReplicas }}{{ end -}}
+{{- if hasKey $o "maxReplicas" }}{{ $max = $o.maxReplicas }}{{ end -}}
+{{- if hasKey $o "targetCPUUtilizationPercentage" }}{{ $cpu = $o.targetCPUUtilizationPercentage }}{{ end -}}
+{{- if hasKey $o "targetMemoryUtilizationPercentage" }}{{ $mem = $o.targetMemoryUtilizationPercentage }}{{ end -}}
+{{- if not $cpu -}}
+{{- fail (printf "autoscaling: %s 的 targetCPUUtilizationPercentage 必须设置" .name) -}}
+{{- end -}}
+{{- if gt (int $min) (int $max) -}}
+{{- fail (printf "autoscaling: %s 的 minReplicas(%v) 大于 maxReplicas(%v)" .name $min $max) -}}
+{{- end -}}
+{{- $behavior := $as.behavior -}}
+{{- if hasKey $o "behavior" }}{{ $behavior = $o.behavior }}{{ end -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ printf "%s-%s" (include "expensio.fullname" $root) .name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "expensio.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ .name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ printf "%s-%s" (include "expensio.fullname" $root) .name | trunc 63 | trimSuffix "-" }}
+  minReplicas: {{ int $min }}
+  maxReplicas: {{ int $max }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ int $cpu }}
+    {{- if $mem }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ int $mem }}
+    {{- end }}
+  {{- with $behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end -}}

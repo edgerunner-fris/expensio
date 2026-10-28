@@ -171,6 +171,13 @@ type Redis struct {
 
 type Kafka struct {
 	Brokers []string `mapstructure:"brokers"`
+	// TLS 对 broker 连接启用 TLS（托管 Kafka 几乎都要求）。
+	TLS bool `mapstructure:"tls"`
+	// SASLMechanism 为空表示不做 SASL；支持 plain、scram-sha-256、scram-sha-512。
+	// 托管服务里 AWS MSK 常用 SCRAM，Event Hubs / Confluent Cloud 用 PLAIN。
+	SASLMechanism string `mapstructure:"sasl_mechanism"`
+	SASLUsername  string `mapstructure:"sasl_username"`
+	SASLPassword  string `mapstructure:"sasl_password"`
 }
 
 type JWT struct {
@@ -290,6 +297,11 @@ func defaults(opts Options) map[string]any {
 		"redis.db":       0,
 
 		"kafka.brokers": []string{"localhost:29092"},
+		"kafka.tls":     false,
+		// 本地 compose 的 Kafka 不做认证；托管 Kafka 通过环境变量注入。
+		"kafka.sasl_mechanism": "",
+		"kafka.sasl_username":  "",
+		"kafka.sasl_password":  "",
 
 		"jwt.issuer":      "expensio",
 		"jwt.access_ttl":  "15m",
@@ -410,6 +422,23 @@ func (c *Config) validate(opts Options) error {
 
 	if opts.NeedsKafka && len(c.Kafka.Brokers) == 0 {
 		errs = append(errs, errors.New("kafka.brokers 不能为空（EXPENSIO_KAFKA_BROKERS）"))
+	}
+	if m := strings.ToLower(strings.TrimSpace(c.Kafka.SASLMechanism)); m != "" {
+		switch m {
+		case "plain", "scram-sha-256", "scram-sha-512":
+		default:
+			errs = append(errs, fmt.Errorf("kafka.sasl_mechanism 非法：%q（可选 plain / scram-sha-256 / scram-sha-512）", c.Kafka.SASLMechanism))
+		}
+		if c.Kafka.SASLUsername == "" || c.Kafka.SASLPassword == "" {
+			errs = append(errs, errors.New("kafka.sasl_mechanism 配置后必须同时提供 sasl_username 与 sasl_password"))
+		}
+		// SASL 只保护认证，不保护数据；托管服务的 SASL 端点都要求 TLS。
+		// 允许 SASL_PLAINTEXT 会让口令与事件明文过网，直接拒绝。
+		if !c.Kafka.TLS {
+			errs = append(errs, errors.New("kafka.sasl_mechanism 需要同时开启 kafka.tls"))
+		}
+	} else if c.Kafka.SASLUsername != "" || c.Kafka.SASLPassword != "" {
+		errs = append(errs, errors.New("kafka.sasl_username / sasl_password 已配置但 sasl_mechanism 为空"))
 	}
 
 	if opts.NeedsJWT {

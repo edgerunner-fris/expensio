@@ -1,3 +1,6 @@
+{{- $webHPA := .Values.autoscaling.enabled }}
+{{- $webOverride := .Values.autoscaling.web | default dict }}
+{{- if and $webHPA (hasKey $webOverride "enabled") }}{{ $webHPA = $webOverride.enabled }}{{ end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,7 +9,9 @@ metadata:
     {{- include "expensio.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
+  {{- if not $webHPA }}
   replicas: {{ .Values.web.replicas }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:

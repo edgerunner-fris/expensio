@@ -151,8 +151,9 @@ Kafka、outbox、邮件、限流 fail-open、连接池）。
 Chart 只部署无状态服务，PostgreSQL / Redis / Kafka / Secret / Collector
 由平台提供。`helm lint`、`helm template` 与 kubeconform 已通过，并在真实
 k3d 集群上完成 `helm upgrade --install --wait` 与行为验收（迁移/建主题 Hook、
-Ingress、NetworkPolicy、RBAC、事件链路）；托管云集群与 Ingress TLS 终止
-尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+Ingress、NetworkPolicy、RBAC、事件链路）。Chart 另提供 HPA、cert-manager
+注解与托管 Kafka 的 TLS/SASL 配置，但这些只做了渲染与单元测试；托管云集群、
+ACME 签发与真实扩缩容尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 目录
 
@@ -179,7 +180,8 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 集群验收用的是 k3d（双节点 k3s）与单节点依赖；托管云（EKS/AKS/GKE）、
-  Ingress TLS/cert-manager、PDB 驱逐演练与多可用区未验证。
+  ACME 证书签发、HPA 真实扩缩容、真实 SASL Kafka、PDB 驱逐演练与多可用区
+  未验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
   Playwright 与真实 k3d 集群验收（PR 不跑，本地用 `make e2e`）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；

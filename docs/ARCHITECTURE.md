@@ -231,6 +231,7 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M17 | 租户切换、个人设置、审计页与登录失败锁定 | 已完成（`self_membership_read` 策略、账号级锁定） |
 | M18 | 自动续费、模拟支付、租户删除、熔断与日志聚合 | 已完成（真实 PostgreSQL 续费/删除集成测试、Loki + Tempo 按 trace_id 联查实测） |
 | M19 | OpenAPI 契约、种子数据、安全扫描与 CD | 已完成（50 路径 / 62 操作 / 92 schema 与路由双向锁定；seed 重复执行 0 新建；govulncheck 0 可达漏洞；Trivy 扫描结果见 PROGRESS；`cd.yml` 的部署段未在真实集群执行） |
+| M20 | Kafka TLS/SASL、HPA、cert-manager 与托管云文档 | 部分完成（模板与 kubeconform 校验通过、SASL 选项有单元测试；真实云集群、ACME 签发与 HPA 扩缩容未验证） |
 
 ## ADR
 
@@ -248,3 +249,5 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 - [ADR-0012：仪表盘、CSV 导出与报表缓存](adr/0012-dashboard-export-and-report-cache.md)
 - [ADR-0013：租户切换、个人设置、审计日志页与登录失败锁定](adr/0013-tenant-switch-settings-audit-lockout.md)
 - [ADR-0014：自动续费、模拟支付、租户删除、下游熔断与日志聚合](adr/0014-renewal-mockpay-deletion-circuitbreaker-loki.md)
+- [ADR-0015：OpenAPI 契约、种子数据、安全扫描与发布流水线](adr/0015-openapi-seed-security-and-release.md)
+- [ADR-0016：托管 Kafka 认证、HPA 与 Ingress 证书](adr/0016-cloud-kafka-hpa-certmanager.md)

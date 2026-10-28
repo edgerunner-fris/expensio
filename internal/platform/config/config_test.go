@@ -57,6 +57,64 @@ func TestKafkaBrokersSplitFromEnv(t *testing.T) {
 	assert.Equal(t, []string{"k1:9092", "k2:9092"}, cfg.Kafka.Brokers)
 }
 
+func kafkaOptions() config.Options {
+	return config.Options{Service: "report-service", DefaultAddr: ":8084", NeedsKafka: true}
+}
+
+func TestKafkaSASLRequiresTLS(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_SASL_MECHANISM", "plain")
+	t.Setenv("EXPENSIO_KAFKA_SASL_USERNAME", "u")
+	t.Setenv("EXPENSIO_KAFKA_SASL_PASSWORD", "p")
+
+	_, err := config.Load(kafkaOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kafka.tls")
+}
+
+func TestKafkaSASLAcceptedWithTLS(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS", "true")
+	t.Setenv("EXPENSIO_KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+	t.Setenv("EXPENSIO_KAFKA_SASL_USERNAME", "u")
+	t.Setenv("EXPENSIO_KAFKA_SASL_PASSWORD", "p")
+
+	cfg, err := config.Load(kafkaOptions())
+	require.NoError(t, err)
+	assert.True(t, cfg.Kafka.TLS)
+	assert.Equal(t, "SCRAM-SHA-512", cfg.Kafka.SASLMechanism)
+	assert.Equal(t, "u", cfg.Kafka.SASLUsername)
+}
+
+func TestKafkaRejectsUnknownSASLMechanism(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS", "true")
+	t.Setenv("EXPENSIO_KAFKA_SASL_MECHANISM", "oauthbearer")
+	t.Setenv("EXPENSIO_KAFKA_SASL_USERNAME", "u")
+	t.Setenv("EXPENSIO_KAFKA_SASL_PASSWORD", "p")
+
+	_, err := config.Load(kafkaOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sasl_mechanism 非法")
+}
+
+func TestKafkaCredentialsWithoutMechanismAreRejected(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS", "true")
+	t.Setenv("EXPENSIO_KAFKA_SASL_USERNAME", "u")
+	t.Setenv("EXPENSIO_KAFKA_SASL_PASSWORD", "p")
+
+	_, err := config.Load(kafkaOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sasl_mechanism 为空")
+}
+
+func TestKafkaSASLRequiresBothCredentials(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS", "true")
+	t.Setenv("EXPENSIO_KAFKA_SASL_MECHANISM", "plain")
+	t.Setenv("EXPENSIO_KAFKA_SASL_USERNAME", "u")
+
+	_, err := config.Load(kafkaOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sasl_username 与 sasl_password")
+}
+
 func TestMissingRequiredDBNameIsReported(t *testing.T) {
 	_, err := config.Load(config.Options{
 		Service:     "identity-service",

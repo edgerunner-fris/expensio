@@ -2,6 +2,9 @@
 {{- $secret := .Values.existingSecret }}
 {{- $keys := .Values.secretKeys }}
 {{- range $name, $svc := .Values.services }}
+{{- $override := index ($root.Values.autoscaling.services | default dict) $name | default dict }}
+{{- $hpa := $root.Values.autoscaling.enabled }}
+{{- if and $hpa (hasKey $override "enabled") }}{{ $hpa = $override.enabled }}{{ end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -11,7 +14,9 @@ metadata:
     {{- include "expensio.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $name }}
 spec:
+  {{- if not $hpa }}
   replicas: {{ $svc.replicas | default 1 }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -66,6 +71,33 @@ spec:
                 secretKeyRef:
                   name: {{ $secret }}
                   key: {{ $keys.dbAppPassword }}
+            {{- end }}
+            {{- if $svc.kafka }}
+            # 只有需要 Kafka 的服务才拿 SASL 配置：identity 不消费事件，
+            # 给它注入认证参数只会在缺键时让它无故起不来。
+            - name: EXPENSIO_KAFKA_TLS
+              value: {{ $root.Values.kafka.tls | quote }}
+            - name: EXPENSIO_KAFKA_SASL_MECHANISM
+              value: {{ $root.Values.kafka.saslMechanism | quote }}
+            - name: EXPENSIO_KAFKA_SASL_USERNAME
+              value: {{ $root.Values.kafka.saslUsername | quote }}
+            {{- if $root.Values.kafka.saslMechanism }}
+            - name: EXPENSIO_KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.kafkaSASLPassword }}
+            {{- end }}
+            {{- end }}
+            {{- if $svc.redis }}
+            # 可选键：本地/验收 Redis 无认证。托管 Redis 必须提供，否则请求
+            # 会因 NOAUTH 失败——这是显式的运行期错误，不是静默降级。
+            - name: EXPENSIO_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $keys.redisPassword }}
+                  optional: true
             {{- end }}
             {{- if $svc.jwt }}
             - name: EXPENSIO_JWT_PUBLIC_KEYS

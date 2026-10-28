@@ -46,6 +46,8 @@ type ConsumerOptions struct {
 	ConsumerName string
 
 	RetryBase time.Duration
+	// Security 是 Kafka 连接的安全参数；零值表示本地明文、无认证。
+	Security kafka.Security
 }
 
 // Consumer 实现 kafka.Handler。
@@ -103,6 +105,7 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		Publisher: opts.Publisher,
 		Logger:    opts.Logger,
 		RetryBase: opts.RetryBase,
+		Security:  opts.Security,
 	})
 	if err != nil {
 		return nil, err

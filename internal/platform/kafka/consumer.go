@@ -75,6 +75,8 @@ type ConsumerOptions struct {
 	// RetryBase / RetryMax 控制瞬时错误的指数退避。
 	RetryBase time.Duration
 	RetryMax  time.Duration
+	// Security 是 broker 连接的安全参数；零值表示明文、无认证。
+	Security Security
 }
 
 // Consumer 是一个消费组的成员。
@@ -127,7 +129,11 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		reset = kgo.NewOffset().AtEnd()
 	}
 
-	client, err := kgo.NewClient(
+	secOpts, err := opts.Security.options()
+	if err != nil {
+		return nil, err
+	}
+	kgoOpts := []kgo.Opt{
 		kgo.SeedBrokers(opts.Brokers...),
 		kgo.ClientID(opts.ClientID),
 		kgo.ConsumerGroup(opts.GroupID),
@@ -139,7 +145,9 @@ func NewConsumer(opts ConsumerOptions) (*Consumer, error) {
 		// 心跳由 franz-go 的后台协程维持，所以处理单条消息再久，
 		// 只要进程活着就不会因为"没有及时 poll"被踢出消费组。
 		kgo.ConsumeResetOffset(reset),
-	)
+	}
+	kgoOpts = append(kgoOpts, secOpts...)
+	client, err := kgo.NewClient(kgoOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: 创建消费者失败: %w", err)
 	}
