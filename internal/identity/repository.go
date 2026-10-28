@@ -253,7 +253,8 @@ func (r *Repository) ListAudit(ctx context.Context, tx pgx.Tx, limit, offset int
 		return nil, 0, err
 	}
 
-	const q = `SELECT id, actor_user_id, action, target_type, target_id, metadata, created_at
+	const q = `SELECT id, actor_user_id, action, target_type, target_id,
+	                  COALESCE(host(ip), ''), user_agent, metadata, created_at
 	           FROM app.audit_logs
 	           ORDER BY created_at DESC, id
 	           LIMIT $1 OFFSET $2`
@@ -269,7 +270,8 @@ func (r *Repository) ListAudit(ctx context.Context, tx pgx.Tx, limit, offset int
 			e    AuditEntry
 			meta []byte
 		)
-		if err := rows.Scan(&e.ID, &e.ActorUserID, &e.Action, &e.TargetType, &e.TargetID, &meta, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.ActorUserID, &e.Action, &e.TargetType, &e.TargetID,
+			&e.IP, &e.UserAgent, &meta, &e.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		if len(meta) > 0 {

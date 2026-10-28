@@ -67,13 +67,17 @@ type RefreshToken struct {
 
 // AuditEntry 是审计日志的一行。metadata 只放非敏感上下文。
 type AuditEntry struct {
-	ID          uuid.UUID      `json:"id"`
-	ActorUserID *uuid.UUID     `json:"actor_user_id,omitempty"`
-	Action      string         `json:"action"`
-	TargetType  string         `json:"target_type,omitempty"`
-	TargetID    string         `json:"target_id,omitempty"`
-	Metadata    map[string]any `json:"metadata"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID          uuid.UUID  `json:"id"`
+	ActorUserID *uuid.UUID `json:"actor_user_id,omitempty"`
+	Action      string     `json:"action"`
+	TargetType  string     `json:"target_type,omitempty"`
+	TargetID    string     `json:"target_id,omitempty"`
+	// IP 与 UserAgent 供审计页展示"谁从哪里做的"；ip 列是 inet，
+	// 读出时用 host() 转成纯地址文本，避免带 /32 前缀。
+	IP        string         `json:"ip,omitempty"`
+	UserAgent string         `json:"user_agent,omitempty"`
+	Metadata  map[string]any `json:"metadata"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 // RequestMeta 记录请求来源，用于审计与刷新令牌绑定。

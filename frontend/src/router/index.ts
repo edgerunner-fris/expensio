@@ -84,6 +84,19 @@ const router = createRouter({
           component: () => import('@/views/MembersView.vue'),
           meta: { title: '成员', adminOnly: true },
         },
+        {
+          // 账号级设置：所有角色都可以改自己的展示名与密码。
+          path: 'settings',
+          name: 'settings',
+          component: () => import('@/views/SettingsView.vue'),
+          meta: { title: '账号设置' },
+        },
+        {
+          path: 'audit-logs',
+          name: 'audit-logs',
+          component: () => import('@/views/AuditLogView.vue'),
+          meta: { title: '审计日志', adminOnly: true },
+        },
       ],
     },
     {

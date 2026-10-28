@@ -70,6 +70,11 @@ type Rule struct {
 // DefaultRules 是 v1 的路由表。最长前缀优先由 New 负责排序。
 func DefaultRules() []Rule {
 	return []Rule{
+		// 这三条挂在 /auth 下但要求已认证身份：不能落进下面"按 IP 限流、
+		// 不校验令牌"的登录桶，否则正常使用会和登录尝试抢 20/min 的额度。
+		{Prefix: "/api/v1/auth/tenants", Upstream: "identity", Auth: true, Scope: LimitByTenant},
+		{Prefix: "/api/v1/auth/switch-tenant", Upstream: "identity", Auth: true, Scope: LimitByTenant},
+		{Prefix: "/api/v1/auth/change-password", Upstream: "identity", Auth: true, Scope: LimitByTenant},
 		{Prefix: "/api/v1/auth", Upstream: "identity", Auth: false, Scope: LimitByIP},
 		// 邀请接受页是公开的：令牌就是凭据，按 IP 限流防止令牌被暴力枚举。
 		{Prefix: "/api/v1/invitations", Upstream: "identity", Auth: false, Scope: LimitByIP},

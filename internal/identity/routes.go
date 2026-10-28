@@ -47,6 +47,13 @@ func RegisterRoutes(r gin.IRouter, h *Handler, tokens TokenSource) {
 	authed := v1.Group("")
 	authed.Use(middleware.Auth(tokens))
 	authed.GET("/me", h.Me)
+	authed.PATCH("/me", h.UpdateProfile)
+
+	// 租户切换与改密需要已认证身份；它们放在 /auth 下是为了与登录类接口
+	// 同一个入口，但网关对这两条单独按租户限流（见 gateway.DefaultRules）。
+	authed.GET("/auth/tenants", h.Tenants)
+	authed.POST("/auth/switch-tenant", h.SwitchTenant)
+	authed.POST("/auth/change-password", h.ChangePassword)
 
 	// 成员与审计属于管理视图：普通成员能看到同事邮箱、管理员能看到全租户操作记录，
 	// 这些都不是 member / viewer 该拿到的数据。

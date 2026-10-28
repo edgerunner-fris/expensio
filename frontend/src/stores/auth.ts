@@ -9,11 +9,14 @@ import {
   saveProfile,
   saveSession,
 } from '@/api/session'
-import type { Profile, Session } from '@/api/types'
+import type { Profile, Session, TenantMembership } from '@/api/types'
 
 export const useAuthStore = defineStore('auth', () => {
   const profile = ref<Profile | null>(loadProfile())
   const busy = ref(false)
+  // 当前账号的全部成员关系。为空时顶部只显示当前租户名，
+  // 不影响其他功能。
+  const tenants = ref<TenantMembership[]>([])
 
   const isAuthenticated = computed(() => profile.value !== null && accessToken() !== null)
   const isAdmin = computed(
@@ -57,6 +60,43 @@ export const useAuthStore = defineStore('auth', () => {
     saveProfile(latest)
   }
 
+  async function loadTenants(): Promise<void> {
+    tenants.value = await authApi.tenants()
+  }
+
+  // 切换租户会拿到一整套新会话（新的刷新令牌链）。旧链服务端不撤销，
+  // 但那枚令牌已经不在本浏览器的 localStorage 里：切换以最后一个动作为准。
+  async function switchTenant(tenantId: string): Promise<void> {
+    if (tenantId === profile.value?.tenant_id) return
+    busy.value = true
+    try {
+      adopt(await authApi.switchTenant(tenantId))
+    } finally {
+      busy.value = false
+    }
+    // 列表刷新失败不影响已经生效的切换：顶部至少有新会话里的租户名。
+    try {
+      tenants.value = await authApi.tenants()
+    } catch {
+      // 下拉列表保持旧值，下一次进入布局时会重试。
+    }
+  }
+
+  // 展示名属于全局账号：改一次，所有租户里看到的名字都变。
+  async function updateProfile(displayName: string): Promise<void> {
+    const latest = await authApi.updateProfile(displayName)
+    profile.value = latest
+    saveProfile(latest)
+    const mine = tenants.value.find((t) => t.tenant_id === latest.tenant_id)
+    if (mine) mine.role = latest.role
+  }
+
+  // 改密成功后服务端已撤销全部刷新链；会话清理由调用方在跳转前完成，
+  // 因为要先展示成功提示再回到登录页。
+  async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await authApi.changePassword(currentPassword, newPassword)
+  }
+
   // 接受邀请会把当前会话切换成被邀请租户的会话：同一个浏览器里
   // 用户可能已经登录了别的租户，接受后应以新租户身份继续操作。
   async function acceptInvitation(
@@ -80,12 +120,14 @@ export const useAuthStore = defineStore('auth', () => {
     } finally {
       clearSession()
       profile.value = null
+      tenants.value = []
     }
   }
 
   return {
     profile,
     busy,
+    tenants,
     isAuthenticated,
     isAdmin,
     isOwner,
@@ -94,6 +136,10 @@ export const useAuthStore = defineStore('auth', () => {
     register,
     acceptInvitation,
     refreshProfile,
+    loadTenants,
+    switchTenant,
+    updateProfile,
+    changePassword,
     logout,
   }
 })

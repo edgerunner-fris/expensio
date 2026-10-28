@@ -78,8 +78,21 @@ export interface AuditEntry {
   action: string
   target_type?: string
   target_id?: string
+  ip?: string
+  user_agent?: string
   metadata: Record<string, unknown>
   created_at: string
+}
+
+// 一个账号在某个租户里的身份，用于顶部租户切换。
+export interface TenantMembership {
+  tenant_id: string
+  slug: string
+  name: string
+  role: Role
+  status: string
+  tenant_status: string
+  current: boolean
 }
 
 export interface Expense {

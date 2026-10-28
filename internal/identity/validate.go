@@ -2,6 +2,7 @@ package identity
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 )
@@ -31,6 +32,22 @@ func validatePassword(pw string) error {
 		return apperr.InvalidArgument("密码不超过 128 个字符")
 	}
 	return nil
+}
+
+// validateDisplayName 去首尾空白后校验：非空、不超过 64 个字符、不含控制字符。
+// 展示名会进入通知邮件、审计与页面，允许换行或控制字符等于给下游埋注入点。
+func validateDisplayName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", apperr.InvalidArgument("显示名称不能为空")
+	}
+	if utf8.RuneCountInString(name) > maxDisplayLen {
+		return "", apperr.InvalidArgument("显示名称不超过 64 个字符")
+	}
+	if strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return "", apperr.InvalidArgument("显示名称包含非法字符")
+	}
+	return name, nil
 }
 
 func errInvalidCredentials() *apperr.Error {

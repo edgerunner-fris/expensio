@@ -2403,19 +2403,133 @@ FAIL	github.com/edgerunner-fris/expensio/internal/report	5.366s
 | 多副本 report 的缓存一致性 | 待验证 | 依赖所有副本连同一个 Redis；Helm 上是同一 `redis.addr`，未做集群实测 |
 | 预算告警被误当成额度校验 | 设计如此 | 告警仅前端展示，提交时仍是条件 UPDATE 唯一防线 |
 
+## M17：租户切换、个人设置、审计日志页与登录失败锁定
+
+账号本来就是全局的（`users`）+ 多租户成员关系（`memberships`），但登录只按
+slug 进入，没有切换入口；审计接口已有、页面缺失；没有自助改资料/改密码；
+登录失败只有网关按 IP 限流。设计见
+[ADR-0013](adr/0013-tenant-switch-settings-audit-lockout.md)。
+
+### API 契约
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/v1/auth/tenants` | 我的全部成员关系（含角色、状态、是否当前） |
+| `POST /api/v1/auth/switch-tenant` | `{tenant_id}` → 新租户的完整会话 |
+| `PATCH /api/v1/me` | `{display_name}`，全局账号资料 |
+| `POST /api/v1/auth/change-password` | 校验当前密码；成功后撤销全部刷新链 |
+| `GET /api/v1/audit-logs` | 已有；补 `ip` / `user_agent` 读字段与前端页面 |
+
+### 关键约束
+
+- 「列出租户」走 memberships 上仅 SELECT 的 `self_membership_read` 策略，
+  键 `app.user_id` 只由 `db.WithinUser` 从 JWT 的 sub 写入。初版尝试的
+  SECURITY DEFINER 函数在 `FORCE RLS` 下对表属主同样失效（集成测试实测返回
+  0 行），已放弃；写入仍只受 `tenant_isolation` 约束；
+- 切换不撤销旧刷新链（其他设备上的会话不受影响），登出仍按链撤销；
+- 改密成功撤销该用户全部刷新链，前端回登录页；
+- 锁定：15 分钟内 5 次凭证错误 → 429，锁 15 分钟；不存在的邮箱同样计数，
+  避免把锁定状态变成账号探测点；成功登录清零。
+
+### 验收计划
+
+1. 双租户用户：列表两条、当前标记正确；切换到另一租户后 `/me` 的租户与角色
+   随成员关系变化；非成员 403、切到当前 400、暂停租户 403；审计可见；
+2. 改名：`/me` 生效、审计有记录、超长/空白 400；
+3. 改密：错误当前密码 401；成功后旧刷新令牌 401、旧密码 401、新密码可登录；
+4. 锁定：连续 5 次错误后 429、锁定期内正确密码仍 429、用 SQL 拨回过期时间后
+   可登录、4 次失败后成功会清零；
+5. 前端（切换菜单、设置页、审计页）`vue-tsc --noEmit && vite build`；
+6. identity 包 `-race -count=5`。
+
+### 实现
+
+| 层 | 文件 | 内容 |
+| --- | --- | --- |
+| 迁移 | `migrations/identity/000004_tenant_switch` | memberships 上仅 SELECT 的 `self_membership_read` 策略 |
+| 迁移 | `migrations/identity/000005_login_lockout` | `app.login_failures`（无 RLS、邮箱主键、锁定部分索引、`touch_updated_at` 触发器） |
+| 平台 | `internal/platform/db/db.go` | `WithinUser`：事务级设置 `app.user_id`；`inTx` 同时携带 tenant/user 两个 GUC |
+| identity | `account.go` / `account_repository.go` | 列表（普通 join，靠策略收敛）、切换、改名、改密（两段事务 + CAS）、登录失败计数 SQL |
+| identity | `lockout.go` | 5 次 / 15 分钟窗口 → 15 分钟锁定；429 `auth.too_many_attempts`；计数失败只记日志 |
+| identity | `handler_account.go` / `routes.go` | 三个新端点 + `PATCH /me`；`GET /auth/tenants` 返回 `{"items": [...]}` |
+| identity | `service.go` | 锁定检查前置于密码校验（仍跑 dummy argon2）、成功登录清零、注册复用展示名校验 |
+| identity | `model.go` / `repository.go` | 审计读模型补 `ip`（`host(ip)`）与 `user_agent` |
+| 网关 | `internal/gateway/gateway.go` | 三条已认证、按租户限流的规则排在 `/api/v1/auth` 之前 |
+| 前端 | `AppLayout.vue` | 租户下拉（当前项与停用项禁用）、`router-view :key="tenant_id"` 强制重建、账号设置入口 |
+| 前端 | `SettingsView.vue` / `AuditLogView.vue` / `router` | 资料与改密表单、审计表格（展开 metadata）、路由与管理员菜单 |
+
+### 验收（2026-10-28 实测）
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/identity/ \
+    -run 'TestTenantSwitch|TestTenantListRequiresAuth|TestUpdateProfile|TestChangePassword|TestLoginLockout' -count=1
+ok  	github.com/edgerunner-fris/expensio/internal/identity	7.151s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/identity/ -race -count=5 -timeout 20m
+ok  	github.com/edgerunner-fris/expensio/internal/identity	88.466s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/gateway/ ./internal/platform/db/ -count=1
+ok  	github.com/edgerunner-fris/expensio/internal/gateway	3.185s
+?   	github.com/edgerunner-fris/expensio/internal/platform/db	[no test files]
+
+$ gofmt -l internal/identity internal/platform/db && go build ./... \
+    && go vet ./internal/identity ./internal/platform/db
+（无输出）
+
+# 前端在 node:24 容器内执行（WSL 里的 node 是 Windows 版，原生绑定不可用）
+$ docker run --rm --network none -v .../frontend:/app -w /app node:24 \
+    ./node_modules/.bin/vue-tsc --noEmit
+TYPECHECK_EXIT=0
+$ docker run --rm --network none -v .../frontend:/app -w /app node:24 \
+    ./node_modules/.bin/vite build
+dist/assets/AuditLogView-DW1lyo0s.js              … kB
+dist/assets/SettingsView-BPbUloM-.js              … kB
+✓ built in 1.18s
+```
+
+新增 5 个集成用例：`TestTenantSwitch`（列表、切换、`/me`、审计、旧链仍可刷新、
+切回当前 400、非成员 / 暂停租户 / 停用成员关系 403）、`TestTenantListRequiresAuth`、
+`TestUpdateProfile`（含审计 `ip`/`user_agent`）、`TestChangePassword`（旧链撤销、
+旧密码失效、新密码可登录）、`TestLoginLockout`（第 5 次 429、锁定期内正确密码
+仍 429、不存在的邮箱同样锁定、SQL 拨回解锁时间、成功清零）。
+
+### 失败与修正：FORCE RLS 让 definer 函数失效
+
+初版按 `app.find_invitation` 的模式实现 `app.user_tenants(uuid)`（SECURITY
+DEFINER，属主 `identity_migrator`）。`TestTenantSwitch` 在
+`require.Len(t, list.Items, 2)` 处实际拿到 0 条：`memberships` 是 `ENABLE + FORCE`
+RLS，**FORCE 对表属主同样生效**，definer 函数也读不到跨租户的行；`invitations`
+只 `ENABLE`，所以 `find_invitation` 能用，两者前提不同。
+
+修正为：migration `000004` 只增加一条仅 SELECT 的宽松策略
+`self_membership_read`（`user_id = app.user_id`），新增 `db.WithinUser` 在事务内
+从 JWT 的 `sub` 设置 `app.user_id`。因为没有同时设置 `app.tenant_id`，该事务里
+其他受 RLS 约束的表（如 `audit_logs`）仍然读不到任何行；写入仍只受
+`tenant_isolation` 的 `WITH CHECK` 约束。改完后同一用例通过。
+
+### 风险
+
+| 风险 | 状态 | 说明 |
+| --- | --- | --- |
+| FORCE RLS 让 definer 函数跨租户读失效 | 已解决 | 集成测试实测 0 行；改为 SELECT-only 策略 + `WithinUser` |
+| 账号级锁定可被用于拒绝服务 | 待验证 | 15 分钟自动解锁、网关按 IP 20/min、成功清零；未做并发压测 |
+| `login_failures` 无清理任务 | 未解决 | 不存在的邮箱也会留行；网关限流约束增长速度，清理任务待排期 |
+| `change-password` 不累计锁定 | 未解决 | 持有 access token 仍可试当前密码，受 argon2 与 1200/min 约束 |
+| 同一浏览器多标签共享会话 | 设计如此 | 切换后以最后一次为准；服务端不撤销旧链，其他设备不受影响 |
+| 账号级操作只写当前租户审计 | 设计如此 | 跨租户账号审计表未做 |
+| 锁定与网关限流的叠加行为 | 待验证 | 只做了功能测试，未做 5 次锁定 × 20/min 的联合压测 |
+
 ## 下一步
 
-M16 已收口。剩余工作分两类。
+M17 已收口。剩余工作分两类。
 
 功能面（内部审计提出，按里程碑推进）：
 
-1. M17：多租户切换（同一账号属于多个租户时的现状与切换入口）、审计日志
-   查看页、个人设置（改显示名 / 改密码）、登录失败锁定与退避；
-2. M18：`MockPaymentGateway` 与月度出账任务、租户删除（软删 + 清理路径）、
+1. M18：`MockPaymentGateway` 与月度出账任务、租户删除（软删 + 清理路径）、
    `gobreaker` 熔断、Loki 日志聚合；
-3. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
+2. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
    安全扫描、`cd.yml`；
-4. M20：托管云、TLS、HPA 与备份演练。
+3. M20：托管云、TLS、HPA 与备份演练。
 
 环境面（"换环境"而非"补功能"）：
 

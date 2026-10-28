@@ -114,8 +114,10 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, meta RequestMe
 	if displayName == "" {
 		displayName = email[:strings.IndexByte(email, '@')]
 	}
-	if utf8.RuneCountInString(displayName) > maxDisplayLen {
-		return nil, apperr.InvalidArgument("显示名称不超过 64 个字符")
+	// 与 PATCH /me 用同一条规则：注册时也不接受控制字符或超长名称。
+	displayName, err = validateDisplayName(displayName)
+	if err != nil {
+		return nil, err
 	}
 
 	// 哈希在事务外算：argon2 需要几十毫秒，没有必要占着一个数据库连接。
@@ -196,6 +198,16 @@ func (s *Service) Login(ctx context.Context, in LoginInput, meta RequestMeta) (*
 		return nil, apperr.InvalidArgument("密码不能为空")
 	}
 
+	// 锁定检查在密码校验之前：锁定期内不做真实校验，字典攻击拿不到
+	// "这个密码对不对"的信号。仍然跑一次 dummy argon2，保持与
+	// "账号不存在"相同的耗时。
+	if _, locked, err := s.loginLocked(ctx, email); err != nil {
+		return nil, err
+	} else if locked {
+		_, _ = auth.VerifyPassword(s.dummyHash, in.Password)
+		return nil, errTooManyAttempts()
+	}
+
 	var (
 		tenant *Tenant
 		user   *User
@@ -226,16 +238,17 @@ func (s *Service) Login(ctx context.Context, in LoginInput, meta RequestMeta) (*
 	// 命中与不命中走同样次数的 argon2：返回文案相同还不够，耗时也必须相同。
 	if tenant == nil || user == nil {
 		_, _ = auth.VerifyPassword(s.dummyHash, in.Password)
-		return nil, errInvalidCredentials()
+		return nil, s.loginFailureResult(ctx, email)
 	}
 	ok, verifyErr := auth.VerifyPassword(user.PasswordHash, in.Password)
 	if verifyErr != nil {
 		// 库里的哈希格式非法属于数据事故，对外仍然是"凭证错误"，原因只进日志。
+		// 不计数：存储故障不该把用户锁在门外。
 		logger.FromContext(ctx).Error("identity: 存储的密码哈希非法", zap.String("user_id", user.ID.String()), zap.Error(verifyErr))
 		return nil, errInvalidCredentials()
 	}
 	if !ok {
-		return nil, errInvalidCredentials()
+		return nil, s.loginFailureResult(ctx, email)
 	}
 	if user.Status != "active" {
 		return nil, apperr.Forbidden("该账号已被停用")
@@ -265,6 +278,10 @@ func (s *Service) Login(ctx context.Context, in LoginInput, meta RequestMeta) (*
 			Role: tenantctx.Role(m.Role),
 		}
 		if session, err = s.issueSession(ctx, tx, sub, uuid.Nil, meta); err != nil {
+			return err
+		}
+		// 成功登录清零失败计数：与登录同一个事务，提交即一致。
+		if err := s.repo.ClearLoginFailures(ctx, tx, email); err != nil {
 			return err
 		}
 		return s.audit(ctx, tx, tenant.ID, &user.ID, "auth.login", "user", user.ID.String(), meta,
@@ -378,11 +395,7 @@ func (s *Service) Me(ctx context.Context) (*Profile, error) {
 		if err != nil {
 			return err
 		}
-		profile = &Profile{
-			UserID: sub.UserID, Email: sub.Email, DisplayName: sub.DisplayName,
-			TenantID: sub.TenantID, TenantSlug: sub.TenantSlug, TenantName: sub.TenantName,
-			Role: string(sub.Role),
-		}
+		profile = profileFromSubject(sub)
 		return nil
 	})
 	if err != nil {

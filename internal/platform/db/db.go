@@ -1,8 +1,11 @@
 // Package db 是服务访问 PostgreSQL 的唯一入口。
 //
 // 刻意不暴露 *pgxpool.Pool：一旦业务代码能拿到裸池，就会有人绕过事务直接查表，
-// 租户上下文随之丢失，RLS 变成摆设。对外只有两个方法：
+// 租户上下文随之丢失，RLS 变成摆设。对外只有四个方法：
 //   - WithinTenant：建立租户上下文后执行，受 RLS 约束；
+//   - WithinUser：额外设置"我是谁"，只用于"我的租户列表"这类跨租户但只限
+//     本人的读路径（memberships 的自读策略）；
+//   - WithinTenantID：凭据已证明租户归属的内部事务；
 //   - WithTx：登录、刷新这类"还不知道租户是谁"的操作，只能碰无 RLS 的表。
 //
 // 上下文用 set_config(..., true) 设在事务内：事务结束自动失效，
@@ -70,7 +73,7 @@ func (d *DB) Ping(ctx context.Context) error {
 // WithTx 用于租户上下文建立之前必须完成的查询（按 slug 找租户、按邮箱找用户、
 // 按摘要找刷新令牌）。调用方只能访问无 RLS 的表，这一点由表设计保证。
 func (d *DB) WithTx(ctx context.Context, fn func(context.Context, pgx.Tx) error) error {
-	return d.inTx(ctx, fn, uuid.Nil)
+	return d.inTx(ctx, fn, uuid.Nil, uuid.Nil)
 }
 
 // WithinTenant 在事务内设置 app.tenant_id 后执行 fn。
@@ -80,7 +83,20 @@ func (d *DB) WithinTenant(ctx context.Context, fn func(context.Context, pgx.Tx) 
 	if !ok {
 		return apperr.Internal(errors.New("db: 未设置 tenantctx"))
 	}
-	return d.inTx(ctx, fn, t.ID)
+	return d.inTx(ctx, fn, t.ID, uuid.Nil)
+}
+
+// WithinUser 在事务内设置 app.user_id（"我是谁"），用于跨租户但只限本人的
+// 读路径，例如"我的租户列表"。
+//
+// 它刻意不设置 app.tenant_id：memberships 上的 self_membership_read 策略只放行
+// user_id 等于本人的行，其余受租户策略约束的表在这个上下文里读不到任何数据。
+// userID 必须来自 access token 的 subject，绝不能来自请求参数。
+func (d *DB) WithinUser(ctx context.Context, userID uuid.UUID, fn func(context.Context, pgx.Tx) error) error {
+	if userID == uuid.Nil {
+		return apperr.Internal(errors.New("db: 用户 ID 不能为空"))
+	}
+	return d.inTx(ctx, fn, uuid.Nil, userID)
 }
 
 // WithinTenantID 用于"凭据本身已经证明租户归属"的内部事务：
@@ -93,10 +109,10 @@ func (d *DB) WithinTenantID(ctx context.Context, tenantID uuid.UUID, fn func(con
 	if tenantID == uuid.Nil {
 		return apperr.Internal(errors.New("db: 租户 ID 不能为空"))
 	}
-	return d.inTx(ctx, fn, tenantID)
+	return d.inTx(ctx, fn, tenantID, uuid.Nil)
 }
 
-func (d *DB) inTx(ctx context.Context, fn func(context.Context, pgx.Tx) error, tenantID uuid.UUID) error {
+func (d *DB) inTx(ctx context.Context, fn func(context.Context, pgx.Tx) error, tenantID, userID uuid.UUID) error {
 	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("db: 开启事务失败: %w", err)
@@ -107,6 +123,11 @@ func (d *DB) inTx(ctx context.Context, fn func(context.Context, pgx.Tx) error, t
 	if tenantID != uuid.Nil {
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID.String()); err != nil {
 			return fmt.Errorf("db: 设置租户上下文失败: %w", err)
+		}
+	}
+	if userID != uuid.Nil {
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.user_id', $1, true)", userID.String()); err != nil {
+			return fmt.Errorf("db: 设置用户上下文失败: %w", err)
 		}
 	}
 

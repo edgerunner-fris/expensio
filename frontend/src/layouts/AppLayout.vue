@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  ArrowDown,
   Bell,
   Checked,
   CreditCard,
   DataAnalysis,
+  Document,
   Files,
   Odometer,
   User,
   Wallet,
 } from '@element-plus/icons-vue'
+import { apiMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
 import { roleLabel } from '@/utils/format'
@@ -21,8 +24,12 @@ const router = useRouter()
 const auth = useAuthStore()
 const notifications = useNotificationStore()
 
+const switching = ref(false)
+
 onMounted(() => {
   void notifications.refreshUnread()
+  // 租户列表失败不阻塞布局：顶部退化为只显示当前租户名。
+  void auth.loadTenants().catch(() => undefined)
 })
 
 // 离开通知页时刷新未读数：通知页内的标记已读会直接更新 store。
@@ -42,6 +49,34 @@ async function handleLogout(): Promise<void> {
   await auth.logout()
   ElMessage.success('已退出登录')
   await router.push({ name: 'login' })
+}
+
+async function handleUserCommand(command: string): Promise<void> {
+  if (command === 'settings') {
+    await router.push('/settings')
+    return
+  }
+  await handleLogout()
+}
+
+function canSwitch(t: { status: string; tenant_status: string }): boolean {
+  return t.status === 'active' && t.tenant_status === 'active'
+}
+
+async function handleSwitchTenant(tenantId: string): Promise<void> {
+  if (switching.value) return
+  switching.value = true
+  try {
+    await auth.switchTenant(tenantId)
+    // 停在当前页面会让旧租户的数据留在屏幕上；回到费用单重新拉取。
+    await router.push('/expenses')
+    await notifications.refreshUnread()
+    ElMessage.success(`已切换到 ${auth.profile?.tenant_name ?? ''}`)
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+  } finally {
+    switching.value = false
+  }
 }
 </script>
 
@@ -89,13 +124,43 @@ async function handleLogout(): Promise<void> {
           <el-icon><User /></el-icon>
           <span>成员</span>
         </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin" index="/audit-logs">
+          <el-icon><Document /></el-icon>
+          <span>审计日志</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 
     <el-container>
       <el-header class="app-header">
         <div class="tenant">
-          <span class="tenant-name">{{ auth.profile?.tenant_name }}</span>
+          <el-dropdown
+            v-if="auth.tenants.length > 1"
+            trigger="click"
+            :disabled="switching"
+            @command="handleSwitchTenant"
+          >
+            <span class="tenant-trigger">
+              <span class="tenant-name">{{ auth.profile?.tenant_name }}</span>
+              <el-icon :size="12"><ArrowDown /></el-icon>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="t in auth.tenants"
+                  :key="t.tenant_id"
+                  :command="t.tenant_id"
+                  :disabled="t.current || !canSwitch(t)"
+                >
+                  <span class="tenant-option">
+                    <span>{{ t.name }}</span>
+                    <el-tag size="small" effect="plain" type="info">{{ roleLabel(t.role) }}</el-tag>
+                  </span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <span v-else class="tenant-name">{{ auth.profile?.tenant_name }}</span>
           <el-tag size="small" effect="plain">{{ roleLabel(auth.profile?.role ?? '') }}</el-tag>
         </div>
         <div class="header-actions">
@@ -105,14 +170,15 @@ async function handleLogout(): Promise<void> {
             </el-button>
           </el-badge>
 
-          <el-dropdown trigger="click" @command="handleLogout">
+          <el-dropdown trigger="click" @command="handleUserCommand">
             <span class="user-trigger">
               <el-avatar :size="28">{{ auth.profile?.display_name?.slice(0, 1) }}</el-avatar>
               <span class="user-name">{{ auth.profile?.display_name }}</span>
             </span>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                <el-dropdown-item command="settings">账号设置</el-dropdown-item>
+                <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -120,7 +186,9 @@ async function handleLogout(): Promise<void> {
       </el-header>
 
       <el-main class="app-main">
-        <router-view />
+        <!-- 切换租户后强制重建页面：停留在同一路径时 push 不会重新挂载，
+             旧租户的列表数据就会留在屏幕上。 -->
+        <router-view :key="auth.profile?.tenant_id" />
       </el-main>
     </el-container>
   </el-container>
@@ -201,6 +269,21 @@ async function handleLogout(): Promise<void> {
 .tenant-name {
   font-weight: 600;
   font-size: 14px;
+}
+
+.tenant-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  outline: none;
+}
+
+.tenant-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
 }
 
 .header-actions {
