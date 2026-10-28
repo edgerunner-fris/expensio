@@ -178,6 +178,7 @@ docs/           架构、部署、进度与 ADR
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 当前真实结构与边界
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) —— 本地与 Helm 部署
+- [docs/EXTERNAL_VERIFICATION.md](docs/EXTERNAL_VERIFICATION.md) —— 云上验证顺序、证据模板与常见失败
 - [docs/PROGRESS.md](docs/PROGRESS.md) —— 里程碑验收记录与风险清单
 - [docs/INTERVIEW.md](docs/INTERVIEW.md) —— 项目讲解、取舍与高频追问
 - [api/openapi.yaml](api/openapi.yaml) —— HTTP 契约（与路由双向锁定）

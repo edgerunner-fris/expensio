@@ -2971,7 +2971,8 @@ PostgreSQL 私有 CA 渲染（`database.tlsCA=true`、`sslmode=verify-full`，�
 ## 下一步
 
 项目的代码、文档与本地/集群（k3d）验收已收口。M20 之后剩下的都是需要外部
-资源的验证工作，继续做必须提供相应环境：
+资源的验证工作，继续做必须提供相应环境。执行顺序、证据模板与常见失败见
+[EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
 1. 托管云（EKS/AKS/GKE）：按 `docs/DEPLOYMENT.md` 的对照表准备依赖与
    Secret，跑 `deploy/cluster/acceptance/smoke.sh` 的断言，记录各 CNI 的

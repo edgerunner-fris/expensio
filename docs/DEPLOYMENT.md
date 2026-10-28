@@ -438,10 +438,15 @@ M20 之前客户端只支持明文 PLAINTEXT，托管 Kafka 接不上。现在
 # 3) 用托管依赖的地址覆盖 values（不要提交到仓库）
 helm upgrade --install expensio deploy/helm/expensio \
   -n expensio --create-namespace -f my-values.yaml --wait --timeout 15m
-# 4) 复用验收脚本的断言（把 deps 相关的检查跳过）
+# 4) 复用验收脚本的断言；托管依赖没有命名空间内的 postgres/kafka Pod，
+#    必须加 MANAGED_DEPS=1（迁移与主题由功能链路证明）
 NAMESPACE=expensio INGRESS_HOST=expensio.example.com \
-  BASE_URL=https://expensio.example.com bash deploy/cluster/acceptance/smoke.sh
+  BASE_URL=https://expensio.example.com MANAGED_DEPS=1 \
+  bash deploy/cluster/acceptance/smoke.sh
 ```
+
+逐项验证、证据模板与常见失败见
+[EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
 > 待验证：以上流程没有在真实 EKS/AKS/GKE 上执行过；本仓库没有云账号与
 > 集群凭据。已完成的验证是 chart 渲染、kubeconform schema 校验与 k3d 上的

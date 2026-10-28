@@ -10,6 +10,11 @@
 #   5. RBAC 与容器安全上下文（SA 无权限、不挂载令牌、只读根文件系统）。
 #
 # 依赖：kubectl、curl、jq；入口地址默认是 k3d 映射到宿主 8080 的负载均衡器。
+#
+# 托管依赖（RDS / ElastiCache / MSK 等）没有命名空间内的 postgres / kafka Pod：
+#   MANAGED_DEPS=1 ... bash deploy/cluster/acceptance/smoke.sh
+# 会跳过两条结构性检查，迁移与主题由功能链路证明；需要直连证据时按
+# docs/EXTERNAL_VERIFICATION.md 单独渲染迁移/主题 Hook Job。
 set -euo pipefail
 
 NS=${NAMESPACE:-expensio}
@@ -17,6 +22,9 @@ INGRESS_HOST=${INGRESS_HOST:-expensio.test}
 BASE=${BASE_URL:-http://127.0.0.1:8080}
 KUBECTL=${KUBECTL:-kubectl}
 RELEASE=${RELEASE:-expensio}
+# 托管依赖（RDS / ElastiCache / MSK 等）没有 deploy/postgres、deploy/kafka
+# 可供 exec，结构性断言改为"功能链路 + 单独渲染 Hook Job"。本地 k3d 保持 0。
+MANAGED_DEPS=${MANAGED_DEPS:-0}
 
 log() { printf '\n== %s\n' "$*"; }
 fail() { printf 'SMOKE FAIL: %s\n' "$*" >&2; exit 1; }
@@ -53,25 +61,36 @@ for verb in list get; do
   [ "$can" = "no" ] || fail "ServiceAccount 不应能 $verb pods"
 done
 
-log "迁移 Hook：五个库都应存在 schema_migrations"
-for db in identity_db expense_db billing_db report_db notification_db; do
-  n=$($KUBECTL -n "$NS" exec deploy/postgres -- \
-    psql -U postgres -d "$db" -tAc 'select count(*) from app.schema_migrations')
-  echo "$db versions=$n"
-  [ "${n:-0}" -gt 0 ] || fail "$db 没有迁移记录"
-done
+if [ "$MANAGED_DEPS" = "1" ]; then
+  # 托管数据库没有命名空间内的 deploy/postgres 可 exec；迁移是否真正执行，
+  # 由后面的注册/建单/报表链路证明。需要结构性证据时用
+  # docs/EXTERNAL_VERIFICATION.md 里的"单独渲染 Hook Job"步骤。
+  log "迁移 Hook：MANAGED_DEPS=1，跳过直连检查（功能链路会验证迁移）"
+else
+  log "迁移 Hook：五个库都应存在 schema_migrations"
+  for db in identity_db expense_db billing_db report_db notification_db; do
+    n=$($KUBECTL -n "$NS" exec deploy/postgres -- \
+      psql -U postgres -d "$db" -tAc 'select count(*) from app.schema_migrations')
+    echo "$db versions=$n"
+    [ "${n:-0}" -gt 0 ] || fail "$db 没有迁移记录"
+  done
+fi
 
-log "主题 Hook：四个主题都应已创建"
-topics=$($KUBECTL -n "$NS" exec deploy/kafka -- \
-  /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list)
-echo "$topics"
-for topic in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
-             expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
-  echo "$topics" | grep -qx "$topic" || fail "缺少主题 $topic"
-done
-jobs=$($KUBECTL -n "$NS" get jobs --no-headers 2>/dev/null | wc -l)
-echo "剩余 Job 数=$jobs（hook-succeeded 会删除成功的 Job）"
-[ "$jobs" -eq 0 ] || fail "仍有未清理的 Hook Job"
+if [ "$MANAGED_DEPS" = "1" ]; then
+  log "主题 Hook：MANAGED_DEPS=1，跳过直连检查（事件链路会验证主题）"
+else
+  log "主题 Hook：四个主题都应已创建"
+  topics=$($KUBECTL -n "$NS" exec deploy/kafka -- \
+    /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list)
+  echo "$topics"
+  for topic in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
+               expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
+    echo "$topics" | grep -qx "$topic" || fail "缺少主题 $topic"
+  done
+  jobs=$($KUBECTL -n "$NS" get jobs --no-headers 2>/dev/null | wc -l)
+  echo "剩余 Job 数=$jobs（hook-succeeded 会删除成功的 Job）"
+  [ "$jobs" -eq 0 ] || fail "仍有未清理的 Hook Job"
+fi
 
 log "Ingress"
 $KUBECTL -n "$NS" get ingress "$RELEASE"

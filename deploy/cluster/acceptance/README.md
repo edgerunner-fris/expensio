@@ -22,7 +22,7 @@
 | --- | --- |
 | `deps.yaml` | 单节点 PostgreSQL / Redis / Kafka / MinIO（**仅验收用**，emptyDir，无备份/TLS） |
 | `values.yaml` | 指向集群内依赖、Traefik、关闭 TLS 与邮件、主题单副本 |
-| `smoke.sh` | 安装后的验收断言，失败即非零退出 |
+| `smoke.sh` | 安装后的验收断言，失败即非零退出；托管依赖加 `MANAGED_DEPS=1` 跳过两条直连检查 |
 
 ## 前提
 
