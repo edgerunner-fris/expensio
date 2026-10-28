@@ -60,6 +60,9 @@ redis:
 
 kafka:
   brokers: kafka.example.internal:9092
+  # 初始化 topic 的 Kafka CLI 镜像。国内/离线集群拉不到 Docker Hub 时，
+  # 换成镜像仓库里的同一版本副本；CLI 必须与 broker 主版本兼容。
+  cliImage: apache/kafka:3.9.2
   # 托管 Kafka 几乎都要求 TLS；本地 compose 为 false。
   tls: false
   # 私有 CA（自建集群、企业 PKI）。公有 CA 签发的托管服务保持 false。

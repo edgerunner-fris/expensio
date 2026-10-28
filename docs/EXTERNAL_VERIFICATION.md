@@ -31,8 +31,20 @@ helm version
 | TLS 自动签发 | cert-manager CRD 与可用 Issuer（可选） | Certificate 不进入 `Ready=True` |
 | HPA | metrics-server 的 `v1beta1.metrics.k8s.io` 为 `True` | HPA 显示 `<unknown>/70%` |
 | 镜像拉取 | 节点能访问镜像仓库；私有仓库需 `imagePullSecrets` | `ImagePullBackOff` |
-| NetworkPolicy | CNI 真正执行策略（Calico / VPC CNI / Azure NPM 等） | smoke 的拒绝断言会失败 |
+| NetworkPolicy | CNI 真正执行策略（Calico / VPC CNI / Azure NPM 等） | smoke 的拒绝断言会失败；ACK 的 Terway 默认关闭策略 |
 | 托管依赖 | PostgreSQL / Redis / Kafka / 对象存储已创建并可连 | Pod 启动或 readiness 失败 |
+
+阿里云 ACK 的 Terway 默认 `disable_network_policy=true`：NetworkPolicy 对象
+能创建，但不会被 CNI 执行。先确认：
+
+```bash
+kubectl -n kube-system get cm eni-config \
+  -o jsonpath='{.data.disable_network_policy}{"\n"}'
+```
+
+输出 `true` 时，需要集群管理员在 ACK 控制台的 Terway addon 里开启网络策略
+（或改 `disable_network_policy=false` 并重启 `terway-eniip`），否则 smoke 会在
+NetworkPolicy 拒绝断言处失败。这是环境结论，不是 chart 或脚本 bug。
 
 EKS 的 metrics-server 需要单独安装 managed add-on；AKS/GKE 默认自带，但仍要
 用上面的 `apiservice` 命令确认，而不是看控制台。
@@ -51,6 +63,9 @@ database:
 
 kafka:
   brokers: kafka.internal:9092
+  # 主题 Hook 的 Kafka CLI 镜像。离线/私有仓库环境改成同版本的仓库副本；
+  # CLI 必须与 broker 主版本兼容。默认 apache/kafka:3.9.2。
+  cliImage: apache/kafka:3.9.2
   tls: true
   tlsCA: false
   saslMechanism: scram-sha-512   # MSK；Event Hubs / Confluent 用 plain
@@ -144,7 +159,9 @@ bash deploy/cluster/acceptance/smoke.sh
 
 最后一行必须是 `SMOKE_RESULT: PASS`。任何一条失败都会打印
 `SMOKE FAIL: <原因>`。在托管依赖下，迁移与主题的存在由这条功能链路间接
-证明：没有迁移就无法注册，没有主题就无法产生报表聚合。
+证明：没有迁移就无法注册，没有主题就无法产生报表聚合。平台明确不执行
+NetworkPolicy 时，按第 0 节先确认原因；在记录里写“部分通过”并列出未通过的
+断言，不能把失败改写成通过。
 
 如果 CNI 不支持 NetworkPolicy，脚本会在拒绝断言处失败。这是真实结论，
 处理方式是给集群启用策略引擎，或在记录中明确标注该环境无法验证这一项。
@@ -210,8 +227,9 @@ kubectl -n expensio get hpa,pods -w
 扩容/缩容期间没有 5xx 尖峰。若 HPA 一直显示 `<unknown>`，先回到第 0 节确认
 metrics-server。
 
-k3d 彩排已用这组参数实测 identity 的 1→3→1（见 `docs/PROGRESS.md` M20）；
-云上需要额外关注节点扩容延迟、事件消费再平衡与连接排空。
+k3d 与阿里云 ACK 已用这组参数实测 identity 的 1→3→1（见
+`docs/PROGRESS.md` M20）；云上还需要额外关注节点扩容延迟、事件消费再平衡与
+连接排空。
 
 ### 5.3 Kafka 供应商差异
 
@@ -362,3 +380,57 @@ expensio-gateway   Deployment/gateway    63%/60%   2       20      4
 - 不要把 `my-values.yaml`、CA 文件、口令提交到仓库；
 - 不要在验证环境使用生产域名与生产 Secret；
 - 不要把「渲染通过」写成「云上验证通过」。
+
+## 9. 已执行记录：阿里云 ACK 阶段 A（2026-10-29）
+
+这一阶段验证的是**平台适配**，不是托管依赖：集群是阿里云 ACK 托管集群
+（ID `c772e4d3c99764bdf906ce05a63e559e0`，cn-hangzhou，4 个 Lifsea 节点，
+K8s `v1.37.1-aliyun.1`，Terway ENIMultiIP，ingress-nginx v1.14.5 公网 NLB，
+metrics-server v0.3.16）。PostgreSQL / Redis / Kafka / MinIO 仍是
+`deploy/cluster/acceptance/deps.yaml` 渲染出的临时单副本 Pod；因此这一节
+不能替代第 1–5 节对 RDS / Tair / ApsaraMQ / OSS、TLS 与备份的验证。第 8 节
+“不要 apply deps.yaml”仍适用于生产验证；这里是有意为之的阶段 A 例外，
+复核后应删除临时依赖。
+
+执行方式（完整输出见 `docs/PROGRESS.md` 的「阿里云 ACK 阶段 A」）：
+
+```bash
+# 1) ACR 镜像 + 命名空间级 pull secret（凭据不写入仓库）
+# 2) 临时依赖
+kubectl apply -f rendered-deps.yaml
+# 3) chart 0.3.2；ACK values 把 kafka.cliImage 指向 ACR 的同版本镜像
+helm upgrade --install expensio deploy/helm/expensio -n expensio \
+  -f ack-values.yaml --wait --timeout 20m
+# 4) NLB 地址 + Host 头，不依赖域名解析
+NAMESPACE=expensio INGRESS_HOST=expensio.test \
+  BASE_URL=http://<nlb-hostname> \
+  BUSYBOX_IMAGE=registry.cn-hangzhou.aliyuncs.com/google_containers/busybox:1.27 \
+  bash deploy/cluster/acceptance/smoke.sh
+```
+
+结果：
+
+```text
+helm STATUS: deployed（7 个 Deployment；gateway/web 各 2 副本）
+五个库 schema_migrations 版本数=1；四个业务主题已创建；成功 Hook Job 已清理
+GET /healthz -> 200
+注册→邀请→接受→费用→审批→Kafka→报表：通过
+HPA identity：1→3（约 60s，CPU 908%/50%）→1（停压后约 2m10s）
+NetworkPolicy：default -> identity 未被拒绝（SMOKE FAIL）
+```
+
+NetworkPolicy 失败已定位为平台开关，而不是 chart 缺陷：
+
+```text
+$ kubectl -n kube-system get cm eni-config -o jsonpath='{.data.disable_network_policy}'
+true
+```
+
+本次没有修改共享 CNI 配置，所以 ACK 的 NetworkPolicy 仍是**未验证**项；
+k3d 上三种放行/拒绝断言已通过。要收口这一项，需要管理员开启 Terway 网络
+策略后重跑同一份 smoke。
+
+阶段 A 还暴露并修复了一个 chart 缺陷：主题 Hook 的 Kafka CLI 镜像原先硬编码
+`apache/kafka:3.9.2`，节点访问 Docker Hub 超时导致 `pre-install` Hook
+`ImagePullBackOff`、Helm 停在 `pending-install`。0.3.2 起可用
+`kafka.cliImage` 指向 ACR 镜像，默认值不变。

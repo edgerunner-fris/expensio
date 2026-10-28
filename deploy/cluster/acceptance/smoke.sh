@@ -25,6 +25,8 @@ RELEASE=${RELEASE:-expensio}
 # 托管依赖（RDS / ElastiCache / MSK 等）没有 deploy/postgres、deploy/kafka
 # 可供 exec，结构性断言改为"功能链路 + 单独渲染 Hook Job"。本地 k3d 保持 0。
 MANAGED_DEPS=${MANAGED_DEPS:-0}
+# 国内/离线集群常拉不到 Docker Hub；允许换成 ACR 等镜像仓库里的 busybox。
+BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-busybox:1.36}
 
 log() { printf '\n== %s\n' "$*"; }
 fail() { printf 'SMOKE FAIL: %s\n' "$*" >&2; exit 1; }
@@ -158,7 +160,7 @@ unlabeled="nettest-unlabeled-$suffix"
 labeled="nettest-labeled-$suffix"
 
 log "NetworkPolicy：跨命名空间访问必须被拒绝"
-$KUBECTL -n default run "$other" --image=busybox:1.36 --restart=Never \
+$KUBECTL -n default run "$other" --image="$BUSYBOX_IMAGE" --restart=Never \
   --command -- sleep 300 >/dev/null
 $KUBECTL -n default wait --for=condition=Ready "pod/$other" --timeout=120s >/dev/null
 if $KUBECTL -n default exec "$other" -- \
@@ -168,7 +170,7 @@ fi
 echo "default -> identity: blocked"
 
 log "NetworkPolicy：同命名空间但未打 release 标签的 Pod 也必须被拒绝"
-$KUBECTL -n "$NS" run "$unlabeled" --image=busybox:1.36 --restart=Never \
+$KUBECTL -n "$NS" run "$unlabeled" --image="$BUSYBOX_IMAGE" --restart=Never \
   --command -- sleep 300 >/dev/null
 $KUBECTL -n "$NS" wait --for=condition=Ready "pod/$unlabeled" --timeout=120s >/dev/null
 if $KUBECTL -n "$NS" exec "$unlabeled" -- \
@@ -178,7 +180,7 @@ fi
 echo "unlabeled -> identity: blocked"
 
 log "NetworkPolicy：带同 release 标签的 Pod 放行（同一策略的另一半）"
-$KUBECTL -n "$NS" run "$labeled" --image=busybox:1.36 --restart=Never \
+$KUBECTL -n "$NS" run "$labeled" --image="$BUSYBOX_IMAGE" --restart=Never \
   --labels 'app.kubernetes.io/name=expensio,app.kubernetes.io/instance=expensio,app.kubernetes.io/part-of=expensio' \
   --command -- sleep 300 >/dev/null
 $KUBECTL -n "$NS" wait --for=condition=Ready "pod/$labeled" --timeout=120s >/dev/null

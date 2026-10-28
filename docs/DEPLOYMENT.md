@@ -6,10 +6,11 @@
 迁移/建主题 Hook 实际执行、Ingress 可达、NetworkPolicy 放行与拒绝符合预期、
 ServiceAccount 无 API 权限、事件链路在集群内跑通。验收清单与 smoke 脚本
 见 [`deploy/cluster/acceptance/`](../deploy/cluster/acceptance/)，实测输出见
-`docs/PROGRESS.md` 的 M14。HPA 与 cert-manager 只做了模板渲染与 schema
-校验，托管云集群、ACME 签发与真实负载下的扩缩容仍未验证，见文末
-「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险清单里，不在这里
-含糊带过。
+`docs/PROGRESS.md` 的 M14。阿里云 ACK 阶段 A 另验证了 ACR 镜像、公网 NLB
+Ingress、临时依赖下的安装与事件链路，以及 HPA 的真实扩缩容；ACK 的 Terway
+NetworkPolicy、托管 RDS/Tair/ApsaraMQ/OSS、cert-manager ACME 与云上节点扩容
+仍未验证，见文末「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险
+清单里，不在这里含糊带过。
 
 ## 本地整栈（Docker Compose）
 
@@ -172,6 +173,9 @@ redis:
 
 kafka:
   brokers: kafka.internal:9092
+  # 主题 Hook 的 Kafka CLI 镜像。离线/私有仓库环境改成同版本的镜像仓库副本；
+  # 例如阿里云 ACK 用 ACR 同步的 kafka:3.9.2。CLI 必须与 broker 主版本兼容。
+  cliImage: apache/kafka:3.9.2
   # 托管 Kafka：TLS 必开；SASL 机制按供应商选择
   # （MSK 常用 scram-sha-512，Event Hubs / Confluent Cloud 用 plain）。
   tls: true
@@ -450,9 +454,33 @@ NAMESPACE=expensio INGRESS_HOST=expensio.example.com \
 逐项验证、证据模板与常见失败见
 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-> 待验证：以上流程没有在真实 EKS/AKS/GKE 上执行过；本仓库没有云账号与
-> 集群凭据。已完成的验证是 chart 渲染、kubeconform schema 校验与 k3d 上的
-> chart 行为验收，不能替代云环境验证。
+> 以上 EKS/AKS/GKE 流程没有在真实集群上执行过；本仓库只有阿里云 ACK 阶段 A
+> 的平台适配实测（见下节）。chart 渲染、kubeconform 与 k3d 验收不能替代
+> 托管依赖验证。
+
+### 5. 阿里云 ACK（阶段 A 实测）
+
+2026-10-29 在一个 ACK 托管集群（4 节点，K8s `v1.37.1-aliyun.1`，Terway
+ENIMultiIP，ingress-nginx + 公网 NLB，metrics-server）上完成平台适配验收。
+这一阶段使用 `deploy/cluster/acceptance/deps.yaml` 的临时单副本依赖，
+**没有**接入 RDS / Tair / ApsaraMQ / OSS，因此不能据此宣称托管依赖已验证。
+
+实际使用的差异：
+
+| 项 | ACK 上的做法 |
+| --- | --- |
+| 镜像 | 7 个应用镜像与管理镜像推到 ACR 个人版，tag 用提交 SHA；依赖镜像也同步到 ACR，避开 Docker Hub |
+| 拉取凭据 | ACK 的 ACR 免密组件未实际注入；创建命名空间级 `acr-pull` Secret，并写入 values 的 `imagePullSecrets` |
+| Kafka CLI | Docker Hub 超时导致主题 Hook `ImagePullBackOff`；chart 0.3.2 起用 `kafka.cliImage` 指向 ACR 的 `kafka:3.9.2` |
+| 入口 | 没有域名：用 `nginx-ingress-lb` 的 NLB 主机名 + `Host: expensio.test` 访问；TLS/ACME 未配置 |
+| 网络策略 | Terway 默认 `eni-config.disable_network_policy=true`，NetworkPolicy 对象存在但不执行；本次未改共享 CNI，smoke 的拒绝断言未通过 |
+| 验收依赖 | `deps.yaml` 仅用于阶段 A；应用安装用 chart 0.3.2，`MANAGED_DEPS=0` 检查迁移与主题 |
+| HPA | identity 开启 `min=1/max=3`、CPU 50%，实测 1→3（约 60s）→1（停压后约 2m10s） |
+
+要在 ACK 上完成 NetworkPolicy 验证，先在控制台或 addon 配置中开启 Terway
+网络策略（`disable_network_policy=false` 并重启 `terway-eniip`），再重跑
+`deploy/cluster/acceptance/smoke.sh`。不要直接用 `kubectl patch` 改共享
+CNI 配置而不评估对现有工作负载的影响。
 
 ## 发布流程（tag → 镜像 → Helm）
 
@@ -481,9 +509,10 @@ helm -n expensio rollback expensio <REVISION>
 迁移镜像随 release 一起回退，但**已执行的迁移不会自动回退**，
 破坏性变更必须写成向前兼容的两步迁移。
 
-> 待验证：deploy 段在真实托管集群上没有执行过（本仓库没有目标集群与
-> `KUBE_CONFIG`）；命令形态与 CI 里 k3d 验收的 `helm upgrade --install`
-> 相同。首次接入真实集群时按本文"集群验收"小节先跑一遍。
+> 待验证：CD 的 deploy 段没有在真实托管集群上执行过（集群凭据未接入 CI）；
+> ACK 阶段 A 是手工 `helm upgrade --install`，不是这条流水线。命令形态与
+> CI 里 k3d 验收的 `helm upgrade --install` 相同；首次接入真实集群时按本文
+> “集群验收”小节先跑一遍。
 
 ## 集群验收（可复现）
 
@@ -544,12 +573,13 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
 
 ## 已知限制
 
-- **只在 k3d 上验证过**：验收集群是 k3d v5.8.3（k3s v1.31.5，双节点）加
-  单节点 PostgreSQL/Redis/Kafka。托管云（EKS/AKS/GKE）、各 CNI 的
-  NetworkPolicy 实现、PDB 驱逐演练均未验证；`deploy/cluster/acceptance/`
-  提供了可复用的断言，迁移到新环境时应先跑一遍。
-- **云上 HPA 未验证**：k3d 的 metrics-server 下已实测 identity 的扩容与
-  缩容，但云上节点扩容延迟、扩缩容期间的事件消费再平衡与连接排空仍未覆盖。
+- **云上验证只做到 ACK 阶段 A**：k3d v5.8.3（k3s v1.31.5，双节点）与阿里云
+  ACK（4 节点，K8s 1.37，临时单副本依赖）已验证 chart 部署、Ingress、事件
+  链路与 HPA；ACK 的 RDS / Tair / ApsaraMQ / OSS、Terway NetworkPolicy、
+  cert-manager ACME、PDB 驱逐与多可用区仍未验证。
+- **云上 HPA 的节点扩容未验证**：k3d 与 ACK 的 metrics-server 下都已实测
+  identity 的 1→3→1；节点扩容延迟、扩缩容期间的事件消费再平衡与连接排空
+  仍未覆盖。
 - **cert-manager 未走完整 ACME**：注解与 Issuer 二选一、缺少 TLS 时模板
   直接失败；但签发与续期依赖真实域名，未在 CI 中执行。
 - **Kafka SASL 只对本地真实 broker 验证过**：testcontainers 启的

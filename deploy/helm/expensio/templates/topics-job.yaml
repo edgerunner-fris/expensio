@@ -31,7 +31,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: topics
-          image: "apache/kafka:3.9.2"
+          image: {{ .Values.kafka.cliImage | quote }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
           {{- if or .Values.kafka.tls .Values.kafka.saslMechanism }}
           env:

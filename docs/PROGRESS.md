@@ -2820,6 +2820,7 @@ Ingress 只声明 `tls.secretName`，没有证书签发的接线。M20 补上代
 | 测试 | `internal/platform/db/tls_integration_test.go` | `db.Open` 走 `verify-full` + 自定义 CA 成功；换一张 CA 必须握手失败 |
 | Chart | `templates/hpa.yaml`、`_helpers.tpl` | `autoscaling/v2` HPA；全局值 + 按服务覆盖；开启后 Deployment 不渲染 `replicas` |
 | Chart | `templates/ingress.yaml` | cert-manager 注解（clusterIssuer 优先），缺少 TLS 或 issuer 时模板失败 |
+| Chart | `templates/topics-job.yaml` | `kafka.cliImage` 可覆盖主题 Hook 的 Kafka CLI 镜像；默认值不变，供 ACR/离线环境使用（0.3.2） |
 | Chart | `values.yaml`、`deployments.yaml`、`migration-job.yaml` | Kafka TLS/SASL/私有 CA 只注入四个 Kafka 服务，口令与 CA 来自 Secret；`database.tlsCA` 把私有 CA 挂给五个数据库服务与迁移 Job，并在迁移 DSN 加 `sslrootcert`；gateway 可选 Redis 口令 |
 | 文档 | `docs/DEPLOYMENT.md` | HPA、cert-manager、EKS/AKS/GKE 依赖与网络对照、迁移顺序 |
 
@@ -2999,24 +3000,121 @@ HPA_SCALE_DOWN_OK
 最终用 chart `0.3.1` 和验收 values 重新安装（不再显式设内存），确认 identity
 实际拿到 `limits.memory=512Mi`，再跑一次 smoke：`SMOKE_RESULT: PASS`。
 
-未执行（需要外部环境）：
+k3d 彩排未覆盖（需要外部环境）：真实云集群的托管依赖、各 CNI 的
+NetworkPolicy 行为、负载均衡器、云上 HPA 的节点扩容延迟与事件消费再平衡、
+cert-manager 的 ACME 签发与续期，以及各云厂商 Kafka/PostgreSQL 端点的差异。
 
-- 真实 EKS/AKS/GKE：托管 PostgreSQL / Redis / Kafka / 对象存储、各 CNI 的
-  NetworkPolicy 行为、负载均衡器；云上 HPA 的节点扩容延迟与事件消费再平衡；
-- cert-manager 的 ACME 签发与续期；
-- 各云厂商 Kafka 端点的认证差异（MSK 的 SCRAM、Event Hubs 的连接串形态）；
-  本地真实 broker 的 SASL/PLAIN + TLS 链路已覆盖；
-- 托管 PostgreSQL 的证书主机名、代理端点与 CA 轮换；本地真实 TLS 实例的
-  `verify-full` 与错误 CA 两个方向已覆盖。
+### 阿里云 ACK 阶段 A（2026-10-29）
+
+在真实的 ACK 托管集群上做平台适配验收，目标是把“能渲染”推进到“能在云端
+部署并跑通”。这一阶段**没有**接入阿里云托管 PostgreSQL / Redis / Kafka /
+OSS：为了先验证 chart、Ingress、ACR、HPA 与平台网络，依赖仍是
+`deploy/cluster/acceptance/deps.yaml` 渲染出的四个单副本 Pod。因此下面的结果
+只证明“应用在 ACK 上可运行”，不能证明托管依赖、备份或高可用。
+
+环境与镜像：
+
+```text
+集群 ID   c772e4d3c99764bdf906ce05a63e559e0（cn-hangzhou）
+节点      4 × Alibaba Cloud Linux Lifsea 3 / containerd 2.1.9
+K8s       server v1.37.1-aliyun.1；本地 kubectl v1.31.0（存在版本偏差，命令可用）
+CNI       Terway v1.17.7，ENIMultiIP；eni-config.disable_network_policy=true
+入口      ingress-nginx（ACK 托管版 v1.14.5），Service nginx-ingress-lb 为公网 NLB
+指标      metrics-server v0.3.16
+应用镜像  ACR 个人版 crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/*:63a3707
+依赖镜像  ACR 同步的 postgres:16.15-alpine / redis:7.4.11-alpine / kafka:3.9.2 / minio:451fe68
+chart     0.3.2
+```
+
+安装与结构性证据：
+
+```text
+$ helm -n expensio status expensio
+STATUS: deployed（revision 2，HPA 开启后）
+
+7 个 Deployment：gateway 2/2、web 2/2，其余 1/1；依赖 Pod 全部 Running
+迁移 Job：五个库 schema_migrations 版本数均为 1
+主题 Job：四个业务主题均已创建，成功 Hook Job 已被清理
+GET /healthz（NLB 地址 + Host: expensio.test）-> 200
+```
+
+smoke 结果（同一份 `deploy/cluster/acceptance/smoke.sh`）：
+
+```text
+Pod 就绪、7 个 Deployment、安全上下文、RBAC、五个库迁移、四个主题、Hook 清理、
+Ingress /healthz、注册→邀请→接受→费用→审批→Kafka→报表：通过
+NetworkPolicy：default -> identity 未被拒绝 -> SMOKE FAIL
+```
+
+失败原因不是 chart 渲染或脚本逻辑，而是 ACK 的 Terway 默认把 NetworkPolicy
+关闭：
+
+```text
+$ kubectl -n kube-system get cm eni-config -o jsonpath='{.data.disable_network_policy}'
+true
+```
+
+ACK 的 Terway 网络策略需要在控制台或 addon 配置中显式开启（把
+`disable_network_policy` 改为 `false` 并重启 `terway-eniip`）。本次没有改动
+共享 CNI 配置，因此 **ACK 上 NetworkPolicy 仍未验证**；k3d 上三种放行/拒绝
+断言已通过，说明 chart 生成的策略符合预期。要完成这一项，需要集群管理员
+授权开启 Terway 策略后再跑一次 smoke。
+
+HPA 实测（identity，`min=1 max=3`，CPU 50%，缩容稳定窗口 60s，压测为两个
+busybox Pod 持续做 argon2id 登录）：
+
+```text
+07:45:53  cpu: 18%/50%   replicas 1
+07:45:54  开始压测
+07:46:54  cpu: 908%/50%  replicas 3；identity Pods 454m/…，分布 .117/.119
+07:49:06  cpu: 2%/50%    replicas 1
+HPA_SCALE_UP_OK
+HPA_SCALE_DOWN_OK
+HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
+```
+
+扩容约 60s、停压后约 2m10s 回落；扩容期间 3 个 identity Pod 均 Ready。
+节点级扩容、事件消费再平衡与连接排空仍未覆盖。
+
+**ACK 暴露并修复的问题：**
+
+1. 主题 Hook 的 Kafka CLI 镜像原先硬编码 `apache/kafka:3.9.2`，ACK 节点访问
+   Docker Hub 超时，`pre-install` Hook 卡在 `ImagePullBackOff`，Helm 停在
+   `pending-install`。chart 0.3.2 新增 `kafka.cliImage`（默认值不变），ACK
+   values 指向 ACR 同步镜像后安装成功。验收脚本的 busybox 也改为可配置，
+   ACK 使用 `registry.cn-hangzhou.aliyuncs.com/google_containers/busybox:1.27`
+   公共镜像，避免把 ACR 凭据复制到其他命名空间。
+2. ACK 的 ACR 免密组件没有实际注入（节点上没有 credential provider
+   DaemonSet/Webhook），首次拉取 `ImagePullBackOff`；改为命名空间级
+   `acr-pull` Secret，应用 Pod 通过 `imagePullSecrets` 继承，验收依赖的
+   `expensio/default` ServiceAccount 也挂载该 Secret。凭据不写入仓库。
+
+仍未执行（需要托管依赖或集群管理员）：
+
+- 阿里云 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS；本次是临时单副本
+  依赖，不能据此宣称托管依赖已验证；
+- ACK Terway NetworkPolicy（默认关闭，本次未改共享 CNI）；
+- cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
+- 云上节点扩容、事件消费再平衡、连接排空、PDB 驱逐与多可用区；
+- 托管 PostgreSQL 的 `verify-full`、Kafka SASL、对象存储生命周期与 PITR/
+  备份恢复。
+
+本轮保留了 ACK 现场便于复核：`expensio` 命名空间、四个临时依赖 Pod、
+`acr-pull` Secret 与 smoke 产生的测试租户都未删除。复核后先
+`helm -n expensio uninstall expensio`，再删除临时依赖清单与命名空间；
+`creds.sh` 只保存在 WSL 本地（mode 600），没有进入仓库。
 
 ### 风险
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云流程未执行 | 未解决 | 没有云账号与集群凭据；chart 渲染与 k3d 行为不能替代云上验证 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 与临时依赖完成安装、全链路 smoke（除 NetworkPolicy）和 HPA 1→3→1；RDS/Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
+| ACK NetworkPolicy 未验证 | 未解决 | Terway `eni-config.disable_network_policy=true`，策略对象已创建但未被 CNI 执行；需管理员开启 Terway 网络策略并重启 addon 后重跑 smoke。k3d 的三种断言已通过 |
+| ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
+| ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
 | 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
-| HPA 未做真实扩缩容 | 已解决（k3d 实测） | identity 在 metrics-server 下实测 1→3→1：CPU 998%/50% 触发扩容约 30s，停压后约 1m40s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（`0.3.1` 起默认 512Mi）。扩缩容期间的事件消费再平衡与连接排空未验证，云上节点扩容行为仍需实测 |
+| HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。扩缩容期间的事件消费再平衡、连接排空与云上节点扩容仍未验证 |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
 | 云厂商 PostgreSQL 证书差异 | 待验证 | 证书主机名、代理端点与 CA 轮换需在目标环境实测 |
@@ -3024,21 +3122,21 @@ HPA_SCALE_DOWN_OK
 
 ## 下一步
 
-项目的代码、文档与本地/集群（k3d）验收已收口。M20 之后剩下的都是需要外部
-资源的验证工作，继续做必须提供相应环境。执行顺序、证据模板与常见失败见
-[EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
+项目的代码、文档、本地/k3d 验收与阿里云 ACK 阶段 A（平台适配）已收口。
+M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
+证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-1. 托管云（EKS/AKS/GKE）：按 `docs/DEPLOYMENT.md` 的对照表准备依赖与
-   Secret，跑 `deploy/cluster/acceptance/smoke.sh` 的断言，记录各 CNI 的
-   NetworkPolicy 差异；
-2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
-3. 云上 HPA：k3d 的 CPU 扩容/缩容已实测，剩下节点扩容延迟、事件消费
+1. 在 ACK 上启用 Terway NetworkPolicy 后重跑 smoke，补齐三种放行/拒绝断言；
+2. 把 ACK 的临时依赖替换为 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS，
+   按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
+3. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
+4. 云上 HPA：CPU 扩容/缩容已在 k3d 与 ACK 实测，剩下节点扩容延迟、事件消费
    再平衡与连接排空；
-4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
+5. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
-5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
+6. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
    的证书主机名、代理端点与 CA 轮换实测；
-6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
+7. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 
 
 

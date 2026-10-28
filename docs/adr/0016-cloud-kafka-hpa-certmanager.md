@@ -14,8 +14,10 @@ M19 收口后，"在本机跑得起来"与"能放到托管云"之间还有四处
 3. chart 只有固定副本数，流量上来只能手工改 values 再滚动发布；
 4. Ingress 只声明 `tls.secretName`，证书要么手工创建，要么永远不生效。
 
-这些都可以在本地完成代码与模板层面，但真实云集群、ACME 签发与扩缩容
-行为需要外部环境，不能假装验证过。
+这些都可以在本地完成代码与模板层面；真实托管依赖、ACME 签发与节点扩容
+需要外部环境，不能假装验证过。2026-10-29 的 ACK 阶段 A 已补上集群部署、
+ACR 镜像、NLB Ingress 与 Pod 级 HPA 实测，但没有补上托管 RDS/Tair/
+ApsaraMQ/OSS、Terway NetworkPolicy 与 ACME。
 
 ## 决策
 
@@ -94,27 +96,37 @@ chart 会导致两个 release 抢同一个名字。Chart 只声明"我需要哪�
 
 没有为三家云各写一套 manifest。Chart 只依赖标准 K8s API，差异通过 values
 注入（依赖地址、Kafka 认证、TLS、Pod CIDR）；`docs/DEPLOYMENT.md` 给出
-EKS/AKS/GKE 的依赖与网络对照表。
+AWS/Azure/GCP 与阿里云 ACK 的依赖与网络对照。主题 Hook 的 Kafka CLI 镜像也
+做成 values（`kafka.cliImage`，0.3.2 起），否则离线/ACR 环境会因拉不到
+Docker Hub 的 `apache/kafka` 卡在 `pending-install`。
 
-不引入 Terraform / Crossplane 的原因：当前没有云账号与集群凭据，写了也
-无法 apply；一份未验证的 IaC 比一份明确标注"待验证"的运维文档更容易误导。
-首次接入真实集群时，按文档顺序跑 `deploy/cluster/acceptance/smoke.sh` 的
-断言，再把实际差异补回文档。
+2026-10-29 的 ACK 阶段 A 实测证明“provider-neutral chart + values”这条路
+可用：ACR 镜像、公网 NLB、Terway CNI 与 metrics-server 都没有要求改模板；
+唯一的结构性缺口是 ACK 默认关闭 NetworkPolicy，以及临时依赖不能替代托管
+RDS/Tair/ApsaraMQ/OSS。
+
+不引入 Terraform / Crossplane 的原因：本轮目标是可复用的 chart 与可执行手册，
+而不是为单一云维护 IaC；ACK 阶段 A 也只用 values 与验收脚本完成平台适配，
+没有把云资源生命周期带进仓库。一份未验证的 IaC 比一份明确标注"待验证"的
+运维文档更容易误导。首次接入真实集群时，按文档顺序跑
+`deploy/cluster/acceptance/smoke.sh` 的断言，再把实际差异补回文档。
 
 ## 风险
 
 - Kafka SASL/TLS 已对 testcontainers 启动的真实 broker 验证；但 MSK 的
   SCRAM、Event Hubs 的连接串形态属于供应商差异，首次接入时必须再验证
   `Ping` 与一条端到端事件。
-- HPA 已在 k3d 的 metrics-server 下实测 1→3→1（identity，CPU 998%/50%），
-  并据此把 chart 默认内存上限从 256Mi 提到 512Mi；扩缩容期间消费者再平衡、
-  网关连接排空（`terminationGracePeriodSeconds=30`）与云上节点扩容仍未实测。
+- HPA 已在 k3d 与阿里云 ACK 的 metrics-server 下实测 1→3→1（ACK identity，
+  CPU 908%/50%，扩容约 60s、停压后约 2m10s 回落），并据此把 chart 默认内存
+  上限从 256Mi 提到 512Mi；扩缩容期间消费者再平衡、网关连接排空
+  （`terminationGracePeriodSeconds=30`）与云上节点扩容仍未实测。
 - cert-manager 的 ACME 流程依赖真实域名与公网入口，CI 无法覆盖。
 - PostgreSQL `verify-full` 已对 testcontainers 启动的真实 TLS 实例验证，
   包括换错 CA 必须失败；云厂商的证书主机名、代理端点与 CA 轮换仍需在目标
   环境实测。
 - 云厂商的 NetworkPolicy 实现差异真实存在；`smoke.sh` 的三种断言需要在
-  目标 CNI 上重跑。
+  目标 CNI 上重跑。ACK 的 Terway 默认 `disable_network_policy=true`，策略
+  对象创建成功但拒绝断言失败；需管理员开启网络策略后重跑。
 
 ## 测试
 
@@ -134,7 +146,9 @@ EKS/AKS/GKE 的依赖与网络对照表。
   Kafka SASL、开启私有 CA、开启 PostgreSQL CA 六种渲染；负例（min > max、
   cert-manager 无 TLS、Kafka tlsCA 无 TLS、database tlsCA 配 require）必须失败；
 - kubeconform（K8s 1.31 schema）：渲染结果全部 valid；
-- HPA 实际扩缩容：k3d metrics-server 下 identity 1→3→1，扩缩容事件与
-  CPU 指标均已记录（见 `docs/PROGRESS.md` M20）；
-- 未执行：真实云集群、ACME 签发、云上 HPA 节点扩容与事件消费再平衡、
-  各云厂商 Kafka 与 PostgreSQL 端点。
+- HPA 实际扩缩容：k3d 与 ACK 的 metrics-server 下 identity 均 1→3→1，
+  扩缩容事件与 CPU 指标均已记录（见 `docs/PROGRESS.md` M20）；
+- ACK 阶段 A：ACR 镜像、公网 NLB Ingress、临时依赖下的安装、事件链路与
+  HPA 已执行；NetworkPolicy 因 Terway 默认关闭而标记为未验证；
+- 未执行：真实托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上 HPA 节点扩容与
+  事件消费再平衡、各云厂商 Kafka 与 PostgreSQL 端点。

@@ -104,8 +104,9 @@ data,details}` 信封、分页参数与 Bearer 安全方案。
    rollout。没有配置 `KUBE_CONFIG` 时**明确跳过并输出原因**，不把"没部署"
    伪装成成功。
 
-这一段没有在真实云集群执行过（没有目标集群与凭据），在 PROGRESS 与
-DEPLOYMENT 中都标为待验证；verify 与 images 两段可以在任何 tag 上真实运行。
+CI 的 deploy 段没有在真实云集群执行过（集群凭据未接入 CI）；ACK 阶段 A 的
+手工部署不等同于这段流水线。在 PROGRESS 与 DEPLOYMENT 中都标为待验证；
+verify 与 images 两段可以在任何 tag 上真实运行。
 
 ### 5. 备份演练：证明逻辑备份可恢复，不冒充备份方案
 

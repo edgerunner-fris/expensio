@@ -12,7 +12,8 @@
 - Ingress → web → gateway → 五个后端服务的请求链路；
 - 提交 → 审批 → Kafka → report 读模型的端到端事件链路；
 - NetworkPolicy：跨命名空间、同命名空间未打 release 标签的 Pod 被拒绝，
-  同 release 的 Pod 与 ingress controller 被放行（k3s 由 kube-router 真正执行策略）；
+  同 release 的 Pod 与 ingress controller 被放行（k3s 由 kube-router 真正执行策略；
+  ACK 的 Terway 默认 `disable_network_policy=true`，需先开启策略再跑）；
 - RBAC：ServiceAccount 没有 API 权限、Pod 不挂载令牌；
 - 容器安全上下文实际生效（非 root、只读根文件系统、禁止提权）。
 
@@ -27,6 +28,8 @@
 ## 前提
 
 - 集群节点能访问镜像仓库；chart 通过 `imagePullSecrets` 拉取私有包；
+  拉不到 Docker Hub 时用 `BUSYBOX_IMAGE` 指向可达仓库里的同版本 busybox
+  （例如 `registry.cn-hangzhou.aliyuncs.com/google_containers/busybox:1.27`）；
 - 命名空间已存在，且预先创建：
   - ConfigMap `postgres-init`（key 为 `01-bootstrap.sh`，内容取
     `deploy/local/postgres/init/01-bootstrap.sh`）；
