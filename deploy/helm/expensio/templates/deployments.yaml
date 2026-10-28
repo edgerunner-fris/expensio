@@ -152,11 +152,18 @@ spec:
                   # 允许本地/无认证 SMTP；生产 Secret 里应提供该键。
                   optional: true
             {{- end }}
-          {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
+          {{- if or (and $svc.kafka $root.Values.kafka.tlsCA) (and $svc.db $root.Values.database.tlsCA) }}
           volumeMounts:
+            {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
             - name: kafka-ca
               mountPath: /etc/expensio/kafka
               readOnly: true
+            {{- end }}
+            {{- if and $svc.db $root.Values.database.tlsCA }}
+            - name: postgres-ca
+              mountPath: /etc/expensio/postgres
+              readOnly: true
+            {{- end }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -178,14 +185,24 @@ spec:
             {{- toYaml $root.Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml $root.Values.securityContext | nindent 12 }}
-      {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
+      {{- if or (and $svc.kafka $root.Values.kafka.tlsCA) (and $svc.db $root.Values.database.tlsCA) }}
       volumes:
+        {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
         - name: kafka-ca
           secret:
             secretName: {{ $secret }}
             items:
               - key: {{ $keys.kafkaTLSCA }}
                 path: ca.pem
+        {{- end }}
+        {{- if and $svc.db $root.Values.database.tlsCA }}
+        - name: postgres-ca
+          secret:
+            secretName: {{ $secret }}
+            items:
+              - key: {{ $keys.dbTLSCA }}
+                path: ca.pem
+        {{- end }}
       {{- end }}
       {{- with $root.Values.nodeSelector }}
       nodeSelector:

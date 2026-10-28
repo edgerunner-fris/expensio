@@ -2797,12 +2797,13 @@ BACKUP_DRILL: PASS
 | 种子数据是演示用 | 设计如此 | 依赖运行中的完整栈；口令共享，不适合真实租户环境 |
 | OpenAPI 只描述 HTTP 契约 | 设计如此 | 不描述 Kafka 事件 schema；事件结构由共享的 `internal/platform/events` 锁定 |
 
-## M20：托管 Kafka 认证、HPA 与 Ingress 证书
+## M20：托管 Kafka/PostgreSQL 认证、HPA 与 Ingress 证书
 
-M19 之后，本地与 k3d 已经能完整运行，但离托管云还差三处：Kafka 客户端只支持
-PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；chart 只有固定
-副本数；Ingress 只声明 `tls.secretName`，没有证书签发的接线。M20 补上代码与
-模板，并把无法在本仓库验证的部分明确标出来。
+M19 之后，本地与 k3d 已经能完整运行，但离托管云还差四处：Kafka 客户端只支持
+PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；PostgreSQL 只能
+到 `sslmode=require`，私有 CA 无法做 `verify-full`；chart 只有固定副本数；
+Ingress 只声明 `tls.secretName`，没有证书签发的接线。M20 补上代码与模板，
+并把无法在本仓库验证的部分明确标出来。
 
 设计取舍见 [ADR-0016](adr/0016-cloud-kafka-hpa-certmanager.md)。
 
@@ -2811,12 +2812,15 @@ PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；chart 只有�
 | 层 | 文件 | 内容 |
 | --- | --- | --- |
 | 配置 | `internal/platform/config/config.go` | `kafka.tls` / `tls_ca_file` / `sasl_mechanism` / `sasl_username` / `sasl_password`；机制白名单、凭据成对、SASL 必须配 TLS、CA 文件必须配 TLS |
+| 配置 | `internal/platform/config/config.go` | `db.ssl_root_cert`：写入 `sslrootcert`；只允许配 `verify-ca` / `verify-full`，且不得与 `db.dsn` 同时设置 |
 | Kafka | `internal/platform/kafka/security.go` | `Security.options()`：TLS 1.2+、私有 CA、PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512；构造客户端前再校验一次 |
 | Kafka | `producer.go` / `consumer.go` / report / notification | 生产者用可变参数接收 `Security`，消费选项新增同名字段；四个需要 Kafka 的服务在 `cmd/*` 装配处传入 |
 | 测试 | `internal/platform/testenv/kafka_sasl.go` | 生成一次性 CA/服务端证书，启动 SASL_SSL broker；真实握手/生产/消费/负例集成测试 |
+| 测试 | `internal/platform/testenv/postgres_tls.go` | 用同一套证书启动 TLS PostgreSQL；`verify-full` 建连与错误 CA 两个方向 |
+| 测试 | `internal/platform/db/tls_integration_test.go` | `db.Open` 走 `verify-full` + 自定义 CA 成功；换一张 CA 必须握手失败 |
 | Chart | `templates/hpa.yaml`、`_helpers.tpl` | `autoscaling/v2` HPA；全局值 + 按服务覆盖；开启后 Deployment 不渲染 `replicas` |
 | Chart | `templates/ingress.yaml` | cert-manager 注解（clusterIssuer 优先），缺少 TLS 或 issuer 时模板失败 |
-| Chart | `values.yaml`、`deployments.yaml` | Kafka TLS/SASL/私有 CA 只注入四个 Kafka 服务，口令与 CA 来自 Secret；gateway 可选 Redis 口令；chart 版本 0.2.0 |
+| Chart | `values.yaml`、`deployments.yaml`、`migration-job.yaml` | Kafka TLS/SASL/私有 CA 只注入四个 Kafka 服务，口令与 CA 来自 Secret；`database.tlsCA` 把私有 CA 挂给五个数据库服务与迁移 Job，并在迁移 DSN 加 `sslrootcert`；gateway 可选 Redis 口令 |
 | 文档 | `docs/DEPLOYMENT.md` | HPA、cert-manager、EKS/AKS/GKE 依赖与网络对照、迁移顺序 |
 
 ### 关键约束
@@ -2825,6 +2829,8 @@ PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；chart 只有�
   SASL_PLAINTEXT 是有意的；
 - Kafka 口令只从 Secret 注入，且只挂给真正使用 Kafka 的服务；私有 CA 的
   PEM 同样走 Secret，不写进 values；
+- PostgreSQL 的私有 CA 同理：只挂给五个数据库服务与迁移 Job，`tlsCA` 与
+  `sslmode` 必须同为校验模式，避免"挂了 CA 却只加密不验证"；
 - HPA 开启后副本数由 HPA 独占，避免 Helm 与 HPA 互相覆盖；
 - Chart 不创建 Issuer / Certificate：ACME 账号与 solver 属于集群管理员；
 - 托管云差异通过 values 注入，不为三家云各维护一套 manifest。
@@ -2852,23 +2858,37 @@ $ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/platform/kafka/ \
 --- PASS: TestPlainClientRejectedBySASLBroker (0.01s)
 ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	14.922s
 
-$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout 40m
-ok  	github.com/edgerunner-fris/expensio/internal/billing	32.684s
-ok  	github.com/edgerunner-fris/expensio/internal/contract	2.581s
-ok  	github.com/edgerunner-fris/expensio/internal/e2e	42.778s
-ok  	github.com/edgerunner-fris/expensio/internal/expense	40.463s
-ok  	github.com/edgerunner-fris/expensio/internal/gateway	9.063s
-ok  	github.com/edgerunner-fris/expensio/internal/identity	126.890s
-ok  	github.com/edgerunner-fris/expensio/internal/notification	25.754s
-ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	49.943s
-ok  	github.com/edgerunner-fris/expensio/internal/platform/outbox	26.913s
-ok  	github.com/edgerunner-fris/expensio/internal/report	102.388s
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/platform/db/ \
+    -run 'TestOpenVerifyFull' -race -count=1 -v
+=== RUN   TestOpenVerifyFullWithPrivateCA
+--- PASS: TestOpenVerifyFullWithPrivateCA (4.14s)
+=== RUN   TestOpenVerifyFullRejectsWrongCA
+--- PASS: TestOpenVerifyFullRejectsWrongCA (0.03s)
+PASS
+ok  	github.com/edgerunner-fris/expensio/internal/platform/db	5.791s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -p 2 -timeout 40m
+ok  	github.com/edgerunner-fris/expensio/internal/billing	11.885s
+ok  	github.com/edgerunner-fris/expensio/internal/contract	1.648s
+ok  	github.com/edgerunner-fris/expensio/internal/e2e	19.709s
+ok  	github.com/edgerunner-fris/expensio/internal/expense	21.583s
+ok  	github.com/edgerunner-fris/expensio/internal/gateway	4.583s
+ok  	github.com/edgerunner-fris/expensio/internal/identity	106.898s
+ok  	github.com/edgerunner-fris/expensio/internal/notification	7.568s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/db	6.516s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	31.955s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/outbox	8.065s
+ok  	github.com/edgerunner-fris/expensio/internal/report	61.148s
 ... 其余有测试的包均 ok；无测试文件的包显示 [no test files]
 FULL5_EXIT=0
 
 $ helm lint deploy/helm/expensio
 1 chart(s) linted, 0 chart(s) failed
 ```
+
+`-p 2` 是有意限制包级并发：默认并行度会同时起十余个 PostgreSQL / Redis /
+Kafka 容器，在 7.75 GB 的 Docker Desktop 上曾让 Redis 的健康检查因 daemon
+排队而超时（断言本身没有失败）。串行度调低后 `-count=5` 与 `-race` 不变。
 
 HPA 渲染（`autoscaling.enabled=true`，`min=3/max=12/CPU=65`，gateway 覆盖
 `max=20`）：
@@ -2895,6 +2915,10 @@ autoscaling: billing 的 minReplicas(10) 大于 maxReplicas(5)
 certManager.enabled=true 且 tls.enabled=false
 Error: execution error at (expensio/templates/ingress.yaml:4:4):
 ingress.certManager.enabled=true 需要同时开启 ingress.tls.enabled
+
+database.tlsCA=true 且 sslmode=require
+Error: execution error at (expensio/templates/deployments.yaml:36:28):
+database.tlsCA 需要 database.sslmode 为 verify-ca 或 verify-full：require 只加密不校验证书
 ```
 
 Kafka SASL 渲染（`tls=true`、`scram-sha-512`）：四个 Kafka 服务拿到
@@ -2914,6 +2938,12 @@ $ helm template ... --set kafka.tls=true --set kafka.tlsCA=true \
 Summary: 24 resources found in 1 file - Valid: 24, Invalid: 0, Errors: 0, Skipped: 0
 ```
 
+PostgreSQL 私有 CA 渲染（`database.tlsCA=true`、`sslmode=verify-full`，同时
+开启 Kafka TLS/CA）：ConfigMap 出现 `EXPENSIO_DB_SSL_ROOT_CERT`，五个数据库
+服务与迁移 Job 各挂载一个 `postgres-ca` Secret 卷；迁移 DSN 带上
+`&sslrootcert=/etc/expensio/postgres/ca.pem`。默认渲染中这些都不存在（
+`postgres/ca.pem` 出现 0 次），同一份渲染 kubeconform 仍是 24/24 通过。
+
 未执行（需要外部环境）：
 
 - 真实 EKS/AKS/GKE：托管 PostgreSQL / Redis / Kafka / 对象存储、各 CNI 的
@@ -2921,7 +2951,9 @@ Summary: 24 resources found in 1 file - Valid: 24, Invalid: 0, Errors: 0, Skippe
 - cert-manager 的 ACME 签发与续期；
 - HPA 在 metrics-server 下的加压扩缩容；
 - 各云厂商 Kafka 端点的认证差异（MSK 的 SCRAM、Event Hubs 的连接串形态）；
-  本地真实 broker 的 SASL/PLAIN + TLS 链路已覆盖。
+  本地真实 broker 的 SASL/PLAIN + TLS 链路已覆盖；
+- 托管 PostgreSQL 的证书主机名、代理端点与 CA 轮换；本地真实 TLS 实例的
+  `verify-full` 与错误 CA 两个方向已覆盖。
 
 ### 风险
 
@@ -2932,7 +2964,8 @@ Summary: 24 resources found in 1 file - Valid: 24, Invalid: 0, Errors: 0, Skippe
 | 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
 | HPA 未做真实扩缩容 | 待验证 | 未验证扩缩容期间的事件消费再平衡与连接排空 |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
-| 托管 PG 只能到 `sslmode=require` | 未解决 | `verify-full` 需要 CA 挂载与自定义 DSN，chart 未实现 |
+| PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
+| 云厂商 PostgreSQL 证书差异 | 待验证 | 证书主机名、代理端点与 CA 轮换需在目标环境实测 |
 | Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级 |
 
 ## 下一步
@@ -2947,7 +2980,8 @@ Summary: 24 resources found in 1 file - Valid: 24, Invalid: 0, Errors: 0, Skippe
 3. metrics-server 下的 HPA 加压测试（扩容、缩容、再平衡）；
 4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
-5. 托管 PostgreSQL 的 `verify-full`：挂载 CA、改用自定义 DSN；
+5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
+   的证书主机名、代理端点与 CA 轮换实测；
 6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 
 

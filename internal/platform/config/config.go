@@ -153,12 +153,15 @@ func (h HTTP) TrustedProxyList() ([]string, error) {
 }
 
 type DB struct {
-	Host        string `mapstructure:"host"`
-	Port        int    `mapstructure:"port"`
-	User        string `mapstructure:"user"`
-	Password    string `mapstructure:"password"`
-	Name        string `mapstructure:"name"`
-	SSLMode     string `mapstructure:"sslmode"`
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	Name     string `mapstructure:"name"`
+	SSLMode  string `mapstructure:"sslmode"`
+	// SSLRootCert 是校验服务端证书用的 CA PEM 路径。为空时才用系统根证书，
+	// 因此托管 PG 的自签 CA 必须显式挂载，否则 verify-full 会直接握手失败。
+	SSLRootCert string `mapstructure:"ssl_root_cert"`
 	MaxConns    int32  `mapstructure:"max_conns"`
 	DSNOverride string `mapstructure:"dsn"`
 }
@@ -286,14 +289,15 @@ func defaults(opts Options) map[string]any {
 		"http.drain_delay":      "0s",
 		"http.trusted_proxies":  "",
 
-		"db.host":      "localhost",
-		"db.port":      5432,
-		"db.user":      "expensio",
-		"db.password":  "",
-		"db.name":      "",
-		"db.sslmode":   "disable",
-		"db.max_conns": 10,
-		"db.dsn":       "",
+		"db.host":          "localhost",
+		"db.port":          5432,
+		"db.user":          "expensio",
+		"db.password":      "",
+		"db.name":          "",
+		"db.sslmode":       "disable",
+		"db.ssl_root_cert": "",
+		"db.max_conns":     10,
+		"db.dsn":           "",
 
 		"redis.addr":     "localhost:6379",
 		"redis.password": "",
@@ -418,6 +422,20 @@ func (c *Config) validate(opts Options) error {
 		}
 		if c.DB.MaxConns < 1 {
 			errs = append(errs, fmt.Errorf("db.max_conns 必须大于 0，当前为 %d", c.DB.MaxConns))
+		}
+		if c.DB.SSLRootCert != "" {
+			// 只挂 CA 却不做校验（require / disable）等于把证书当摆设，
+			// 与 kafka.tls_ca_file 的约束保持一致。
+			switch c.DB.SSLMode {
+			case "verify-ca", "verify-full":
+			default:
+				errs = append(errs, fmt.Errorf(
+					"db.ssl_root_cert 需要 db.sslmode 为 verify-ca 或 verify-full，当前为 %q",
+					c.DB.SSLMode))
+			}
+			if c.DB.DSNOverride != "" {
+				errs = append(errs, errors.New("db.ssl_root_cert 不能与 db.dsn 同时设置：db.dsn 会覆盖构造出的连接串"))
+			}
 		}
 	}
 
@@ -594,6 +612,9 @@ func (d DB) DSN() string {
 	}
 	q := u.Query()
 	q.Set("sslmode", d.SSLMode)
+	if d.SSLRootCert != "" {
+		q.Set("sslrootcert", d.SSLRootCert)
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

@@ -132,6 +132,54 @@ func TestKafkaTLSCAFileAcceptedWithTLS(t *testing.T) {
 	assert.Equal(t, "/etc/expensio/kafka/ca.pem", cfg.Kafka.TLSCAFile)
 }
 
+func TestDBRootCertRequiresVerifyingSSLMode(t *testing.T) {
+	t.Setenv("EXPENSIO_DB_NAME", "expense_db")
+	t.Setenv("EXPENSIO_DB_SSL_ROOT_CERT", "/etc/expensio/postgres/ca.pem")
+
+	_, err := config.Load(config.Options{
+		Service: "expense", DefaultAddr: ":8082", NeedsDB: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssl_root_cert")
+}
+
+func TestDBRootCertAcceptedWithVerifyFull(t *testing.T) {
+	t.Setenv("EXPENSIO_DB_NAME", "expense_db")
+	t.Setenv("EXPENSIO_DB_SSL_ROOT_CERT", "/etc/expensio/postgres/ca.pem")
+	t.Setenv("EXPENSIO_DB_SSLMODE", "verify-full")
+
+	cfg, err := config.Load(config.Options{
+		Service: "expense", DefaultAddr: ":8082", NeedsDB: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/etc/expensio/postgres/ca.pem", cfg.DB.SSLRootCert)
+	assert.Contains(t, cfg.DB.DSN(), "sslrootcert=")
+	assert.Contains(t, cfg.DB.DSN(), "sslmode=verify-full")
+}
+
+func TestDBRootCertRejectedTogetherWithDSNOverride(t *testing.T) {
+	t.Setenv("EXPENSIO_DB_NAME", "expense_db")
+	t.Setenv("EXPENSIO_DB_SSL_ROOT_CERT", "/etc/expensio/postgres/ca.pem")
+	t.Setenv("EXPENSIO_DB_SSLMODE", "verify-full")
+	t.Setenv("EXPENSIO_DB_DSN", "postgres://custom")
+
+	_, err := config.Load(config.Options{
+		Service: "expense", DefaultAddr: ":8082", NeedsDB: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db.dsn")
+}
+
+func TestDSNIncludesRootCert(t *testing.T) {
+	d := config.DB{
+		Host: "pg.internal", Port: 5432, User: "app", Password: "p",
+		Name: "expense_db", SSLMode: "verify-full",
+		SSLRootCert: "/etc/expensio/postgres/ca.pem",
+	}
+
+	assert.Contains(t, d.DSN(), "sslrootcert=%2Fetc%2Fexpensio%2Fpostgres%2Fca.pem")
+}
+
 func TestMissingRequiredDBNameIsReported(t *testing.T) {
 	_, err := config.Load(config.Options{
 		Service:     "identity-service",

@@ -28,6 +28,8 @@ secretKeys:
   jwtPublicKeys: EXPENSIO_JWT_PUBLIC_KEYS
   dbAppPassword: EXPENSIO_DB_APP_PASSWORD
   dbMigratorPassword: EXPENSIO_DB_MIGRATOR_PASSWORD
+  # PostgreSQL 私有 CA 的 PEM；只在 database.tlsCA=true 时挂载到数据库相关 Pod。
+  dbTLSCA: EXPENSIO_DB_TLS_CA
   billingWebhook: EXPENSIO_BILLING_WEBHOOK_SECRET
   # 只在 kafka.saslMechanism 非空时注入到需要 Kafka 的服务。
   kafkaSASLPassword: EXPENSIO_KAFKA_SASL_PASSWORD
@@ -48,7 +50,10 @@ database:
   host: postgres.example.internal
   port: 5432
   # 生产必须 require 或 verify-full；disable 只适用于本地 compose。
+  # verify-ca / verify-full 会校验证书：公有 CA（RDS 等）用系统根证书即可，
+  # 自签 CA 需要同时开启 tlsCA 把 CA 挂进容器。
   sslmode: require
+  tlsCA: false
 
 redis:
   addr: redis.example.internal:6379

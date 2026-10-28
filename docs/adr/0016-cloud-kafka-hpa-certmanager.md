@@ -1,18 +1,20 @@
-# ADR-0016：托管 Kafka 认证、HPA 与 Ingress 证书
+# ADR-0016：托管 Kafka/PostgreSQL 认证、HPA 与 Ingress 证书
 
 - 状态：已接受（M20）
 - 日期：2026-10-28
 
 ## 背景
 
-M19 收口后，"在本机跑得起来"与"能放到托管云"之间还有三处硬缺口：
+M19 收口后，"在本机跑得起来"与"能放到托管云"之间还有四处硬缺口：
 
 1. Kafka 客户端只支持 PLAINTEXT。AWS MSK、Azure Event Hubs、Confluent Cloud
    都要求 TLS 加 SASL，现有 chart 即使填了地址也连不上；
-2. chart 只有固定副本数，流量上来只能手工改 values 再滚动发布；
-3. Ingress 只声明 `tls.secretName`，证书要么手工创建，要么永远不生效。
+2. PostgreSQL 只能到 `sslmode=require`：加密但不校验证书，私有 CA 的托管
+   实例无法做 `verify-full`，中间人可以换掉服务端证书；
+3. chart 只有固定副本数，流量上来只能手工改 values 再滚动发布；
+4. Ingress 只声明 `tls.secretName`，证书要么手工创建，要么永远不生效。
 
-这三项都可以在本地完成代码与模板层面，但真实云集群、ACME 签发与扩缩容
+这些都可以在本地完成代码与模板层面，但真实云集群、ACME 签发与扩缩容
 行为需要外部环境，不能假装验证过。
 
 ## 决策
@@ -43,7 +45,21 @@ SASL，默认路径不变。
 `NewProducer` 用可变参数接收 `Security`，`ConsumerOptions` 增加同名字段；
 这样既有调用方与测试不需要改签名，托管配置只在 `cmd/*` 装配处传入。
 
-### 2. HPA：开启后由 HPA 独占副本数
+### 2. PostgreSQL：`verify-full` 与可选的私有 CA
+
+配置面新增 `db.ssl_root_cert`，非空时写入 DSN 的 `sslrootcert`。它只在
+`db.sslmode` 为 `verify-ca` 或 `verify-full` 时允许配置，且不能与 `db.dsn`
+同时设置——后者会整体覆盖构造出的连接串，静默忽略 CA 是最危险的组合。
+
+Chart 对应 `database.tlsCA=true`：从 Secret 挂载 `ca.pem` 到五个数据库服务
+与迁移 Job，ConfigMap 注入 `EXPENSIO_DB_SSL_ROOT_CERT`，迁移 DSN 追加
+`&sslrootcert=...`。`tlsCA` 与 `sslmode` 不是校验模式时模板直接失败。
+
+公有 CA（RDS/Aurora、Cloud SQL、Flexible Server）不需要 `tlsCA`：pgx 与
+lib/pq 默认使用系统根证书。这样既支持托管服务的默认证书，也支持企业 PKI
+自签 CA，而不用把 CA 内容塞进 values。
+
+### 3. HPA：开启后由 HPA 独占副本数
 
 `autoscaling.enabled=true` 时，Deployment 模板**不渲染 `replicas`**。这是
 HPA 与 Helm 共存的关键：如果两边都写副本数，每次 `helm upgrade` 都会把
@@ -60,7 +76,7 @@ HPA 扩出来的副本改回 values 值，表现为"扩容后过一会儿又缩�
 `minReplicas: 1` 时 PDB 会让驱逐阻塞，这是需要按环境调 `minReplicas` 的
 运维决策，不在 chart 里替用户猜。
 
-### 3. cert-manager：只写注解，不创建 Issuer
+### 4. cert-manager：只写注解，不创建 Issuer
 
 Chart 在 `ingress.certManager.enabled=true` 时给 Ingress 加
 `cert-manager.io/cluster-issuer` 或 `cert-manager.io/issuer` 注解，证书写入
@@ -74,7 +90,7 @@ chart 会导致两个 release 抢同一个名字。Chart 只声明"我需要哪�
 直接失败：否则 Ingress 能起来，但证书永远不会被签发，问题要等到用户访问
 时才暴露。
 
-### 4. 托管云：provider-neutral chart + 文档，不引入 Terraform
+### 5. 托管云：provider-neutral chart + 文档，不引入 Terraform
 
 没有为三家云各写一套 manifest。Chart 只依赖标准 K8s API，差异通过 values
 注入（依赖地址、Kafka 认证、TLS、Pod CIDR）；`docs/DEPLOYMENT.md` 给出
@@ -93,8 +109,9 @@ EKS/AKS/GKE 的依赖与网络对照表。
 - HPA 没有在 metrics-server 下做过加压测试；扩缩容期间消费者再平衡与
   网关连接排空（`terminationGracePeriodSeconds=30`）也没有实测。
 - cert-manager 的 ACME 流程依赖真实域名与公网入口，CI 无法覆盖。
-- 托管 PostgreSQL 只支持到 `sslmode=require`；`verify-full` 需要 CA 挂载与
-  自定义 DSN，chart 没有实现，文档已注明。
+- PostgreSQL `verify-full` 已对 testcontainers 启动的真实 TLS 实例验证，
+  包括换错 CA 必须失败；云厂商的证书主机名、代理端点与 CA 轮换仍需在目标
+  环境实测。
 - 云厂商的 NetworkPolicy 实现差异真实存在；`smoke.sh` 的三种断言需要在
   目标 CNI 上重跑。
 
@@ -108,8 +125,13 @@ EKS/AKS/GKE 的依赖与网络对照表。
 - `internal/platform/kafka` 集成测试：testcontainers 启动
   `apache/kafka:3.9.2`（SASL/PLAIN + TLS + 自签 CA），完成真实握手、生产、
   消费与位点提交；错误口令与明文客户端必须被拒绝；
+- `internal/platform/config`：`db.ssl_root_cert` 只允许配合 `verify-ca` /
+  `verify-full`，不能与 `db.dsn` 同时设置；DSN 带 `sslrootcert`；
+- `internal/platform/db` 集成测试：testcontainers 启动带 TLS 的 PostgreSQL，
+  `verify-full` + 自签 CA 建连并提交事务；换一张 CA 必须握手失败；
 - `helm lint` + `helm template`：默认、开启 HPA、开启 cert-manager、开启
-  Kafka SASL、开启私有 CA 五种渲染；负例（min > max、cert-manager 无 TLS、
-  tlsCA 无 TLS）必须失败；
+  Kafka SASL、开启私有 CA、开启 PostgreSQL CA 六种渲染；负例（min > max、
+  cert-manager 无 TLS、Kafka tlsCA 无 TLS、database tlsCA 配 require）必须失败；
 - kubeconform（K8s 1.31 schema）：渲染结果全部 valid；
-- 未执行：真实云集群、ACME 签发、HPA 实际扩缩容、各云厂商 Kafka 端点。
+- 未执行：真实云集群、ACME 签发、HPA 实际扩缩容、各云厂商 Kafka 与
+  PostgreSQL 端点。

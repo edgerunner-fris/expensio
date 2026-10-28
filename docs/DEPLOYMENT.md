@@ -119,6 +119,8 @@ kubectl -n expensio create secret generic expensio-secrets \
 #   --from-literal=EXPENSIO_KAFKA_SASL_PASSWORD='...'
 # broker 使用私有 CA 时还要提供 PEM（公有 CA 的托管服务不需要）：
 #   --from-file=EXPENSIO_KAFKA_TLS_CA=/path/to/ca.pem
+# PostgreSQL 使用私有 CA 且 sslmode 为 verify-ca / verify-full 时：
+#   --from-file=EXPENSIO_DB_TLS_CA=/path/to/ca.pem
 ```
 
 必需键见 `values.yaml` 的 `secretKeys`。JWT 只支持 EdDSA：identity 需要
@@ -160,7 +162,10 @@ images:
 database:
   host: pg.internal
   port: 5432
-  sslmode: require
+  # verify-full 校验证书链与主机名。公有 CA（RDS/Aurora 等）用系统根证书；
+  # 自签 CA 还要设置 tlsCA: true，并从 Secret 提供 EXPENSIO_DB_TLS_CA。
+  sslmode: verify-full
+  tlsCA: false
 
 redis:
   addr: redis.internal:6379
@@ -376,8 +381,17 @@ Chart 本身与云厂商无关，差异集中在依赖服务、身份与网络�
 它创建五个业务库、`*_migrator` / `*_app` 角色与权限。迁移 Job 随后以
 `{service}_migrator` 连接各库。
 
-`database.sslmode` 托管环境至少用 `require`。`verify-full` 需要 CA 文件与
-自定义 DSN，chart 目前不挂载 CA——这是已知限制，不在 values 里假装支持。
+`database.sslmode` 托管环境至少用 `require`，推荐 `verify-full`：它同时校验
+证书链与主机名。公有 CA（RDS/Aurora、Cloud SQL、Flexible Server 的默认证书）
+由系统根证书覆盖；自签 CA 设置 `database.tlsCA=true`，chart 会把 Secret 里的
+`ca.pem` 挂到五个数据库服务与迁移 Job，并在 DSN 里加入 `sslrootcert`。
+`tlsCA=true` 但 `sslmode` 不是 `verify-ca` / `verify-full` 时模板直接失败，
+避免"挂了 CA 却不校验"。
+
+集成测试在 testcontainers 里启动带 TLS 的 `postgres:16.15-alpine`，服务端证书
+由一次性 CA 签发；验证 `verify-full` 能建连并提交事务，以及换一张 CA 后握手
+必须失败：
+`EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/platform/db/ -run TestOpenVerifyFull -race`。
 
 ### 2. Kafka 认证
 
@@ -535,8 +549,9 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
   `apache/kafka`（SASL/PLAIN + TLS）已经跑通生产/消费/位点提交，错误口令与
   明文连接会被拒绝；但 MSK 的 SCRAM、Event Hubs 的连接串形态属于供应商差异，
   首次接入时仍需验证。
-- **`verify-full` 不可直接配置**：chart 只透传 `sslmode`，没有挂载 CA 与
-  `sslrootcert`，托管数据库目前止步于 `require`。
+- **PostgreSQL `verify-full` 只对本地真实实例验证过**：testcontainers 的 TLS
+  PostgreSQL 已覆盖自定义 CA 与错误 CA 两个方向；云厂商的证书主机名、代理
+  端点与 CA 轮换仍需在目标环境实测。
 - **出站未做白名单**：NetworkPolicy 只限制入站。数据库/Kafka/SMTP 地址由
   平台提供，写死 CIDR 会让 chart 无法跨环境复用；需要时由集群级策略补足。
 - **HSTS**：web 在 Ingress 终止 TLS 时看不到 `r.TLS`，因此 HSTS 应由

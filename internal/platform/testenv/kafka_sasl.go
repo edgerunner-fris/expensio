@@ -294,11 +294,21 @@ func writeTestCertificates(dir string) (string, error) {
 	}
 
 	// Kafka 的 PEM keystore 把私钥与证书链放在同一个文件里。
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	var serverPEM []byte
-	serverPEM = append(serverPEM, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})...)
-	serverPEM = append(serverPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})...)
+	serverPEM = append(serverPEM, keyPEM...)
+	serverPEM = append(serverPEM, certPEM...)
 	if err := os.WriteFile(filepath.Join(dir, "server.pem"), serverPEM, 0o644); err != nil {
 		return "", fmt.Errorf("写服务端证书失败: %w", err)
+	}
+
+	// PostgreSQL 要求证书与私钥分开，且私钥权限不能对其他人可读。
+	if err := os.WriteFile(filepath.Join(dir, "server.crt"), certPEM, 0o644); err != nil {
+		return "", fmt.Errorf("写服务端证书（crt）失败: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server.key"), keyPEM, 0o600); err != nil {
+		return "", fmt.Errorf("写服务端私钥失败: %w", err)
 	}
 	return caPath, nil
 }

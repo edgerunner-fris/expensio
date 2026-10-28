@@ -42,7 +42,7 @@ spec:
               for svc in identity expense billing report notification; do
                 echo "==> migrate $svc"
                 migrate -path "/migrations/$svc" \
-                  -database "postgres://${svc}_migrator:${EXPENSIO_DB_MIGRATOR_PASSWORD}@{{ .Values.database.host }}:{{ .Values.database.port }}/${svc}_db?sslmode={{ .Values.database.sslmode }}" \
+                  -database "postgres://${svc}_migrator:${EXPENSIO_DB_MIGRATOR_PASSWORD}@{{ .Values.database.host }}:{{ .Values.database.port }}/${svc}_db?sslmode={{ .Values.database.sslmode }}{{ if .Values.database.tlsCA }}&sslrootcert=/etc/expensio/postgres/ca.pem{{ end }}" \
                   up
               done
           env:
@@ -58,7 +58,20 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.database.tlsCA }}
+            - name: postgres-ca
+              mountPath: /etc/expensio/postgres
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.database.tlsCA }}
+        - name: postgres-ca
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            items:
+              - key: {{ .Values.secretKeys.dbTLSCA }}
+                path: ca.pem
+        {{- end }}
 {{- end }}

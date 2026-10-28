@@ -278,6 +278,9 @@ func Cleanup() {
 	if pgInstance != nil {
 		_ = pgInstance.container.Terminate(ctx)
 	}
+	if pgTLSInstance != nil {
+		pgTLSInstance.cleanup(ctx)
+	}
 }
 
 // repoRoot 从本文件位置回溯到仓库根目录（internal/platform/testenv → ../../..）。

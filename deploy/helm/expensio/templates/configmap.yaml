@@ -4,6 +4,9 @@
 {{- if and .Values.kafka.tlsCA (not .Values.kafka.tls) }}
 {{- fail "kafka.tlsCA 需要同时开启 kafka.tls：只挂 CA 而不启用 TLS 没有意义" }}
 {{- end }}
+{{- if and .Values.database.tlsCA (not (or (eq .Values.database.sslmode "verify-ca") (eq .Values.database.sslmode "verify-full"))) }}
+{{- fail "database.tlsCA 需要 database.sslmode 为 verify-ca 或 verify-full：require 只加密不校验证书" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,6 +21,9 @@ data:
   EXPENSIO_DB_HOST: {{ .Values.database.host | quote }}
   EXPENSIO_DB_PORT: {{ .Values.database.port | quote }}
   EXPENSIO_DB_SSLMODE: {{ .Values.database.sslmode | quote }}
+  {{- if .Values.database.tlsCA }}
+  EXPENSIO_DB_SSL_ROOT_CERT: "/etc/expensio/postgres/ca.pem"
+  {{- end }}
 
   EXPENSIO_REDIS_ADDR: {{ .Values.redis.addr | quote }}
   EXPENSIO_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
