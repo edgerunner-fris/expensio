@@ -75,6 +75,58 @@ func (r *Repository) RevokeAllRefreshTokens(ctx context.Context, tx pgx.Tx, user
 	return tag.RowsAffected(), nil
 }
 
+// RevokeTenantRefreshTokens 撤销该租户下的全部刷新令牌（所有用户）。
+// refresh_tokens 没有 RLS：租户删除要一次作用于整个租户。
+func (r *Repository) RevokeTenantRefreshTokens(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (int64, error) {
+	const q = `UPDATE app.refresh_tokens
+	           SET revoked_at = now()
+	           WHERE tenant_id = $1 AND revoked_at IS NULL`
+	tag, err := tx.Exec(ctx, q, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// RevokeTenantInvitations 作废该租户所有尚未接受的邀请。
+// 租户软删除后 find_invitation 已经查不到它们，这一步是为了不留下
+// "看起来仍可接受"的记录。
+func (r *Repository) RevokeTenantInvitations(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (int64, error) {
+	const q = `UPDATE app.invitations
+	           SET revoked_at = now()
+	           WHERE tenant_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`
+	tag, err := tx.Exec(ctx, q, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SoftDeleteTenantMemberships 软删除该租户的全部成员关系。
+// memberships 是 FORCE RLS，更新被 WITH CHECK 限制在当前租户内。
+func (r *Repository) SoftDeleteTenantMemberships(ctx context.Context, tx pgx.Tx, tenantID, actor uuid.UUID) (int64, error) {
+	const q = `UPDATE app.memberships
+	           SET deleted_at = now(), updated_by = $2
+	           WHERE tenant_id = $1 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, q, tenantID, actor)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SoftDeleteTenant 软删除租户本身；返回 false 表示已被并发删除。
+func (r *Repository) SoftDeleteTenant(ctx context.Context, tx pgx.Tx, tenantID, actor uuid.UUID) (bool, error) {
+	const q = `UPDATE app.tenants
+	           SET deleted_at = now(), updated_by = $2
+	           WHERE id = $1 AND deleted_at IS NULL`
+	tag, err := tx.Exec(ctx, q, tenantID, actor)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // loginFailure 是失败计数表的一行。
 type loginFailure struct {
 	FailedCount   int

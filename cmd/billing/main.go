@@ -51,10 +51,29 @@ func setup(app *bootstrap.App) error {
 	}
 
 	svc := billing.NewService(database)
+	svc.UseLogger(app.Logger)
 	if err := svc.EnableWebhooks([]byte(cfg.Billing.WebhookSecret), cfg.Billing.WebhookProvider); err != nil {
 		return fmt.Errorf("billing: 支付回调配置非法: %w", err)
 	}
 	billing.RegisterRoutes(app.Server.Engine(), billing.NewHandler(svc), issuer)
+
+	// 月度续费任务：与 HTTP 服务同进程，但只读写数据库与 outbox，
+	// 不等待 Kafka。启动时先跑一轮，重启不会让到期订阅空等一个周期。
+	renewalJob, err := billing.NewRenewalJob(svc, app.Logger,
+		cfg.Billing.RenewalInterval, cfg.Billing.RenewalBatch)
+	if err != nil {
+		return fmt.Errorf("billing: 初始化续费任务失败: %w", err)
+	}
+	renewalCtx, stopRenewal := context.WithCancel(context.Background())
+	renewalDone := make(chan struct{})
+	go func() {
+		defer close(renewalDone)
+		renewalJob.Run(renewalCtx)
+	}()
+	app.OnStop(func() {
+		stopRenewal()
+		<-renewalDone
+	})
 
 	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service)
 	if err != nil {

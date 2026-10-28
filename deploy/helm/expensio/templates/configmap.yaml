@@ -46,6 +46,12 @@ data:
   EXPENSIO_RATE_LIMIT_API_PER_MINUTE: {{ .Values.rateLimit.apiPerMinute | quote }}
   EXPENSIO_RATE_LIMIT_API_BURST: {{ .Values.rateLimit.apiBurst | quote }}
 
+  # 每个下游独立的熔断器：连续失败次数 / open 时长 / half-open 探测额度。
+  EXPENSIO_CIRCUIT_BREAKER_FAILURES: {{ .Values.circuitBreaker.failures | quote }}
+  EXPENSIO_CIRCUIT_BREAKER_INTERVAL: {{ .Values.circuitBreaker.interval | quote }}
+  EXPENSIO_CIRCUIT_BREAKER_TIMEOUT: {{ .Values.circuitBreaker.timeout | quote }}
+  EXPENSIO_CIRCUIT_BREAKER_MAX_REQUESTS: {{ .Values.circuitBreaker.maxRequests | quote }}
+
   # 网关下游地址。服务名带 release 前缀，多环境部署在同一命名空间也不会串。
   EXPENSIO_UPSTREAMS_IDENTITY: {{ printf "http://%s-identity:%v" (include "expensio.fullname" .) .Values.services.identity.port | quote }}
   EXPENSIO_UPSTREAMS_EXPENSE: {{ printf "http://%s-expense:%v" (include "expensio.fullname" .) .Values.services.expense.port | quote }}

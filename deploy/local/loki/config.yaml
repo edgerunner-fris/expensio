@@ -1,0 +1,52 @@
+# Loki 本地单进程配置（filesystem 后端）。
+#
+# 单机模式不启用分布式 ring / 对象存储：本地定位是"开发时能搜到日志"，
+# 不是生产容量。生产用 deploy/cluster/logging/loki-values.yaml。
+#
+# schema v13 + tsdb 是 Loki 3.x 的默认组合；filesystem 只适合单实例，
+# 多副本会各写各的索引，必须换成 S3/GCS 之类的共享对象存储。
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 保留 7 天：与 Prometheus 的 retention 对齐，排查时三个数据源时间范围一致。
+  retention_period: 168h
+  # 本地整栈日志量不大；显式限速是为了让"日志风暴拖垮 Loki"在本地就能复现，
+  # 而不是等生产才发现 agent 没有背压。
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_streams_per_user: 10000
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

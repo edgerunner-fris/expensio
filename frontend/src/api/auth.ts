@@ -80,6 +80,10 @@ export const authApi = {
   revokeInvitation(invitationId: string) {
     return api.delete<void>(`/tenants/current/invitations/${invitationId}`)
   },
+  // slug 是二次确认：服务端只接受与当前租户一致的标识。
+  deleteTenant(slug: string) {
+    return api.delete<{ sessions_revoked: number }>('/tenants/current', { slug })
+  },
   invitation(token: string) {
     return api.get<InvitationInfo>(`/invitations/${encodeURIComponent(token)}`)
   },

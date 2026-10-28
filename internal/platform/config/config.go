@@ -50,21 +50,22 @@ type Options struct {
 
 // Config 是所有服务共享的配置结构，未用到的段留空即可。
 type Config struct {
-	Service   string
-	Env       string    `mapstructure:"env"`
-	LogLevel  string    `mapstructure:"log_level"`
-	HTTP      HTTP      `mapstructure:"http"`
-	DB        DB        `mapstructure:"db"`
-	Redis     Redis     `mapstructure:"redis"`
-	Kafka     Kafka     `mapstructure:"kafka"`
-	JWT       JWT       `mapstructure:"jwt"`
-	OTel      OTel      `mapstructure:"otel"`
-	MinIO     MinIO     `mapstructure:"minio"`
-	Billing   Billing   `mapstructure:"billing"`
-	Notify    Notify    `mapstructure:"notification"`
-	Invite    Invite    `mapstructure:"invite"`
-	Upstreams Upstreams `mapstructure:"upstreams"`
-	RateLimit RateLimit `mapstructure:"rate_limit"`
+	Service        string
+	Env            string         `mapstructure:"env"`
+	LogLevel       string         `mapstructure:"log_level"`
+	HTTP           HTTP           `mapstructure:"http"`
+	DB             DB             `mapstructure:"db"`
+	Redis          Redis          `mapstructure:"redis"`
+	Kafka          Kafka          `mapstructure:"kafka"`
+	JWT            JWT            `mapstructure:"jwt"`
+	OTel           OTel           `mapstructure:"otel"`
+	MinIO          MinIO          `mapstructure:"minio"`
+	Billing        Billing        `mapstructure:"billing"`
+	Notify         Notify         `mapstructure:"notification"`
+	Invite         Invite         `mapstructure:"invite"`
+	Upstreams      Upstreams      `mapstructure:"upstreams"`
+	RateLimit      RateLimit      `mapstructure:"rate_limit"`
+	CircuitBreaker CircuitBreaker `mapstructure:"circuit_breaker"`
 }
 
 // Invite 是成员邀请的配置。BaseURL 只用于拼对外的接受链接，
@@ -91,6 +92,16 @@ type RateLimit struct {
 	AuthBurst     int `mapstructure:"auth_burst"`
 	APIPerMinute  int `mapstructure:"api_per_minute"`
 	APIBurst      int `mapstructure:"api_burst"`
+}
+
+// CircuitBreaker 是网关对每个下游独立熔断的参数。
+// Failures 是"连续失败"阈值而非比例：连续失败更能说明下游是真的挂了，
+// 而不是大量正常请求里混了几次偶发错误。
+type CircuitBreaker struct {
+	Failures    int           `mapstructure:"failures"`
+	Interval    time.Duration `mapstructure:"interval"`
+	Timeout     time.Duration `mapstructure:"timeout"`
+	MaxRequests uint32        `mapstructure:"max_requests"`
 }
 
 type HTTP struct {
@@ -198,6 +209,11 @@ type MinIO struct {
 type Billing struct {
 	WebhookProvider string `mapstructure:"webhook_provider"`
 	WebhookSecret   string `mapstructure:"webhook_secret"`
+	// RenewalInterval / RenewalBatch 控制月度续费任务：多久扫描一次到期目录、
+	// 每轮最多处理多少条。多副本同时运行是安全的（行锁内复核到期状态），
+	// 间隔短只会多几次空查询，不会重复出账。
+	RenewalInterval time.Duration `mapstructure:"renewal_interval"`
+	RenewalBatch    int           `mapstructure:"renewal_batch"`
 }
 
 // Notify 是 notification 与 identity 之间共享的内部通知配置。
@@ -295,6 +311,8 @@ func defaults(opts Options) map[string]any {
 
 		"billing.webhook_provider": "mockpay",
 		"billing.webhook_secret":   "",
+		"billing.renewal_interval": "1h",
+		"billing.renewal_batch":    100,
 
 		"notification.internal_token": "",
 		"notification.identity_url":   "http://127.0.0.1:8081",
@@ -321,6 +339,13 @@ func defaults(opts Options) map[string]any {
 		"rate_limit.auth_burst":      10,
 		"rate_limit.api_per_minute":  1200,
 		"rate_limit.api_burst":       200,
+
+		// 连续 5 次失败打开熔断；30s 后放一个半开探测。
+		// interval=0：不做周期性清零，一次成功仍会把连续失败数归零。
+		"circuit_breaker.failures":     5,
+		"circuit_breaker.interval":     "0s",
+		"circuit_breaker.timeout":      "30s",
+		"circuit_breaker.max_requests": 1,
 	}
 }
 
@@ -425,6 +450,12 @@ func (c *Config) validate(opts Options) error {
 		if c.Billing.WebhookProvider == "" {
 			errs = append(errs, errors.New("billing.webhook_provider 不能为空（EXPENSIO_BILLING_WEBHOOK_PROVIDER）"))
 		}
+		if c.Billing.RenewalInterval <= 0 {
+			errs = append(errs, errors.New("billing.renewal_interval 必须大于 0（EXPENSIO_BILLING_RENEWAL_INTERVAL）"))
+		}
+		if c.Billing.RenewalBatch < 1 || c.Billing.RenewalBatch > 1000 {
+			errs = append(errs, errors.New("billing.renewal_batch 必须在 1 到 1000 之间（EXPENSIO_BILLING_RENEWAL_BATCH）"))
+		}
 	}
 
 	if opts.NeedsInternalAPI || opts.NeedsNotification {
@@ -494,6 +525,19 @@ func (c *Config) validate(opts Options) error {
 			c.RateLimit.APIPerMinute <= 0 || c.RateLimit.APIBurst <= 0 {
 			errs = append(errs, errors.New("rate_limit 的速率与桶容量都必须大于 0"))
 		}
+		if c.CircuitBreaker.Failures < 1 || c.CircuitBreaker.Failures > 100 {
+			errs = append(errs, fmt.Errorf("circuit_breaker.failures 必须在 1–100 之间，当前为 %d",
+				c.CircuitBreaker.Failures))
+		}
+		if c.CircuitBreaker.Interval < 0 {
+			errs = append(errs, errors.New("circuit_breaker.interval 不能为负"))
+		}
+		if c.CircuitBreaker.Timeout <= 0 {
+			errs = append(errs, errors.New("circuit_breaker.timeout 必须大于 0"))
+		}
+		if c.CircuitBreaker.MaxRequests < 1 {
+			errs = append(errs, errors.New("circuit_breaker.max_requests 必须大于等于 1"))
+		}
 	}
 
 	return errors.Join(errs...)
@@ -539,8 +583,8 @@ func (m MinIO) String() string {
 }
 
 func (b Billing) String() string {
-	return fmt.Sprintf("Billing{webhook_provider:%s webhook_secret:***}",
-		b.WebhookProvider)
+	return fmt.Sprintf("Billing{webhook_provider:%s webhook_secret:*** renewal_interval:%s renewal_batch:%d}",
+		b.WebhookProvider, b.RenewalInterval, b.RenewalBatch)
 }
 
 func (n Notify) String() string {
@@ -549,6 +593,6 @@ func (n Notify) String() string {
 }
 
 func (c Config) String() string {
-	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s billing:%s notify:%s}",
-		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT, c.Billing, c.Notify)
+	return fmt.Sprintf("Config{service:%s env:%s log_level:%s http:%+v db:%s redis:%s jwt:%s billing:%s notify:%s circuit:%+v}",
+		c.Service, c.Env, c.LogLevel, c.HTTP, c.DB, c.Redis, c.JWT, c.Billing, c.Notify, c.CircuitBreaker)
 }

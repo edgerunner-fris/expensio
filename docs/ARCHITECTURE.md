@@ -164,7 +164,10 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 
 ## 可观测性与运维
 
-- 日志：zap JSON，敏感字段（token、密码、卡号）在 logger 层脱敏。
+- 日志：zap JSON，敏感字段（token、密码、卡号）在 logger 层脱敏；访问日志带
+  `request_id` 与 `trace_id`，由 Alloy 采集进 Loki，Grafana 里可在 Loki 与
+  Tempo 之间按 trace_id 双向跳转（本地见 `deploy/local/loki`，集群见
+  `deploy/cluster/logging/`）。
 - 健康检查：`/healthz` 不碰下游；`/readyz` 并行检查并共享预算。
 - 优雅关闭：摘流量 → 排空 → Shutdown → 强制关闭；WSL2 下已用 SIGTERM 实测。
 - 遥测：六个服务与管理台统一用 OTel SDK，经 OTLP/gRPC 发往 Collector。
@@ -220,6 +223,10 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M12 | 删除 HS256 兼容路径与共享密钥 | 已完成（只接受 EdDSA，配置面已收敛） |
 | M13 | 最终验收：CI 整栈 E2E、kubeconform、界面预览 | 已完成（本地与 CI 实测；集群验收留给 M14） |
 | M14 | 三项最终验收：真实 SMTP、在线轮换、真实集群 Helm | 已完成（Ethereal 收发实测、四阶段轮换演练、k3d 上 `helm upgrade --install` 与行为断言；托管云/TLS 终止待验证） |
+| M15 | 附件、评论与按金额分级审批 | 已完成（真实 MinIO 容器、审批矩阵与全量回归） |
+| M16 | 仪表盘、CSV 导出与报表 Redis 缓存 | 已完成（缓存失效与实测证据见 PROGRESS） |
+| M17 | 租户切换、个人设置、审计页与登录失败锁定 | 已完成（`self_membership_read` 策略、账号级锁定） |
+| M18 | 自动续费、模拟支付、租户删除、熔断与日志聚合 | 已完成（真实 PostgreSQL 续费/删除集成测试、Loki + Tempo 按 trace_id 联查实测） |
 
 ## ADR
 
@@ -233,3 +240,7 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 - [ADR-0008：令牌签名方案（M6 选 HS256，M9 迁移到 EdDSA）](adr/0008-token-signing-in-m6.md)
 - [ADR-0009：可观测性链路与压测验收](adr/0009-observability-and-load-testing.md)
 - [ADR-0010：成员邀请与一次性接受链接](adr/0010-member-invitations.md)
+- [ADR-0011：附件、评论与分级审批](adr/0011-expense-attachments-comments-and-approval-levels.md)
+- [ADR-0012：仪表盘、CSV 导出与报表缓存](adr/0012-dashboard-export-and-report-cache.md)
+- [ADR-0013：租户切换、个人设置、审计日志页与登录失败锁定](adr/0013-tenant-switch-settings-audit-lockout.md)
+- [ADR-0014：自动续费、模拟支付、租户删除、下游熔断与日志聚合](adr/0014-renewal-mockpay-deletion-circuitbreaker-loki.md)

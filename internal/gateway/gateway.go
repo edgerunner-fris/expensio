@@ -113,6 +113,8 @@ type Options struct {
 	Limiter   Limiter
 	Limits    Limits
 	Logger    *zap.Logger
+	// Circuit 是每个下游独立熔断器的参数，零值取默认值。
+	Circuit CircuitOptions
 	// MaxBodyBytes 只用于按 Content-Length 提前拒绝明显过大的请求；
 	// 分块传输的实际上限由各业务服务自己判断，网关不读请求体。
 	MaxBodyBytes int64
@@ -140,6 +142,11 @@ func New(opts Options) (*Handler, error) {
 	}
 	if len(opts.Rules) == 0 {
 		return nil, errors.New("gateway: 路由表为空")
+	}
+
+	circuit, err := opts.Circuit.withDefaults()
+	if err != nil {
+		return nil, err
 	}
 
 	h := &Handler{
@@ -175,7 +182,7 @@ func New(opts Options) (*Handler, error) {
 	})
 
 	for name, raw := range opts.Upstreams {
-		proxy, err := newUpstreamProxy(name, raw, opts.Logger)
+		proxy, err := newUpstreamProxy(name, raw, circuit, opts.Logger)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +309,11 @@ func (h *Handler) match(path string) (Rule, bool) {
 //
 // 超时策略：连接 2s、等响应头 10s。整体时长由 http.Server 的 WriteTimeout 兜底
 // （当前 10s，报表出现慢查询时按需上调，而不是在网关里再压一层）。
-func newUpstreamProxy(name, raw string, logg *zap.Logger) (*httputil.ReverseProxy, error) {
+//
+// 传输链由外到内：熔断器 → otelhttp → 重试 → 真实连接。
+// 熔断器在最外层，一次逻辑请求（含重试）只记一次成败；otelhttp 仍在重试之外，
+// 每次实际下发都有独立的 client span。
+func newUpstreamProxy(name, raw string, circuit CircuitOptions, logg *zap.Logger) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: 解析下游 %s 地址失败: %w", name, err)
@@ -323,6 +334,11 @@ func newUpstreamProxy(name, raw string, logg *zap.Logger) (*httputil.ReverseProx
 		ResponseHeaderTimeout: 10 * time.Second,
 	}
 
+	breaker, err := newCircuitTransport(name, otelhttp.NewTransport(&retryTransport{base: transport}), circuit, logg)
+	if err != nil {
+		return nil, err
+	}
+
 	return &httputil.ReverseProxy{
 		// Rewrite（而不是已弃用的 Director）让 ReverseProxy 先清掉入站的
 		// X-Forwarded-*，再按本连接的真实来源重写，客户端无法伪造。
@@ -330,14 +346,23 @@ func newUpstreamProxy(name, raw string, logg *zap.Logger) (*httputil.ReverseProx
 			pr.SetURL(target)
 			pr.SetXForwarded()
 		},
-		// 包在重试之外：每次实际下发（含重试）都有独立的 client span，
-		// 并把 traceparent 注入到下游请求头，业务服务才能续接同一条链路。
-		Transport:     &retryTransport{base: otelhttp.NewTransport(transport)},
+		// 熔断器在 otelhttp 之外：熔断打开时不产生下游 span，也不会重试。
+		Transport:     breaker,
 		FlushInterval: 100 * time.Millisecond,
 		// ReverseProxy 自带的日志会绕过 zap 的输出格式，直接丢弃，
 		// 由下面的 ErrorHandler 统一记录。
 		ErrorLog: log.New(io.Discard, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, errCircuitOpen) {
+				// 熔断是主动拒绝：503 而不是 502，并告诉客户端多久后再来。
+				logg.Warn("gateway: 下游熔断中，请求未转发",
+					zap.String("upstream", name),
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+				)
+				writeCircuitOpen(w, r, circuit.Timeout)
+				return
+			}
 			logg.Warn("gateway: 下游请求失败",
 				zap.String("upstream", name),
 				zap.String("method", r.Method),
@@ -347,6 +372,19 @@ func newUpstreamProxy(name, raw string, logg *zap.Logger) (*httputil.ReverseProx
 			writeUpstreamError(w, r)
 		},
 	}, nil
+}
+
+// writeCircuitOpen 直接写 JSON，不经过 gin：ReverseProxy 在自己的 goroutine 里调用它。
+// Retry-After 取熔断超时：open 到期后会放一个探测请求，客户端最早也要等到那时才有意义。
+func writeCircuitOpen(w http.ResponseWriter, r *http.Request, timeout time.Duration) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Retry-After", retryAfterHeader(timeout))
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(httpx.Envelope{
+		Code:      "common.upstream_circuit_open",
+		Message:   "上游服务暂时不可用，请稍后重试",
+		RequestID: r.Header.Get("X-Request-ID"),
+	})
 }
 
 // writeUpstreamError 直接写 JSON，不经过 gin：

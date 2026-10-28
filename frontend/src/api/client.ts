@@ -134,7 +134,9 @@ export const api = {
   patch<T>(url: string, body?: unknown): Promise<T> {
     return data<T>(http.patch<ApiEnvelope<T>>(url, body))
   },
-  delete<T>(url: string): Promise<T> {
-    return data<T>(http.delete<ApiEnvelope<T>>(url))
+  // body 可选：删除租户要求回写 slug 作为二次确认，而 axios 的
+  // DELETE 请求体必须放在 config.data 里。
+  delete<T>(url: string, body?: unknown): Promise<T> {
+    return data<T>(http.delete<ApiEnvelope<T>>(url, body === undefined ? undefined : { data: body }))
   },
 }

@@ -97,6 +97,13 @@ export const useAuthStore = defineStore('auth', () => {
     await authApi.changePassword(currentPassword, newPassword)
   }
 
+  // 删除租户会撤销该租户下的全部会话（包括自己）。这里不自动清会话：
+  // 调用方要先展示结果，再决定跳转；服务端已经保证无法续期。
+  async function deleteTenant(slug: string): Promise<number> {
+    const result = await authApi.deleteTenant(slug)
+    return result.sessions_revoked
+  }
+
   // 接受邀请会把当前会话切换成被邀请租户的会话：同一个浏览器里
   // 用户可能已经登录了别的租户，接受后应以新租户身份继续操作。
   async function acceptInvitation(
@@ -140,6 +147,7 @@ export const useAuthStore = defineStore('auth', () => {
     switchTenant,
     updateProfile,
     changePassword,
+    deleteTenant,
     logout,
   }
 })

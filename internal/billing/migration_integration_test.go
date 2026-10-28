@@ -388,7 +388,9 @@ func TestBillingMigrationDownAndUp(t *testing.T) {
 	ctx := tenantCtx(t, uuid.New(), uuid.New(), tenantctx.RoleOwner)
 	insertSubscription(t, database, ctx, "starter-monthly", 1)
 
-	pg.MigrateDownUp(t, "billing", 1)
+	// 回滚两步（billing_core + renewal）才能真正验证"订阅表被重建"，
+	// 同时覆盖 000003 的 down SQL。
+	pg.MigrateDownUp(t, "billing", 2)
 
 	var plans int
 	require.NoError(t, database.WithTx(context.Background(), func(ctx context.Context, tx pgx.Tx) error {

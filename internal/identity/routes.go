@@ -65,4 +65,10 @@ func RegisterRoutes(r gin.IRouter, h *Handler, tokens TokenSource) {
 	admin.POST("/tenants/current/invitations", h.CreateInvitation)
 	admin.DELETE("/tenants/current/invitations/:invitationID", h.RevokeInvitation)
 	admin.GET("/audit-logs", h.ListAuditLogs)
+
+	// 删除租户比"管理成员"更重：只有所有者可以执行。
+	// 请求体里的 slug 是二次确认，不是租户定位——租户始终取自 JWT。
+	owner := authed.Group("")
+	owner.Use(middleware.RequireRole(tenantctx.RoleOwner))
+	owner.DELETE("/tenants/current", h.DeleteTenant)
 }

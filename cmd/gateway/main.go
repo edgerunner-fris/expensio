@@ -65,6 +65,12 @@ func setup(app *bootstrap.App) error {
 			APIPerSecond:  float64(cfg.RateLimit.APIPerMinute) / 60,
 			APIBurst:      cfg.RateLimit.APIBurst,
 		},
+		Circuit: gateway.CircuitOptions{
+			Failures:    cfg.CircuitBreaker.Failures,
+			Interval:    cfg.CircuitBreaker.Interval,
+			Timeout:     cfg.CircuitBreaker.Timeout,
+			MaxRequests: cfg.CircuitBreaker.MaxRequests,
+		},
 		Logger: app.Logger,
 	})
 	if err != nil {

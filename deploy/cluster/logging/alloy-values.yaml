@@ -1,0 +1,93 @@
+# grafana/alloy 生产值：以 DaemonSet 采集全部 Expensio Pod 日志。
+#
+# 只采集 app.kubernetes.io/part-of=expensio 的 Pod：集群里还有 prometheus、
+# loki 自己和系统组件，全量采集会让日志量翻数倍，也会把平台组件的日志
+# 混进业务检索结果。
+#
+# 采集方式用 loki.source.kubernetes（走 kubelet API），不挂 hostPath：
+# 见 README.md 的取舍说明。
+
+controller:
+  type: daemonset
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+rbac:
+  create: true
+  rules:
+    # 最小权限：只需要枚举 Pod 并读取其日志。
+    # 不授予 nodes/proxy，也不授予 secrets/configmaps。
+    - apiGroups: [""]
+      resources: ["pods", "pods/log", "namespaces", "nodes"]
+      verbs: ["get", "list", "watch"]
+
+alloy:
+  configMap:
+    create: true
+    content: |
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        // 只保留本项目的 Pod。drop 比在查询时过滤更省资源：
+        // 未匹配的流根本不会进入 Loki。
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_part_of"]
+          regex         = "expensio"
+          action        = "keep"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        // chart 给每个 Deployment 打了 component=<service>，
+        // 用它做 service 标签，与本地 Alloy 配置的维度保持一致。
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+          target_label  = "service"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.write.gateway.receiver]
+      }
+
+      loki.write "gateway" {
+        endpoint {
+          url = "http://loki-gateway.observability.svc.cluster.local/loki/api/v1/push"
+        }
+        external_labels = {
+          cluster = "prod",
+        }
+      }
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  # 不需要宿主机日志目录：loki.source.kubernetes 通过 API 读取。
+  mounts:
+    varlog: false
+    dockercontainers: false

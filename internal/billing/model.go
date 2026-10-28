@@ -167,12 +167,15 @@ type Subscription struct {
 	Status             SubscriptionStatus
 	CurrentPeriodStart time.Time
 	CurrentPeriodEnd   time.Time
-	Version            int
-	CanceledAt         *time.Time
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	CreatedBy          uuid.UUID
-	UpdatedBy          uuid.UUID
+	// AnchorDay 是计费锚点日（1-31），来自首次周期的开始日；续费按它推进，
+	// 避免 31 日的订阅在短月之后永久漂移成 28/29 日。
+	AnchorDay  int
+	Version    int
+	CanceledAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	CreatedBy  uuid.UUID
+	UpdatedBy  uuid.UUID
 }
 
 // Invoice 是一张账单的领域视图。

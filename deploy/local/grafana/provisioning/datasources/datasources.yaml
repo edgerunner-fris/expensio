@@ -19,3 +19,23 @@ datasources:
       # 从 trace 跳到指标时沿用同一个服务与时间范围，排查链路更快。
       tracesToMetrics:
         datasourceUid: expensio-prometheus
+      # 反过来也能从 trace 直接跳到同一 trace_id 的日志。
+      tracesToLogsV2:
+        datasourceUid: expensio-loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+
+  - name: Loki
+    uid: expensio-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # 访问日志是 JSON（logger.New 固定 JSON 输出）；把 trace_id 解析出来做
+      # 派生字段，点一下就能在 Tempo 里打开整条链路。
+      derivedFields:
+        - name: trace_id
+          matcherRegex: '"trace_id":"([0-9a-f]{32})"'
+          url: '$${__value.raw}'
+          datasourceUid: expensio-tempo

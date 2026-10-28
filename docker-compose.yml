@@ -193,6 +193,46 @@ services:
       - tempodata:/var/tempo
     logging: *default-logging
 
+  # ---------------------------------------------------------------------------
+  # Loki：日志聚合。单进程 + 文件系统后端，保留 7 天，与 Prometheus 对齐。
+  # 单实例足以覆盖本地整栈；生产用 deploy/cluster/logging/loki-values.yaml。
+  # ---------------------------------------------------------------------------
+  loki:
+    <<: *default-restart
+    image: grafana/loki:3.5.1
+    profiles: ["obs", "app"]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./deploy/local/loki/config.yaml:/etc/loki/config.yaml:ro
+      - lokidata:/loki
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Alloy：从 Docker socket 发现容器并推送日志。挂 socket 等价于 root 级宿主
+  # 权限，仅限本地开发；生产用 DaemonSet 读 /var/log/pods，不挂 socket。
+  # ---------------------------------------------------------------------------
+  alloy:
+    <<: *default-restart
+    image: grafana/alloy:v1.8.2
+    profiles: ["obs", "app"]
+    command:
+      - "run"
+      - "/etc/alloy/config.alloy"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+    ports:
+      - "127.0.0.1:12345:12345"   # Alloy 自身的 UI / 健康检查
+    volumes:
+      - ./deploy/local/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloydata:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_started
+    logging: *default-logging
+
   prometheus:
     <<: *default-restart
     image: prom/prometheus:v3.5.0
@@ -231,6 +271,8 @@ services:
       prometheus:
         condition: service_started
       tempo:
+        condition: service_started
+      loki:
         condition: service_started
     logging: *default-logging
 
@@ -623,3 +665,5 @@ volumes:
   promdata:
   grafanadata:
   tempodata:
+  lokidata:
+  alloydata:

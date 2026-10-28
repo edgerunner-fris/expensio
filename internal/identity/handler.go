@@ -219,6 +219,22 @@ func (h *Handler) AcceptInvitation(c *gin.Context) {
 	httpx.OK(c, session)
 }
 
+// DeleteTenant 软删除当前租户。请求体必须回写租户 slug 作为确认，
+// 不接受空体：删除不可撤销，缺省即执行的设计不能出现在这里。
+func (h *Handler) DeleteTenant(c *gin.Context) {
+	var in DeleteTenantInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Error(c, apperr.InvalidArgument("请输入租户标识以确认删除"))
+		return
+	}
+	out, err := h.svc.DeleteTenant(c.Request.Context(), in, requestMeta(c))
+	if err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	httpx.OK(c, out)
+}
+
 func (h *Handler) ListAuditLogs(c *gin.Context) {
 	var q httpx.PageQuery
 	if err := c.ShouldBindQuery(&q); err != nil {

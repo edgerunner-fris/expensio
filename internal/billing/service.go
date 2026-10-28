@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.uber.org/zap"
 
 	"github.com/edgerunner-fris/expensio/internal/platform/apperr"
 	"github.com/edgerunner-fris/expensio/internal/platform/db"
@@ -40,11 +41,26 @@ type Service struct {
 	// 支付回调的密钥与渠道：只由 main 从环境变量注入，测试显式启用。
 	webhookSecret   []byte
 	webhookProvider string
-	now             func() time.Time
+	// logger 只用于后台任务（续费）的失败明细；HTTP 路径的错误由中间件统一记录。
+	logger *zap.Logger
+	now    func() time.Time
 }
 
 func NewService(database *db.DB) *Service {
-	return &Service{database: database, repo: NewRepository(), outbox: outbox.NewStore(), now: time.Now}
+	return &Service{
+		database: database,
+		repo:     NewRepository(),
+		outbox:   outbox.NewStore(),
+		logger:   zap.NewNop(),
+		now:      time.Now,
+	}
+}
+
+// UseLogger 注入日志器。nil 时保持 noop，测试不需要构造 logger。
+func (s *Service) UseLogger(l *zap.Logger) {
+	if l != nil {
+		s.logger = l
+	}
 }
 
 // SubscriptionInput 是开通订阅的请求体。
@@ -139,6 +155,7 @@ func (s *Service) CreateSubscription(ctx context.Context, actor tenantctx.Tenant
 			Status:             SubscriptionActive,
 			CurrentPeriodStart: start,
 			CurrentPeriodEnd:   end,
+			AnchorDay:          start.Day(),
 			CreatedBy:          actor.UserID,
 			UpdatedBy:          actor.UserID,
 		}

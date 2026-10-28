@@ -1,0 +1,56 @@
+// Alloy 本地日志采集：从 Docker socket 发现容器，打上 compose 服务名后推送到 Loki。
+//
+// 为什么是 Alloy 而不是 Promtail：Promtail 已于 2025-03 进入 EOL，Alloy 是
+// 官方继任者；同一个 agent 将来还能兼做 OTLP 网关，不必再引入第二套组件。
+//
+// 安全边界：本配置只用于本地开发。挂载 docker.sock 等价于给容器 root 级
+// 宿主权限；生产环境用 Helm 的 DaemonSet 读 /var/log/pods（见
+// deploy/cluster/logging/），不给 Pod 挂 socket。
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // 容器名带前导斜杠，去掉后才是 compose 里的服务名。
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // stdout / stderr 分开保留：zap 写的是 stderr，业务输出混进统一流后
+  // 就没法再用 stream 过滤。
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+
+  // compose 服务名是排障时最自然的维度：identity / gateway / postgres……
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.containers.output
+  labels           = { job = "expensio", env = "local" }
+  forward_to       = [loki.write.local.receiver]
+  refresh_interval = "5s"
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

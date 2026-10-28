@@ -61,14 +61,25 @@ make app-up    # 构建六个服务 + 管理台 + 迁移/建主题任务并启�
 
 | 组件 | 地址 | 用途 |
 | --- | --- | --- |
-| Grafana | <http://127.0.0.1:3000/> | 概览看板 `Expensio Overview`，数据源 Prometheus + Tempo |
+| Grafana | <http://127.0.0.1:3000/> | 概览看板 `Expensio Overview`，数据源 Prometheus + Tempo + Loki |
 | Prometheus | <http://127.0.0.1:9090/> | 指标查询与 7 条告警规则 |
 | Tempo | <http://127.0.0.1:3200/> | trace 查询（本地文件后端，保留 24h） |
+| Loki | <http://127.0.0.1:3100/> | 日志查询（单进程 + 文件系统，保留 7 天） |
+| Alloy | <http://127.0.0.1:12345/> | 日志采集器 UI（Docker socket 发现容器） |
 | OTLP gRPC | `127.0.0.1:4317` | 服务导出口；Collector 指标端点 `:8889` 只在 compose 网络内 |
 
 Grafana 管理员口令来自 `.env` 的 `GRAFANA_ADMIN_PASSWORD`，不要提交或写进文档。
-Grafana 已预置 Prometheus（UID `expensio-prometheus`）与 Tempo（UID
-`expensio-tempo`）数据源；看板 UID 为 `expensio-overview`。
+Grafana 已预置 Prometheus（UID `expensio-prometheus`）、Tempo（UID
+`expensio-tempo`）与 Loki（UID `expensio-loki`）数据源；看板 UID 为
+`expensio-overview`。
+
+访问日志是 JSON，带 `request_id` 与 `trace_id`。Grafana 的 Loki 数据源配置了
+derived field：日志里的 `"trace_id":"<32 位十六进制>"` 可直接跳到 Tempo 的
+同一链路；Tempo 侧也配置了 `tracesToLogsV2` 反向跳转。
+
+本地 Alloy 通过挂载 `docker.sock` 发现容器，仅适用于开发环境（等价于
+root 级宿主权限）。生产使用 DaemonSet + `loki.source.kubernetes`，见
+[`deploy/cluster/logging/README.md`](../deploy/cluster/logging/README.md)。
 
 压测对已启动的整栈执行：
 
@@ -242,6 +253,28 @@ bash deploy/cluster/acceptance/smoke.sh
 
 脚本末尾打印 `SMOKE_RESULT: PASS` 才算通过；任何一条断言失败都会以
 `SMOKE FAIL: <原因>` 退出。M14 的实测输出见 `docs/PROGRESS.md`。
+
+## 集群日志（Loki + Alloy）
+
+日志聚合属于平台能力，不进业务 chart。`deploy/cluster/logging/` 提供
+`grafana/loki` 与 `grafana/alloy` 的部署值：
+
+```bash
+kubectl create namespace observability
+kubectl -n observability create secret generic loki-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+# 先创建桶 expensio-loki-chunks / expensio-loki-ruler
+
+helm upgrade --install loki grafana/loki -n observability \
+  -f deploy/cluster/logging/loki-values.yaml --wait
+helm upgrade --install alloy grafana/alloy -n observability \
+  -f deploy/cluster/logging/alloy-values.yaml --wait
+```
+
+Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
+`app.kubernetes.io/part-of=expensio` 的 Pod；RBAC 仅授予
+`pods` / `pods/log` / `namespaces` / `nodes` 的只读权限，不挂 hostPath，
+也不给 Pod 挂 `docker.sock`。验证方法与取舍见该目录的 README。
 
 ## Chart 的安全默认值
 

@@ -1,0 +1,91 @@
+# grafana/loki 生产值（单二进制模式 + S3 兼容对象存储）。
+#
+# 为什么不直接复用本地 filesystem 配置：多副本或重建 Pod 后索引会分裂，
+# 日志"搜不到"比"服务挂了"更难被发现。生产必须用共享对象存储。
+#
+# 凭据不写在这里：AWS SDK 的默认凭证链会读取 loki-s3-credentials 里的
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY。
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+
+  # 单副本 + 单进程：保留期为 30 天，日志量在本项目规模内由 compactor 回收。
+  # 若日志量增长到单实例扛不住，再切 Distributed（backend/read/write 分开扩）。
+  commonConfig:
+    replication_factor: 1
+
+  storage:
+    type: s3
+    bucketNames:
+      chunks: expensio-loki-chunks
+      ruler: expensio-loki-ruler
+    s3:
+      # 指向 S3 兼容端点（MinIO / Ceph RGW / 云厂商 S3）。
+      endpoint: s3.example.internal:9000
+      region: us-east-1
+      # MinIO 等路径式存储必须开启；AWS S3 可以设为 false。
+      s3ForcePathStyle: true
+      insecure: false
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  limits_config:
+    retention_period: 720h
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+    max_streams_per_user: 50000
+    # 乱序写入容忍 1 小时：Alloy 重启后补发的日志不应被整批拒绝。
+    reject_old_samples_max_age: 168h
+    unordered_writes: true
+
+  compactor:
+    retention_enabled: true
+    delete_request_store: s3
+
+  extraEnvFrom:
+    - secretRef:
+        name: loki-s3-credentials
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  persistence:
+    enabled: true
+    size: 50Gi
+
+# 单二进制模式下其余角色必须显式归零，否则 chart 会按默认值再拉起一套。
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# 查询缓存：单实例场景也值得开，重复查询（排障时最典型）少扫对象存储。
+chunksCache:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+gateway:
+  enabled: true
+  replicas: 1

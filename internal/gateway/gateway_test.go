@@ -325,6 +325,9 @@ func TestNewRejectsMisconfiguration(t *testing.T) {
 				{Prefix: "/api/v1/me", Upstream: "identity"},
 				{Prefix: "/api/v1/me", Upstream: "identity"},
 			}, Logger: zap.NewNop()},
+		"熔断参数为负": {Parser: fakeParser{}, Upstreams: upstreams,
+			Rules:   []Rule{{Prefix: "/api/v1/me", Upstream: "identity"}},
+			Circuit: CircuitOptions{Failures: -1}, Logger: zap.NewNop()},
 	}
 
 	for name, opts := range cases {

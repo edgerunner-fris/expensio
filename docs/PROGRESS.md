@@ -2519,17 +2519,135 @@ RLS，**FORCE 对表属主同样生效**，definer 函数也读不到跨租户�
 | 账号级操作只写当前租户审计 | 设计如此 | 跨租户账号审计表未做 |
 | 锁定与网关限流的叠加行为 | 待验证 | 只做了功能测试，未做 5 次锁定 × 20/min 的联合压测 |
 
+## M18：自动续费、模拟支付、租户删除、熔断与日志聚合
+
+M17 之后 billing 只有"创建订阅 + 首期账单 + 回调"，周期不会前进；支付只能
+手工构造 HMAC；租户无法注销；网关持续向已挂掉的下游转发；日志只进 Docker
+json-file、无法按 trace 检索。设计见
+[ADR-0014](adr/0014-renewal-mockpay-deletion-circuitbreaker-loki.md)。
+
+### 交付内容
+
+| 层 | 文件 | 内容 |
+| --- | --- | --- |
+| 迁移 | `migrations/billing/000003_renewal.{up,down}.sql` | `anchor_day` 列与填充触发器、只允许连续前进的周期守卫、无 RLS 的 `app.renewal_schedule` 目录表 + 同步触发器、`app.due_subscriptions()` definer 函数 |
+| billing | `internal/billing/period.go` | `NextPeriodStart`：锚点日按 `min(anchor_day, 月末)` 落到目标月；`PeriodEnd` 复用它 |
+| billing | `internal/billing/repository.go` | `ListDueSubscriptions` / `HasOpenInvoice` / `RolloverSubscription`（CAS on version） |
+| billing | `internal/billing/renewal.go` | `Service.RunRenewal`、`RenewalJob`（启动即跑 + ticker，多副本安全）、`expensio.billing.renewal.results{outcome}` 指标 |
+| billing | `internal/billing/service.go` / `cmd/billing/main.go` | 创建订阅写入 `AnchorDay`；装配续费任务并随进程优雅停止 |
+| 平台 | `internal/platform/config/config.go` / `cmd/gateway/main.go` | `billing.renewal_interval` / `renewal_batch`、`circuit_breaker.*` 配置与校验 |
+| CLI | `cmd/mockpay/` | 可重复的支付回调模拟器：仅从环境变量读密钥、时间戳 + 原始报文 HMAC、非 2xx 退出码 1 |
+| identity | `internal/identity/tenant_delete.go` / `account_repository.go` / `handler.go` / `routes.go` | `DELETE /tenants/current`：owner + slug 二次确认，软删租户与成员、撤销全部刷新令牌与待接受邀请、审计 `tenant.deleted` |
+| 网关 | `internal/gateway/circuitbreaker.go` / `gateway.go` | 每下游独立 `gobreaker`：连续 5 次失败打开、30s 半开、503 + `Retry-After`、状态/拒绝指标 |
+| 平台 | `internal/platform/httpx/middleware/accesslog.go` | 访问日志写入 `trace_id` / `span_id`（来自 OTel span 上下文） |
+| 观测 | `deploy/local/loki/config.yaml`、`deploy/local/alloy/config.alloy`、`deploy/cluster/logging/` | 本地 Loki + Alloy；生产 Loki（S3 后端）+ Alloy DaemonSet values；Grafana 数据源与双向跳转 |
+| 前端 | `SettingsView.vue` / `api/auth.ts` / `stores/auth.ts` | 所有者专属"删除租户"危险区：slug 回写 + 二次确认，成功后清本地会话回登录页 |
+
+### API / CLI 契约
+
+| 接口 | 说明 |
+| --- | --- |
+| `DELETE /api/v1/tenants/current` | 仅 owner；body `{"slug": "<当前租户标识>"}`；成功 `{"sessions_revoked": N}`；不匹配 400、重复删除 404 |
+| `mockpay --url --invoice --event --payment-id --event-id --amount --currency` | `--event` 取 `succeeded` / `failed`；密钥 `EXPENSIO_BILLING_WEBHOOK_SECRET`、provider `EXPENSIO_BILLING_WEBHOOK_PROVIDER` |
+
+### 关键约束
+
+- 锚点日由首期起点决定并冻结；周期只允许 `new_start = old_end + 1` 的连续前进；
+- 当前周期有未支付账单时**不续费**，避免每轮叠加新账单；补缴后由后续轮次追平，
+  每轮每个订阅只前进一期；
+- 跨租户到期扫描不绕过 RLS：目录表无 RLS，只读函数 `REVOKE ALL` + 仅
+  `GRANT EXECUTE` 给 `billing_app`，处理后仍以 `WithinTenantID` 进入租户上下文；
+- 熔断只对网络错误与 502/503/504 计数；500 与客户端取消不计入；每个下游独立；
+- 删除租户不物理删除数据：软删除 + 断链，清理属于运维流程；
+- 日志采集不参与告警，告警仍全部基于指标。
+
+### 验收（2026-10-28 实测）
+
+```text
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/billing/... ./internal/identity/... \
+    -race -count=5 -timeout 30m
+ok  	github.com/edgerunner-fris/expensio/internal/billing	36.582s
+ok  	github.com/edgerunner-fris/expensio/internal/identity	150.807s
+RACE_EXIT=0
+
+$ go test ./internal/gateway/... ./internal/platform/config/... \
+    ./internal/platform/httpx/... ./cmd/mockpay/... -race -count=1
+ok  	github.com/edgerunner-fris/expensio/internal/gateway	5.769s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/config	1.113s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/httpx/middleware	1.028s
+ok  	github.com/edgerunner-fris/expensio/cmd/mockpay	1.048s
+
+$ gofmt -l internal cmd   # 无输出
+$ go build ./... && go vet ./...
+BUILD_OK
+VET_OK
+
+$ helm lint deploy/helm/expensio
+1 chart(s) linted, 0 chart(s) failed
+
+$ docker compose --profile app run --rm migrate
+==> migrate identity
+4/u tenant_switch (54.841026ms)
+5/u login_lockout (150.47931ms)
+==> migrate billing
+3/u renewal (128.644906ms)
+
+$ curl -s http://127.0.0.1:3100/ready
+ready
+
+$ curl -s http://127.0.0.1:3100/loki/api/v1/label/service/values
+{"status":"success","data":["alloy","billing","expense","gateway","grafana",
+ "identity","kafka","loki","mailpit","minio","notification","otel-collector",
+ "postgres","prometheus","redis","report","tempo","web"]}
+```
+
+Loki 查询到重建后的 identity 访问日志，`trace_id` 与 Tempo 中的同一条
+trace 一致（Tempo `GET /api/traces/<id>` 返回 200，span 名
+`POST /api/v1/*path`）：
+
+```text
+trace_id=7a61cefb9ea7f5dceb28c88ec76225cd span_id=170065e28a2c0b58 status=401 path=/api/v1/auth/login
+```
+
+前端：`npm run typecheck` 退出码 0，`npm run build` 输出 `✓ built`
+（Node 24 容器；WSL 内的 `node` 是 Windows 二进制，不能直接跑）。
+
+### 过程中发现并修复的问题
+
+1. **Loki 3.5.0 拒收全部日志**：ingester 持续报
+   `negative structured metadata bytes received`，`/ready` 永不就绪。换成
+   3.5.1 后同一配置 0 条该错误，日志正常写入；镜像标签已固定为 3.5.1。
+2. **访问日志测试对"字段缺席"的断言写错**：`observer.ContextMap()` 对缺失
+   键返回 `nil` 而不是空字符串，改为 `NotContains`；实现本身无需改动。
+3. **删掉的目录表状态**：运行中的 compose 数据库只到 identity 4 / billing 2，
+   新代码启动后登录报 500（`relation "app.login_failures" does not exist`）。
+   这个问题正是通过 Loki 里的 `error` 字段定位的；重跑迁移后恢复 401。
+4. **`go mod download` 首次失败**：容器内下载 `gobreaker` 时瞬时失败，
+   复跑即成功，未改构建逻辑；构建失败时 `BUILD_EXIT` 非 0，不会被当成成功。
+
+### 风险
+
+| 风险 | 状态 | 说明 |
+| --- | --- | --- |
+| 续费每轮只追平一期 | 设计如此 | 长期停机需多轮；每期独立账单，不会漏账 |
+| 欠费阻塞续费 | 设计如此 | 补缴后下一轮追平；`outcome=unpaid` 指标可发现长期欠费 |
+| 删除租户后 access token 最长 15 分钟仍可用 | 未解决 | 无状态验签与"立即失效"冲突；刷新链已全部撤销 |
+| 软删除不等于合规擦除 | 未解决 | 物理清理/导出保留策略属于运维流程，本期未实现 |
+| `renewal_schedule` 目录可能漂移 | 待验证 | 与订阅同事务由触发器同步；尚无定期对账任务 |
+| 熔断阈值是常量 | 待验证 | 5 次 / 30s 未按流量自适应；调参依据是 `circuit.transitions` |
+| 本地 Alloy 挂载 `docker.sock` | 设计如此 | 仅开发；生产 values 不挂套接字或宿主目录 |
+| Loki 生产单副本 | 设计如此 | 数据在对象存储，Pod 重建不丢；查询会短暂不可用 |
+| `mockpay` 不做自动重试 | 设计如此 | 非 2xx 退出码 1，是否重试由调用脚本决定 |
+
 ## 下一步
 
-M17 已收口。剩余工作分两类。
+M18 已收口。剩余工作分两类。
 
 功能面（内部审计提出，按里程碑推进）：
 
-1. M18：`MockPaymentGateway` 与月度出账任务、租户删除（软删 + 清理路径）、
-   `gobreaker` 熔断、Loki 日志聚合；
-2. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
+1. M19：OpenAPI 描述文件、`INTERVIEW.md`、可重复的种子数据、依赖与镜像
    安全扫描、`cd.yml`；
-3. M20：托管云、TLS、HPA 与备份演练。
+2. M20：托管云、TLS、HPA 与备份演练。
 
 环境面（"换环境"而非"补功能"）：
 

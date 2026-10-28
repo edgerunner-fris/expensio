@@ -58,7 +58,7 @@ func (r *Repository) GetPlan(ctx context.Context, tx pgx.Tx, code string) (*Plan
 }
 
 const subscriptionColumns = `id, tenant_id, plan_code, seats, status,
-	current_period_start, current_period_end, version, canceled_at,
+	current_period_start, current_period_end, anchor_day, version, canceled_at,
 	created_at, updated_at, created_by, updated_by`
 
 func scanSubscription(row pgx.Row) (*Subscription, error) {
@@ -68,7 +68,7 @@ func scanSubscription(row pgx.Row) (*Subscription, error) {
 	)
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.PlanCode, &s.Seats, &status,
-		&s.CurrentPeriodStart, &s.CurrentPeriodEnd, &s.Version, &s.CanceledAt,
+		&s.CurrentPeriodStart, &s.CurrentPeriodEnd, &s.AnchorDay, &s.Version, &s.CanceledAt,
 		&s.CreatedAt, &s.UpdatedAt, &s.CreatedBy, &s.UpdatedBy,
 	); err != nil {
 		return nil, err
@@ -84,12 +84,14 @@ func (r *Repository) CreateSubscription(ctx context.Context, tx pgx.Tx, s *Subsc
 	    (id, tenant_id, plan_code, seats, status, current_period_start, current_period_end,
 	     version, created_by, updated_by)
 	 VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)
-	 RETURNING version, created_at, updated_at`
+	 RETURNING anchor_day, version, created_at, updated_at`
+	// anchor_day 不在 INSERT 列表里：触发器按首次周期开始日填入，
+	// 返回真实值，避免 Go 侧猜测与数据库不一致。
 	return tx.QueryRow(ctx, q,
 		s.ID, s.TenantID, s.PlanCode, s.Seats, string(s.Status),
 		dateString(s.CurrentPeriodStart), dateString(s.CurrentPeriodEnd),
 		s.CreatedBy,
-	).Scan(&s.Version, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.AnchorDay, &s.Version, &s.CreatedAt, &s.UpdatedAt)
 }
 
 // GetSubscription 按 ID 取订阅；forUpdate 用于取消这类"先读后写"的路径。
@@ -227,6 +229,63 @@ func (r *Repository) CancelSubscription(ctx context.Context, tx pgx.Tx, s *Subsc
 		return err
 	}
 	s.Status = SubscriptionStatus(status)
+	return nil
+}
+
+// ListDueSubscriptions 读取跨租户到期目录。
+//
+// 目录表没有 RLS，但运行时角色对它没有任何直接权限，只能通过 SECURITY DEFINER
+// 函数拿到"状态 active 且周期已结束"的订阅 ID、租户与结束日。套餐、席位等
+// 业务列不出现在这里：续费必须在租户上下文里重新读取并加锁。
+func (r *Repository) ListDueSubscriptions(ctx context.Context, tx pgx.Tx, asOf time.Time, limit int) ([]RenewalCandidate, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT subscription_id, tenant_id, current_period_end
+		 FROM app.due_subscriptions($1, $2)`, dateString(asOf), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]RenewalCandidate, 0, limit)
+	for rows.Next() {
+		var c RenewalCandidate
+		if err := rows.Scan(&c.SubscriptionID, &c.TenantID, &c.PeriodEnd); err != nil {
+			return nil, err
+		}
+		items = append(items, c)
+	}
+	return items, rows.Err()
+}
+
+// HasOpenInvoice 判断订阅是否还有未结清的账单。
+//
+// 续费只允许发生在上一周期结清之后：否则一次漏付会被续费变成两张未付账单，
+// 也会让"欠费"状态失去意义。未结清时任务本轮跳过，下一轮再试。
+func (r *Repository) HasOpenInvoice(ctx context.Context, tx pgx.Tx, subscriptionID uuid.UUID) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		    SELECT 1 FROM app.invoices
+		    WHERE subscription_id = $1 AND status = 'open')`,
+		subscriptionID).Scan(&exists)
+	return exists, err
+}
+
+// RolloverSubscription 把订阅周期整体前移一格。updated_by 用零 UUID 表示
+// "系统任务"，不伪造用户身份；周期形状由 subscriptions_guard_update 复核。
+func (r *Repository) RolloverSubscription(ctx context.Context, tx pgx.Tx, s *Subscription, nextStart, nextEnd time.Time) error {
+	const q = `UPDATE app.subscriptions
+	    SET current_period_start = $1, current_period_end = $2, updated_by = $3
+	    WHERE id = $4 AND tenant_id = $5 AND version = $6 AND status = 'active'
+	    RETURNING version, updated_at`
+	if err := tx.QueryRow(ctx, q,
+		dateString(nextStart), dateString(nextEnd), uuid.Nil,
+		s.ID, s.TenantID, s.Version,
+	).Scan(&s.Version, &s.UpdatedAt); err != nil {
+		return err
+	}
+	s.CurrentPeriodStart = nextStart
+	s.CurrentPeriodEnd = nextEnd
 	return nil
 }
 

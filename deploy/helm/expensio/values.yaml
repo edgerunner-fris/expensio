@@ -89,6 +89,14 @@ rateLimit:
   apiPerMinute: 1200
   apiBurst: 200
 
+# 网关对每个下游独立熔断：连续 failures 次 502/503/504 或网络错误后打开，
+# timeout 过后放 maxRequests 个半开探测。interval=0 表示 counts 不做周期清零。
+circuitBreaker:
+  failures: 5
+  interval: 0s
+  timeout: 30s
+  maxRequests: 1
+
 http:
   # 允许携带 X-Forwarded-For 的上游网段，逗号分隔的 IP / CIDR。
   # 流量路径是 ingress → web（Go 反代）→ gateway，网关看到的直接来源

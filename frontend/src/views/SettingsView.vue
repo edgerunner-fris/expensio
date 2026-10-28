@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
@@ -61,6 +61,49 @@ async function saveProfile(): Promise<void> {
   } finally {
     profileSaving.value = false
   }
+}
+
+// 删除租户：只有所有者可见。输入框要求原样写回租户标识，
+// 与后端的 slug 二次确认是同一道闸，前端禁用按钮只是提前提示。
+const deleteSlug = ref('')
+const deleting = ref(false)
+const canDeleteTenant = computed(
+  () => deleteSlug.value.trim() !== '' && deleteSlug.value.trim() === auth.profile?.tenant_slug,
+)
+
+async function deleteTenant(): Promise<void> {
+  const slug = auth.profile?.tenant_slug
+  if (!slug || deleteSlug.value.trim() !== slug) {
+    ElMessage.error('租户标识不匹配')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `删除「${auth.profile?.tenant_name}」后，所有成员将立即无法访问，且无法自行恢复。`,
+      '确认删除租户',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    await auth.deleteTenant(slug)
+    ElMessage.success('租户已删除')
+  } catch (err) {
+    ElMessage.error(apiMessage(err))
+    return
+  } finally {
+    deleting.value = false
+  }
+  // 服务端已撤销本租户全部刷新令牌；本地会话一起清掉。
+  await auth.logout()
+  await router.replace({ name: 'login' })
 }
 
 async function changePassword(): Promise<void> {
@@ -159,6 +202,23 @@ async function changePassword(): Promise<void> {
         </el-form>
       </div>
     </div>
+
+    <div v-if="auth.isOwner" class="section-card danger-card">
+      <h3>删除租户</h3>
+      <p class="muted hint">
+        删除后，租户「{{ auth.profile?.tenant_name }}」的成员、待接受邀请与全部会话立即失效。
+        数据按保留策略软删除，恢复需要联系运维；此操作不可撤销。
+      </p>
+      <p class="muted hint">
+        请输入租户标识 <strong>{{ auth.profile?.tenant_slug }}</strong> 以确认：
+      </p>
+      <div class="danger-row">
+        <el-input v-model="deleteSlug" placeholder="租户标识" style="max-width: 280px" />
+        <el-button type="danger" :disabled="!canDeleteTenant" :loading="deleting" @click="deleteTenant">
+          删除租户
+        </el-button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -173,5 +233,17 @@ async function changePassword(): Promise<void> {
 .hint {
   margin: -4px 0 14px;
   font-size: 13px;
+}
+
+.danger-card {
+  margin-top: 16px;
+  border-color: var(--el-color-danger-light-5);
+}
+
+.danger-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 </style>
