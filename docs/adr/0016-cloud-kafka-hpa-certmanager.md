@@ -19,11 +19,15 @@ M19 收口后，"在本机跑得起来"与"能放到托管云"之间还有三处
 
 ### 1. Kafka：显式的 TLS + SASL，拒绝 SASL_PLAINTEXT
 
-配置面新增 `kafka.tls`、`kafka.sasl_mechanism`、`kafka.sasl_username`、
-`kafka.sasl_password`；支持 `plain`、`scram-sha-256`、`scram-sha-512`。
-口令只从 Secret 注入，且只挂给 `services.*.kafka=true` 的四个服务
-（expense / billing / report / notification）——identity 与网关不消费事件，
-给它们注入认证参数只会在缺键时无故起不来。
+配置面新增 `kafka.tls`、`kafka.tls_ca_file`、`kafka.sasl_mechanism`、
+`kafka.sasl_username`、`kafka.sasl_password`；支持 `plain`、`scram-sha-256`、
+`scram-sha-512`。口令只从 Secret 注入，且只挂给
+`services.*.kafka=true` 的四个服务（expense / billing / report / notification）
+——identity 与网关不消费事件，给它们注入认证参数只会在缺键时无故起不来。
+
+`tls_ca_file` 只用于私有 CA（自建集群、企业 PKI）：为空时用系统根证书，
+托管服务的证书都签自公有 CA。Chart 对应 `kafka.tlsCA=true`，从 Secret 挂载
+`ca.pem`；未开启 TLS 却配置 CA 会在配置层与模板层分别失败。
 
 校验放两层：
 
@@ -83,8 +87,9 @@ EKS/AKS/GKE 的依赖与网络对照表。
 
 ## 风险
 
-- Kafka SASL/TLS 只做了选项构造与配置校验，没有连接过真实 SASL broker；
-  首次接入 MSK / Event Hubs 时必须验证 `Ping` 与一条端到端事件。
+- Kafka SASL/TLS 已对 testcontainers 启动的真实 broker 验证；但 MSK 的
+  SCRAM、Event Hubs 的连接串形态属于供应商差异，首次接入时必须再验证
+  `Ping` 与一条端到端事件。
 - HPA 没有在 metrics-server 下做过加压测试；扩缩容期间消费者再平衡与
   网关连接排空（`terminationGracePeriodSeconds=30`）也没有实测。
 - cert-manager 的 ACME 流程依赖真实域名与公网入口，CI 无法覆盖。
@@ -95,10 +100,16 @@ EKS/AKS/GKE 的依赖与网络对照表。
 
 ## 测试
 
-- `internal/platform/config`：SASL 必须有 TLS、机制白名单、凭据成对；
+- `internal/platform/config`：SASL 必须有 TLS、机制白名单、凭据成对、
+  CA 文件必须配合 TLS；
 - `internal/platform/kafka`：`Security.options()` 的 TLS/SASL 组合、非法
-  机制、缺少凭据、`NewProducer` 在拨号前拒绝非法安全参数；
+  机制、缺少凭据、CA 文件缺失/内容非法、`NewProducer` 在拨号前拒绝非法
+  安全参数；
+- `internal/platform/kafka` 集成测试：testcontainers 启动
+  `apache/kafka:3.9.2`（SASL/PLAIN + TLS + 自签 CA），完成真实握手、生产、
+  消费与位点提交；错误口令与明文客户端必须被拒绝；
 - `helm lint` + `helm template`：默认、开启 HPA、开启 cert-manager、开启
-  Kafka SASL 四种渲染；负例（min > max、cert-manager 无 TLS）必须失败；
-- kubeconform（K8s 1.31 schema）：31 个资源全部 valid；
-- 未执行：真实云集群、ACME 签发、HPA 实际扩缩容、真实 SASL broker。
+  Kafka SASL、开启私有 CA 五种渲染；负例（min > max、cert-manager 无 TLS、
+  tlsCA 无 TLS）必须失败；
+- kubeconform（K8s 1.31 schema）：渲染结果全部 valid；
+- 未执行：真实云集群、ACME 签发、HPA 实际扩缩容、各云厂商 Kafka 端点。

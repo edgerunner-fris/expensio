@@ -1,6 +1,8 @@
 package kafka
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,4 +82,27 @@ func TestNewProducerRejectsInvalidSecurityBeforeDialing(t *testing.T) {
 	_, err = NewProducer([]string{"127.0.0.1:9092"}, "expense", Security{}, Security{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "至多传一个")
+}
+
+func TestSecurityTLSCAFile(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.pem")
+	invalid := filepath.Join(dir, "invalid.pem")
+	require.NoError(t, os.WriteFile(invalid, []byte("not a certificate"), 0o600))
+
+	// CA 文件读不到要在建客户端之前失败，而不是等第一次请求才发现。
+	_, err := Security{TLS: true, TLSCAFile: missing}.options()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "读取 tls_ca_file 失败")
+
+	// 内容不是证书时同样拒绝：空根池会表现为"所有 broker 校验失败"，
+	// 很难和网络问题区分。
+	_, err = Security{TLS: true, TLSCAFile: invalid}.options()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "没有可用的 PEM 证书")
+
+	// 没开 TLS 却给 CA 文件，说明配置写错了。
+	_, err = Security{TLSCAFile: invalid}.options()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "没有开启 tls")
 }

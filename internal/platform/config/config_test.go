@@ -115,6 +115,23 @@ func TestKafkaSASLRequiresBothCredentials(t *testing.T) {
 	assert.Contains(t, err.Error(), "sasl_username 与 sasl_password")
 }
 
+func TestKafkaTLSCAFileRequiresTLS(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS_CA_FILE", "/etc/expensio/kafka/ca.pem")
+
+	_, err := config.Load(kafkaOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tls_ca_file")
+}
+
+func TestKafkaTLSCAFileAcceptedWithTLS(t *testing.T) {
+	t.Setenv("EXPENSIO_KAFKA_TLS", "true")
+	t.Setenv("EXPENSIO_KAFKA_TLS_CA_FILE", "/etc/expensio/kafka/ca.pem")
+
+	cfg, err := config.Load(kafkaOptions())
+	require.NoError(t, err)
+	assert.Equal(t, "/etc/expensio/kafka/ca.pem", cfg.Kafka.TLSCAFile)
+}
+
 func TestMissingRequiredDBNameIsReported(t *testing.T) {
 	_, err := config.Load(config.Options{
 		Service:     "identity-service",

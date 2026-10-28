@@ -67,6 +67,13 @@ spec:
                 printf 'security.protocol=SSL\n' > /tmp/client.properties
                 CONFIG="--command-config /tmp/client.properties"
               fi
+              # 私有 CA 才挂这个文件；公有 CA 由 JDK 的 cacerts 覆盖。
+              if [ -f /etc/kafka/ca/ca.pem ]; then
+                {
+                  printf 'ssl.truststore.type=PEM\n'
+                  printf 'ssl.truststore.location=/etc/kafka/ca/ca.pem\n'
+                } >> /tmp/client.properties
+              fi
               for t in expensio.expense.events.v1 expensio.expense.events.v1.dlq \
                        expensio.billing.events.v1 expensio.billing.events.v1.dlq; do
                 i=0
@@ -93,7 +100,20 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.kafka.tlsCA }}
+            - name: kafka-ca
+              mountPath: /etc/kafka/ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.kafka.tlsCA }}
+        - name: kafka-ca
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            items:
+              - key: {{ .Values.secretKeys.kafkaTLSCA }}
+                path: ca.pem
+        {{- end }}
 {{- end }}

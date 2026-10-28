@@ -31,6 +31,8 @@ secretKeys:
   billingWebhook: EXPENSIO_BILLING_WEBHOOK_SECRET
   # 只在 kafka.saslMechanism 非空时注入到需要 Kafka 的服务。
   kafkaSASLPassword: EXPENSIO_KAFKA_SASL_PASSWORD
+  # 私有 CA 的 PEM；只在 kafka.tlsCA=true 时挂载到 Kafka 相关 Pod。
+  kafkaTLSCA: EXPENSIO_KAFKA_TLS_CA
   # 托管 Redis（ElastiCache AUTH / Azure Cache）需要；本地无认证时可省略。
   redisPassword: EXPENSIO_REDIS_PASSWORD
   internalToken: EXPENSIO_NOTIFICATION_INTERNAL_TOKEN
@@ -55,6 +57,9 @@ kafka:
   brokers: kafka.example.internal:9092
   # 托管 Kafka 几乎都要求 TLS；本地 compose 为 false。
   tls: false
+  # 私有 CA（自建集群、企业 PKI）。公有 CA 签发的托管服务保持 false。
+  # 开启后从 existingSecret 的 secretKeys.kafkaTLSCA 键挂载 ca.pem。
+  tlsCA: false
   # 空表示不做 SASL。可选 plain / scram-sha-256 / scram-sha-512：
   # AWS MSK 常用 SCRAM，Event Hubs / Confluent Cloud 用 PLAIN。
   # 开启后必须同时设置 tls（配置层会拒绝 SASL_PLAINTEXT）。

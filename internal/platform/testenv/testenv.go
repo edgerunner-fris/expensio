@@ -265,6 +265,10 @@ func Cleanup() {
 	if kafkaInstance != nil {
 		_ = kafkaInstance.container.Terminate(ctx)
 	}
+	if kafkaSASLInstance != nil {
+		_ = kafkaSASLInstance.container.Terminate(ctx)
+		_ = os.RemoveAll(kafkaSASLInstance.dir)
+	}
 	if minioInstance != nil {
 		_ = minioInstance.container.Terminate(ctx)
 	}

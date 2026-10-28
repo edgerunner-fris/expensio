@@ -88,6 +88,10 @@ spec:
                   name: {{ $secret }}
                   key: {{ $keys.kafkaSASLPassword }}
             {{- end }}
+            {{- if $root.Values.kafka.tlsCA }}
+            - name: EXPENSIO_KAFKA_TLS_CA_FILE
+              value: /etc/expensio/kafka/ca.pem
+            {{- end }}
             {{- end }}
             {{- if $svc.redis }}
             # 可选键：本地/验收 Redis 无认证。托管 Redis 必须提供，否则请求
@@ -148,6 +152,12 @@ spec:
                   # 允许本地/无认证 SMTP；生产 Secret 里应提供该键。
                   optional: true
             {{- end }}
+          {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
+          volumeMounts:
+            - name: kafka-ca
+              mountPath: /etc/expensio/kafka
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -168,6 +178,15 @@ spec:
             {{- toYaml $root.Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml $root.Values.securityContext | nindent 12 }}
+      {{- if and $svc.kafka $root.Values.kafka.tlsCA }}
+      volumes:
+        - name: kafka-ca
+          secret:
+            secretName: {{ $secret }}
+            items:
+              - key: {{ $keys.kafkaTLSCA }}
+                path: ca.pem
+      {{- end }}
       {{- with $root.Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

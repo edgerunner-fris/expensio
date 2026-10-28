@@ -173,6 +173,9 @@ type Kafka struct {
 	Brokers []string `mapstructure:"brokers"`
 	// TLS 对 broker 连接启用 TLS（托管 Kafka 几乎都要求）。
 	TLS bool `mapstructure:"tls"`
+	// TLSCAFile 是额外的根证书 PEM 路径，用于自建/私有 CA 的 broker。
+	// 为空时只用系统根证书：MSK、Event Hubs、Confluent Cloud 都签自公有 CA。
+	TLSCAFile string `mapstructure:"tls_ca_file"`
 	// SASLMechanism 为空表示不做 SASL；支持 plain、scram-sha-256、scram-sha-512。
 	// 托管服务里 AWS MSK 常用 SCRAM，Event Hubs / Confluent Cloud 用 PLAIN。
 	SASLMechanism string `mapstructure:"sasl_mechanism"`
@@ -298,6 +301,8 @@ func defaults(opts Options) map[string]any {
 
 		"kafka.brokers": []string{"localhost:29092"},
 		"kafka.tls":     false,
+		// 私有 CA 才需要；公有 CA 签发的托管集群留空。
+		"kafka.tls_ca_file": "",
 		// 本地 compose 的 Kafka 不做认证；托管 Kafka 通过环境变量注入。
 		"kafka.sasl_mechanism": "",
 		"kafka.sasl_username":  "",
@@ -439,6 +444,9 @@ func (c *Config) validate(opts Options) error {
 		}
 	} else if c.Kafka.SASLUsername != "" || c.Kafka.SASLPassword != "" {
 		errs = append(errs, errors.New("kafka.sasl_username / sasl_password 已配置但 sasl_mechanism 为空"))
+	}
+	if c.Kafka.TLSCAFile != "" && !c.Kafka.TLS {
+		errs = append(errs, errors.New("kafka.tls_ca_file 需要同时开启 kafka.tls"))
 	}
 
 	if opts.NeedsJWT {

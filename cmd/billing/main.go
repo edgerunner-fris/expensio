@@ -76,7 +76,7 @@ func setup(app *bootstrap.App) error {
 	})
 
 	sec := kafka.Security{
-		TLS:           cfg.Kafka.TLS,
+		TLSCAFile:     cfg.Kafka.TLSCAFile,
 		SASLMechanism: cfg.Kafka.SASLMechanism,
 		SASLUsername:  cfg.Kafka.SASLUsername,
 		SASLPassword:  cfg.Kafka.SASLPassword,

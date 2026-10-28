@@ -117,6 +117,8 @@ kubectl -n expensio create secret generic expensio-secrets \
   --from-literal=EXPENSIO_NOTIFICATION_SMTP_PASSWORD='...'
 # 使用托管 Kafka 的 SASL 认证时再加一个键（本地/无认证 Kafka 不需要）：
 #   --from-literal=EXPENSIO_KAFKA_SASL_PASSWORD='...'
+# broker 使用私有 CA 时还要提供 PEM（公有 CA 的托管服务不需要）：
+#   --from-file=EXPENSIO_KAFKA_TLS_CA=/path/to/ca.pem
 ```
 
 必需键见 `values.yaml` 的 `secretKeys`。JWT 只支持 EdDSA：identity 需要
@@ -168,6 +170,8 @@ kafka:
   # 托管 Kafka：TLS 必开；SASL 机制按供应商选择
   # （MSK 常用 scram-sha-512，Event Hubs / Confluent Cloud 用 plain）。
   tls: true
+  # 自建集群 / 企业 PKI 才设 true，并从 Secret 提供 EXPENSIO_KAFKA_TLS_CA。
+  tlsCA: false
   saslMechanism: scram-sha-512
   saslUsername: expensio
   # 口令来自 Secret 键 EXPENSIO_KAFKA_SASL_PASSWORD，不在 values 里。
@@ -383,14 +387,21 @@ M20 之前客户端只支持明文 PLAINTEXT，托管 Kafka 接不上。现在
 | 配置 | 说明 |
 | --- | --- |
 | `kafka.tls` | 对 broker 连接启用 TLS 1.2+ |
+| `kafka.tlsCA` | 私有 CA：把 Secret 里的 PEM 挂到 `/etc/expensio/kafka/ca.pem`；公有 CA 的托管服务保持 `false` |
 | `kafka.saslMechanism` | `plain` / `scram-sha-256` / `scram-sha-512` |
 | `kafka.saslUsername` | 用户名（非敏感） |
 | Secret `EXPENSIO_KAFKA_SASL_PASSWORD` | 口令，只注入需要 Kafka 的四个服务 |
+| Secret `EXPENSIO_KAFKA_TLS_CA` | 私有 CA 的 PEM，只在 `kafka.tlsCA=true` 时挂载 |
 
 配置层与客户端都会拒绝"SASL 但不启用 TLS"：SASL 只保护认证，不保护数据；
-托管服务的 SASL 端点也都要求 TLS。SASL 选项的构造有单元测试，但**没有对
-真实 SASL broker 做过连接验证**，首次接入 MSK / Event Hubs 时先跑一次
-生产者的 `Ping` 与一条端到端事件。
+托管服务的 SASL 端点也都要求 TLS。
+
+集成测试会在 testcontainers 里启动真实的 `apache/kafka:3.9.2`
+（SASL/PLAIN + TLS + 自签 CA），跑通握手、生产、消费与位点提交，并验证错误
+口令和明文客户端都会被拒绝：
+`EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/platform/kafka/ -run TestSASL -race`。
+未验证的是各云厂商的具体端点（MSK 的 SCRAM、Event Hubs 的连接串形态）；
+首次接入时先跑一次生产者的 `Ping` 与一条端到端事件。
 
 ### 3. 身份与网络
 
@@ -520,8 +531,10 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
   下的加压测试；也没有验证扩缩容期间的事件消费再平衡。
 - **cert-manager 未走完整 ACME**：注解与 Issuer 二选一、缺少 TLS 时模板
   直接失败；但签发与续期依赖真实域名，未在 CI 中执行。
-- **Kafka SASL 未连过真实 broker**：TLS + PLAIN/SCRAM 选项有单元测试，
-  托管服务的连接参数仍需首次接入时验证。
+- **Kafka SASL 只对本地真实 broker 验证过**：testcontainers 启的
+  `apache/kafka`（SASL/PLAIN + TLS）已经跑通生产/消费/位点提交，错误口令与
+  明文连接会被拒绝；但 MSK 的 SCRAM、Event Hubs 的连接串形态属于供应商差异，
+  首次接入时仍需验证。
 - **`verify-full` 不可直接配置**：chart 只透传 `sslmode`，没有挂载 CA 与
   `sslrootcert`，托管数据库目前止步于 `require`。
 - **出站未做白名单**：NetworkPolicy 只限制入站。数据库/Kafka/SMTP 地址由

@@ -125,6 +125,8 @@ make load K6_DURATION=30s
   设置 `EXPENSIO_REQUIRE_DOCKER=1` 后跳过视为失败。
 - 跨服务链路在 `internal/e2e` 单独回归：expense 写 outbox → 真实 Kafka →
   report 消费落读模型 → 报表 API 返回聚合。
+- Kafka 的 TLS + SASL 有独立集成测试：testcontainers 启动 SASL_SSL broker，
+  验证真实握手、生产、消费、位点提交，并断言错误口令与明文连接会被拒绝。
 - k6 对已启动整栈跑真实业务循环；M7 实测 3 VUs / 30s，
   p95 20.26–86.28ms，阈值全部通过，详见 `docs/PROGRESS.md`。
 - 浏览器级 E2E：`make e2e`（Playwright 官方容器，需先 `make app-up`；
@@ -152,8 +154,9 @@ Chart 只部署无状态服务，PostgreSQL / Redis / Kafka / Secret / Collector
 由平台提供。`helm lint`、`helm template` 与 kubeconform 已通过，并在真实
 k3d 集群上完成 `helm upgrade --install --wait` 与行为验收（迁移/建主题 Hook、
 Ingress、NetworkPolicy、RBAC、事件链路）。Chart 另提供 HPA、cert-manager
-注解与托管 Kafka 的 TLS/SASL 配置，但这些只做了渲染与单元测试；托管云集群、
-ACME 签发与真实扩缩容尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+注解与托管 Kafka 的 TLS/SASL 配置：SASL 已对 testcontainers 里的真实 broker
+跑通集成测试，HPA 与证书签发只做了渲染与负例校验；托管云集群、ACME 签发与
+真实扩缩容尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 目录
 
@@ -180,8 +183,9 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 集群验收用的是 k3d（双节点 k3s）与单节点依赖；托管云（EKS/AKS/GKE）、
-  ACME 证书签发、HPA 真实扩缩容、真实 SASL Kafka、PDB 驱逐演练与多可用区
-  未验证。
+  ACME 证书签发、HPA 真实扩缩容、PDB 驱逐演练与多可用区未验证。
+  Kafka 的 TLS + SASL 已在 testcontainers 启动的真实 broker 上跑通生产、
+  消费与负例，但各云厂商的认证端点仍需首次接入时验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
   Playwright 与真实 k3d 集群验收（PR 不跑，本地用 `make e2e`）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；

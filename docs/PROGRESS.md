@@ -2810,19 +2810,21 @@ PLAINTEXT（MSK / Event Hubs / Confluent 都要求 TLS + SASL）；chart 只有�
 
 | 层 | 文件 | 内容 |
 | --- | --- | --- |
-| 配置 | `internal/platform/config/config.go` | `kafka.tls` / `sasl_mechanism` / `sasl_username` / `sasl_password`；机制白名单、凭据成对、SASL 必须配 TLS |
-| Kafka | `internal/platform/kafka/security.go` | `Security.options()`：TLS 1.2+、PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512；构造客户端前再校验一次 |
+| 配置 | `internal/platform/config/config.go` | `kafka.tls` / `tls_ca_file` / `sasl_mechanism` / `sasl_username` / `sasl_password`；机制白名单、凭据成对、SASL 必须配 TLS、CA 文件必须配 TLS |
+| Kafka | `internal/platform/kafka/security.go` | `Security.options()`：TLS 1.2+、私有 CA、PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512；构造客户端前再校验一次 |
 | Kafka | `producer.go` / `consumer.go` / report / notification | 生产者用可变参数接收 `Security`，消费选项新增同名字段；四个需要 Kafka 的服务在 `cmd/*` 装配处传入 |
+| 测试 | `internal/platform/testenv/kafka_sasl.go` | 生成一次性 CA/服务端证书，启动 SASL_SSL broker；真实握手/生产/消费/负例集成测试 |
 | Chart | `templates/hpa.yaml`、`_helpers.tpl` | `autoscaling/v2` HPA；全局值 + 按服务覆盖；开启后 Deployment 不渲染 `replicas` |
 | Chart | `templates/ingress.yaml` | cert-manager 注解（clusterIssuer 优先），缺少 TLS 或 issuer 时模板失败 |
-| Chart | `values.yaml`、`deployments.yaml` | Kafka TLS/SASL 只注入四个 Kafka 服务，口令来自 Secret；gateway 可选 Redis 口令；chart 版本 0.2.0 |
+| Chart | `values.yaml`、`deployments.yaml` | Kafka TLS/SASL/私有 CA 只注入四个 Kafka 服务，口令与 CA 来自 Secret；gateway 可选 Redis 口令；chart 版本 0.2.0 |
 | 文档 | `docs/DEPLOYMENT.md` | HPA、cert-manager、EKS/AKS/GKE 依赖与网络对照、迁移顺序 |
 
 ### 关键约束
 
 - SASL 必须同时开启 TLS：SASL 只保护认证，不保护数据；拒绝
   SASL_PLAINTEXT 是有意的；
-- Kafka 口令只从 Secret 注入，且只挂给真正使用 Kafka 的服务；
+- Kafka 口令只从 Secret 注入，且只挂给真正使用 Kafka 的服务；私有 CA 的
+  PEM 同样走 Secret，不写进 values；
 - HPA 开启后副本数由 HPA 独占，避免 Helm 与 HPA 互相覆盖；
 - Chart 不创建 Issuer / Certificate：ACME 账号与 solver 属于集群管理员；
 - 托管云差异通过 values 注入，不为三家云各维护一套 manifest。
@@ -2839,19 +2841,30 @@ $ go test ./internal/platform/config/... ./internal/platform/kafka/... -count=1
 ok  	github.com/edgerunner-fris/expensio/internal/platform/config	0.013s
 ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	12.005s
 
-$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=1 -timeout 30m
-ok  	github.com/edgerunner-fris/expensio/internal/billing	25.764s
-ok  	github.com/edgerunner-fris/expensio/internal/contract	1.215s
-ok  	github.com/edgerunner-fris/expensio/internal/e2e	34.519s
-ok  	github.com/edgerunner-fris/expensio/internal/expense	29.948s
-ok  	github.com/edgerunner-fris/expensio/internal/gateway	6.473s
-ok  	github.com/edgerunner-fris/expensio/internal/identity	47.165s
-ok  	github.com/edgerunner-fris/expensio/internal/notification	21.763s
-ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	21.569s
-ok  	github.com/edgerunner-fris/expensio/internal/platform/outbox	22.069s
-ok  	github.com/edgerunner-fris/expensio/internal/report	41.784s
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./internal/platform/kafka/ \
+    -run 'TestSASLPlainOverTLSRoundTrip|TestSASLWrongPasswordIsRejected|TestPlainClientRejectedBySASLBroker' \
+    -race -count=1 -v
+=== RUN   TestSASLPlainOverTLSRoundTrip
+--- PASS: TestSASLPlainOverTLSRoundTrip (11.70s)
+=== RUN   TestSASLWrongPasswordIsRejected
+--- PASS: TestSASLWrongPasswordIsRejected (0.31s)
+=== RUN   TestPlainClientRejectedBySASLBroker
+--- PASS: TestPlainClientRejectedBySASLBroker (0.01s)
+ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	14.922s
+
+$ EXPENSIO_REQUIRE_DOCKER=1 go test ./... -race -count=5 -timeout 40m
+ok  	github.com/edgerunner-fris/expensio/internal/billing	32.684s
+ok  	github.com/edgerunner-fris/expensio/internal/contract	2.581s
+ok  	github.com/edgerunner-fris/expensio/internal/e2e	42.778s
+ok  	github.com/edgerunner-fris/expensio/internal/expense	40.463s
+ok  	github.com/edgerunner-fris/expensio/internal/gateway	9.063s
+ok  	github.com/edgerunner-fris/expensio/internal/identity	126.890s
+ok  	github.com/edgerunner-fris/expensio/internal/notification	25.754s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/kafka	49.943s
+ok  	github.com/edgerunner-fris/expensio/internal/platform/outbox	26.913s
+ok  	github.com/edgerunner-fris/expensio/internal/report	102.388s
 ... 其余有测试的包均 ok；无测试文件的包显示 [no test files]
-FULL_EXIT=0
+FULL5_EXIT=0
 
 $ helm lint deploy/helm/expensio
 1 chart(s) linted, 0 chart(s) failed
@@ -2887,11 +2900,18 @@ ingress.certManager.enabled=true 需要同时开启 ingress.tls.enabled
 Kafka SASL 渲染（`tls=true`、`scram-sha-512`）：四个 Kafka 服务拿到
 `EXPENSIO_KAFKA_TLS`、`EXPENSIO_KAFKA_SASL_MECHANISM` 与
 `EXPENSIO_KAFKA_SASL_PASSWORD`（Secret 引用）；gateway / identity / web
-没有任何 Kafka 认证变量。
+没有任何 Kafka 认证变量。私有 CA（`kafka.tlsCA=true`）时同一组服务额外挂载
+Secret 的 `ca.pem` 并注入 `EXPENSIO_KAFKA_TLS_CA_FILE`，topics Job 也挂载
+CA 并把 `ssl.truststore.*` 写进 `client.properties`；默认渲染下这些都不存在，
+`tlsCA` 未开 TLS 时模板直接失败。
 
 ```text
-$ helm template ... | kubeconform -strict -kubernetes-version 1.31.0
+$ helm template ... --set autoscaling.enabled=true | kubeconform -strict -kubernetes-version 1.31.0
 Summary: 31 resources found in 1 file - Valid: 31, Invalid: 0, Errors: 0, Skipped: 0
+
+$ helm template ... --set kafka.tls=true --set kafka.tlsCA=true \
+    --set kafka.saslMechanism=scram-sha-512 | kubeconform -strict
+Summary: 24 resources found in 1 file - Valid: 24, Invalid: 0, Errors: 0, Skipped: 0
 ```
 
 未执行（需要外部环境）：
@@ -2900,14 +2920,16 @@ Summary: 31 resources found in 1 file - Valid: 31, Invalid: 0, Errors: 0, Skippe
   NetworkPolicy 行为、负载均衡器；
 - cert-manager 的 ACME 签发与续期；
 - HPA 在 metrics-server 下的加压扩缩容；
-- 真实 SASL broker 的连接与端到端事件。
+- 各云厂商 Kafka 端点的认证差异（MSK 的 SCRAM、Event Hubs 的连接串形态）；
+  本地真实 broker 的 SASL/PLAIN + TLS 链路已覆盖。
 
 ### 风险
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
 | 托管云流程未执行 | 未解决 | 没有云账号与集群凭据；chart 渲染与 k3d 行为不能替代云上验证 |
-| Kafka SASL 未连过真实 broker | 待验证 | 选项构造有单元测试；首次接入 MSK/Event Hubs 时验证 `Ping` 与一条事件 |
+| Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
+| 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
 | HPA 未做真实扩缩容 | 待验证 | 未验证扩缩容期间的事件消费再平衡与连接排空 |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | 托管 PG 只能到 `sslmode=require` | 未解决 | `verify-full` 需要 CA 挂载与自定义 DSN，chart 未实现 |
@@ -2923,7 +2945,8 @@ Summary: 31 resources found in 1 file - Valid: 31, Invalid: 0, Errors: 0, Skippe
    NetworkPolicy 差异；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
 3. metrics-server 下的 HPA 加压测试（扩容、缩容、再平衡）；
-4. 真实 SASL Kafka（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
+4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
+   本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
 5. 托管 PostgreSQL 的 `verify-full`：挂载 CA、改用自定义 DSN；
 6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 

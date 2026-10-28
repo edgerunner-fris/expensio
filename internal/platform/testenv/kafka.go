@@ -15,7 +15,6 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 const (
@@ -122,38 +121,7 @@ func (k *Kafka) CreateTopic(t *testing.T, name string, partitions int32) {
 	}
 	defer client.Close()
 
-	req := kmsg.NewPtrCreateTopicsRequest()
-	req.TimeoutMillis = 10000
-	topic := kmsg.NewCreateTopicsRequestTopic()
-	topic.Topic = name
-	topic.NumPartitions = partitions
-	topic.ReplicationFactor = 1
-	req.Topics = append(req.Topics, topic)
-
-	raw, err := client.Request(ctx, req)
-	if err != nil {
-		t.Fatalf("testenv: 建主题 %s 失败: %v", name, err)
-	}
-	resp, ok := raw.(*kmsg.CreateTopicsResponse)
-	if !ok {
-		t.Fatalf("testenv: 建主题返回了意外类型 %T", raw)
-	}
-	for _, rt := range resp.Topics {
-		if rt.Topic != name {
-			continue
-		}
-		// TOPIC_ALREADY_EXISTS 视为成功：同一容器的多个测试可能复用主题。
-		if rt.ErrorCode != 0 && rt.ErrorCode != 36 {
-			message := ""
-			if rt.ErrorMessage != nil {
-				message = *rt.ErrorMessage
-			}
-			t.Fatalf("testenv: 建主题 %s 失败: code=%d message=%s",
-				name, rt.ErrorCode, message)
-		}
-		return
-	}
-	t.Fatalf("testenv: 建主题 %s 的响应里没有该主题", name)
+	createTopic(t, ctx, client, name, partitions)
 }
 
 // freePort 让内核分配一个空闲的 TCP 端口，随即释放。

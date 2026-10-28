@@ -2,8 +2,10 @@ package kafka
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -14,10 +16,36 @@ import (
 // Security 是 broker 连接的安全参数。零值表示明文、无认证，与本地 compose
 // 的 Kafka 一致；托管 Kafka 通过环境变量注入 TLS + SASL。
 type Security struct {
-	TLS           bool
+	TLS bool
+	// TLSCAFile 是额外根证书 PEM。为空时用系统根证书；私有 CA 才需要。
+	TLSCAFile     string
 	SASLMechanism string
 	SASLUsername  string
 	SASLPassword  string
+}
+
+// tlsConfig 构造客户端 TLS 配置。只有显式给了 CA 文件才覆盖 RootCAs，
+// 否则保留系统根证书 —— 托管服务的证书都签自公有 CA，塞一个空池会全部失败。
+func (s Security) tlsConfig() (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if s.TLSCAFile == "" {
+		return cfg, nil
+	}
+	pem, err := os.ReadFile(s.TLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: 读取 tls_ca_file 失败: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		// SystemCertPool 在精简容器里可能返回错误；私有 CA 场景下
+		// 用空池也能工作，不要因此拒绝启动。
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("kafka: tls_ca_file %s 里没有可用的 PEM 证书", s.TLSCAFile)
+	}
+	cfg.RootCAs = pool
+	return cfg, nil
 }
 
 // options 把 Security 翻译成 franz-go 选项，并在构造客户端之前校验。
@@ -28,7 +56,13 @@ func (s Security) options() ([]kgo.Opt, error) {
 	var opts []kgo.Opt
 
 	if s.TLS {
-		opts = append(opts, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+		cfg, err := s.tlsConfig()
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, kgo.DialTLSConfig(cfg))
+	} else if s.TLSCAFile != "" {
+		return nil, errors.New("kafka: 配置了 tls_ca_file 但没有开启 tls")
 	}
 
 	if mech == "" {

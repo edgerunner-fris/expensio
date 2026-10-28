@@ -71,7 +71,7 @@ func setup(app *bootstrap.App) error {
 
 	// DLQ 与业务事件共用同一个生产者：两者对 acks=all 的要求一致。
 	sec := kafka.Security{
-		TLS:           cfg.Kafka.TLS,
+		TLSCAFile:     cfg.Kafka.TLSCAFile,
 		SASLMechanism: cfg.Kafka.SASLMechanism,
 		SASLUsername:  cfg.Kafka.SASLUsername,
 		SASLPassword:  cfg.Kafka.SASLPassword,

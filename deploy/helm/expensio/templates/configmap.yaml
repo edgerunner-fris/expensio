@@ -1,6 +1,9 @@
 {{- if and .Values.kafka.saslMechanism (not .Values.kafka.tls) }}
 {{- fail "kafka.saslMechanism 需要同时开启 kafka.tls：SASL_PLAINTEXT 会让口令与事件明文过网" }}
 {{- end }}
+{{- if and .Values.kafka.tlsCA (not .Values.kafka.tls) }}
+{{- fail "kafka.tlsCA 需要同时开启 kafka.tls：只挂 CA 而不启用 TLS 没有意义" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

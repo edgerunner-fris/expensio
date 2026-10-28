@@ -72,7 +72,7 @@ func setup(app *bootstrap.App) error {
 	// 事件投递是后台链路：Kafka 不可用不影响 HTTP 服务启动，
 	// 也不参与 readiness。事件已经在 outbox 里，进程活着就会继续重试。
 	sec := kafka.Security{
-		TLS:           cfg.Kafka.TLS,
+		TLSCAFile:     cfg.Kafka.TLSCAFile,
 		SASLMechanism: cfg.Kafka.SASLMechanism,
 		SASLUsername:  cfg.Kafka.SASLUsername,
 		SASLPassword:  cfg.Kafka.SASLPassword,
