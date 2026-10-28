@@ -2,6 +2,6 @@ apiVersion: v2
 name: expensio
 description: Expensio 多租户费用管理平台（六个 Go 服务 + 管理台）
 type: application
-version: 0.3.0
+version: 0.3.1
 appVersion: "0.1.0"
 kubeVersion: ">=1.29.0-0"

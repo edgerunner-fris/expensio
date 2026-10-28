@@ -247,7 +247,10 @@ resources:
     memory: 64Mi
   limits:
     cpu: 500m
-    memory: 256Mi
+    # identity 的 argon2id 每次哈希固定占用 64 MiB（m=65536），加上 Go 运行时
+    # 的 GC 余量，256Mi 时两三个并发登录就会 OOMKilled（k3d 压测实测）。
+    # limit 是上限而非预留，放宽到 512Mi 不增加常态占用。
+    memory: 512Mi
 
 podAnnotations: {}
 nodeSelector: {}

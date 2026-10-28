@@ -149,38 +149,46 @@ done
 echo "report currency_totals=$totals"
 [ "${totals:-0}" -gt 0 ] || fail "报表读模型没有消费到事件（Kafka 链路失败）"
 
+# 测试 Pod 名带本次运行的 PID：脚本连续跑两次时，上一轮的 Pod 可能仍在
+# Terminating（删除与 kubelet 的宽限期是异步的），固定名字会让 kubectl run
+# 以 AlreadyExists 失败。带后缀既避开重名，也让失败时的现场可辨认。
+suffix=$$
+other="nettest-other-$suffix"
+unlabeled="nettest-unlabeled-$suffix"
+labeled="nettest-labeled-$suffix"
+
 log "NetworkPolicy：跨命名空间访问必须被拒绝"
-$KUBECTL -n default run nettest-other --image=busybox:1.36 --restart=Never \
+$KUBECTL -n default run "$other" --image=busybox:1.36 --restart=Never \
   --command -- sleep 300 >/dev/null
-$KUBECTL -n default wait --for=condition=Ready pod/nettest-other --timeout=120s >/dev/null
-if $KUBECTL -n default exec nettest-other -- \
+$KUBECTL -n default wait --for=condition=Ready "pod/$other" --timeout=120s >/dev/null
+if $KUBECTL -n default exec "$other" -- \
   wget -T 3 -qO- http://expensio-identity."$NS".svc.cluster.local:8081/healthz >/dev/null 2>&1; then
   fail "default 命名空间本应被 NetworkPolicy 拒绝"
 fi
 echo "default -> identity: blocked"
 
 log "NetworkPolicy：同命名空间但未打 release 标签的 Pod 也必须被拒绝"
-$KUBECTL -n "$NS" run nettest-unlabeled --image=busybox:1.36 --restart=Never \
+$KUBECTL -n "$NS" run "$unlabeled" --image=busybox:1.36 --restart=Never \
   --command -- sleep 300 >/dev/null
-$KUBECTL -n "$NS" wait --for=condition=Ready pod/nettest-unlabeled --timeout=120s >/dev/null
-if $KUBECTL -n "$NS" exec nettest-unlabeled -- \
+$KUBECTL -n "$NS" wait --for=condition=Ready "pod/$unlabeled" --timeout=120s >/dev/null
+if $KUBECTL -n "$NS" exec "$unlabeled" -- \
   wget -T 3 -qO- http://expensio-identity:8081/healthz >/dev/null 2>&1; then
   fail "未打标签的 Pod 本应被 NetworkPolicy 拒绝"
 fi
 echo "unlabeled -> identity: blocked"
 
 log "NetworkPolicy：带同 release 标签的 Pod 放行（同一策略的另一半）"
-$KUBECTL -n "$NS" run nettest-labeled --image=busybox:1.36 --restart=Never \
+$KUBECTL -n "$NS" run "$labeled" --image=busybox:1.36 --restart=Never \
   --labels 'app.kubernetes.io/name=expensio,app.kubernetes.io/instance=expensio,app.kubernetes.io/part-of=expensio' \
   --command -- sleep 300 >/dev/null
-$KUBECTL -n "$NS" wait --for=condition=Ready pod/nettest-labeled --timeout=120s >/dev/null
-body=$($KUBECTL -n "$NS" exec nettest-labeled -- \
+$KUBECTL -n "$NS" wait --for=condition=Ready "pod/$labeled" --timeout=120s >/dev/null
+body=$($KUBECTL -n "$NS" exec "$labeled" -- \
   wget -T 3 -qO- http://expensio-identity:8081/healthz)
 echo "labeled -> identity: $body"
 echo "$body" | grep -q ok || fail "同 release Pod 应能访问 identity"
 
-$KUBECTL -n default delete pod nettest-other --wait=false >/dev/null
-$KUBECTL -n "$NS" delete pod nettest-unlabeled nettest-labeled --wait=false >/dev/null
+$KUBECTL -n default delete pod "$other" --wait=false >/dev/null
+$KUBECTL -n "$NS" delete pod "$unlabeled" "$labeled" --wait=false >/dev/null
 
 log "Helm 状态"
 helm -n "$NS" status "$RELEASE" | sed -n '1,12p'

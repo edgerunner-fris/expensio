@@ -106,8 +106,9 @@ EKS/AKS/GKE 的依赖与网络对照表。
 - Kafka SASL/TLS 已对 testcontainers 启动的真实 broker 验证；但 MSK 的
   SCRAM、Event Hubs 的连接串形态属于供应商差异，首次接入时必须再验证
   `Ping` 与一条端到端事件。
-- HPA 没有在 metrics-server 下做过加压测试；扩缩容期间消费者再平衡与
-  网关连接排空（`terminationGracePeriodSeconds=30`）也没有实测。
+- HPA 已在 k3d 的 metrics-server 下实测 1→3→1（identity，CPU 998%/50%），
+  并据此把 chart 默认内存上限从 256Mi 提到 512Mi；扩缩容期间消费者再平衡、
+  网关连接排空（`terminationGracePeriodSeconds=30`）与云上节点扩容仍未实测。
 - cert-manager 的 ACME 流程依赖真实域名与公网入口，CI 无法覆盖。
 - PostgreSQL `verify-full` 已对 testcontainers 启动的真实 TLS 实例验证，
   包括换错 CA 必须失败；云厂商的证书主机名、代理端点与 CA 轮换仍需在目标
@@ -133,5 +134,7 @@ EKS/AKS/GKE 的依赖与网络对照表。
   Kafka SASL、开启私有 CA、开启 PostgreSQL CA 六种渲染；负例（min > max、
   cert-manager 无 TLS、Kafka tlsCA 无 TLS、database tlsCA 配 require）必须失败；
 - kubeconform（K8s 1.31 schema）：渲染结果全部 valid；
-- 未执行：真实云集群、ACME 签发、HPA 实际扩缩容、各云厂商 Kafka 与
-  PostgreSQL 端点。
+- HPA 实际扩缩容：k3d metrics-server 下 identity 1→3→1，扩缩容事件与
+  CPU 指标均已记录（见 `docs/PROGRESS.md` M20）；
+- 未执行：真实云集群、ACME 签发、云上 HPA 节点扩容与事件消费再平衡、
+  各云厂商 Kafka 与 PostgreSQL 端点。

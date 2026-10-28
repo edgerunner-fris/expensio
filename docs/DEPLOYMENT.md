@@ -299,8 +299,10 @@ kubectl -n expensio get hpa
 kubectl -n expensio describe hpa expensio-gateway
 ```
 
-> 待验证：HPA 只做过 `helm template` 与 kubeconform 校验，没有在真实集群
-> 上跑过"加压 → 扩容 → 减压 → 缩容"的完整过程。
+> k3d（metrics-server）已实测 identity 的"加压 → 1→3 → 减压 → 3→1"：
+> 998%/50% 触发扩容约 30s，停压后约 1m40s 回落。压测同时暴露了 256Mi 内存
+> 上限下两个并发 argon2 登录会 OOMKilled，chart `0.3.1` 起默认上限改为 512Mi。
+> 云上节点扩容延迟、事件消费再平衡与连接排空仍未验证。
 
 ## Ingress TLS 与 cert-manager
 
@@ -546,8 +548,8 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
   单节点 PostgreSQL/Redis/Kafka。托管云（EKS/AKS/GKE）、各 CNI 的
   NetworkPolicy 实现、PDB 驱逐演练均未验证；`deploy/cluster/acceptance/`
   提供了可复用的断言，迁移到新环境时应先跑一遍。
-- **HPA 未做真实扩缩容**：模板与 schema 校验通过，但没有 metrics-server
-  下的加压测试；也没有验证扩缩容期间的事件消费再平衡。
+- **云上 HPA 未验证**：k3d 的 metrics-server 下已实测 identity 的扩容与
+  缩容，但云上节点扩容延迟、扩缩容期间的事件消费再平衡与连接排空仍未覆盖。
 - **cert-manager 未走完整 ACME**：注解与 Issuer 二选一、缺少 TLS 时模板
   直接失败；但签发与续期依赖真实域名，未在 CI 中执行。
 - **Kafka SASL 只对本地真实 broker 验证过**：testcontainers 启的

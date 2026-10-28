@@ -210,6 +210,9 @@ kubectl -n expensio get hpa,pods -w
 扩容/缩容期间没有 5xx 尖峰。若 HPA 一直显示 `<unknown>`，先回到第 0 节确认
 metrics-server。
 
+k3d 彩排已用这组参数实测 identity 的 1→3→1（见 `docs/PROGRESS.md` M20）；
+云上需要额外关注节点扩容延迟、事件消费再平衡与连接排空。
+
 ### 5.3 Kafka 供应商差异
 
 先确认第 4 节的主题 Job 在目标 broker 上成功；再用一次真实事件链路确认

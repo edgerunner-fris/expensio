@@ -2944,12 +2944,66 @@ PostgreSQL 私有 CA 渲染（`database.tlsCA=true`、`sslmode=verify-full`，�
 `&sslrootcert=/etc/expensio/postgres/ca.pem`。默认渲染中这些都不存在（
 `postgres/ca.pem` 出现 0 次），同一份渲染 kubeconform 仍是 24/24 通过。
 
+### k3d 全链路彩排（2026-10-28）
+
+把 `docs/EXTERNAL_VERIFICATION.md` 的命令顺序在当前提交上完整走了一遍：
+k3d v5.8.3（k3s v1.31.5，1 server + 1 agent），宿主 `18080` → 集群 80，
+依赖用 `deploy/cluster/acceptance/deps.yaml`，镜像从当前提交重建后导入。
+
+安装与两轮 smoke：
+
+```text
+22:20:10 创建 namespace / ConfigMap / Secret，应用 deps
+22:21:42 helm upgrade --install --wait（chart 0.3.0，导入镜像 tag=dev）
+22:23:29 STATUS: deployed；7 个服务 + web 全部 Running；GET /healthz -> 200
+22:23:42 smoke.sh（集群内依赖）：SMOKE_RESULT: PASS
+22:25:16 MANAGED_DEPS=1 smoke.sh：SMOKE_RESULT: PASS
+```
+
+两轮 smoke 都校验了实际 `helm` Hook（五个库 `schema_migrations`、四个主题、
+成功 Job 被清理）、完整注册→邀请→费用→审批→Kafka→报表链路，以及
+NetworkPolicy 放行/拒绝的三个方向。`MANAGED_DEPS=1` 分支跳过两条直连
+`exec`，迁移与主题改由功能链路证明，行为与本地模式一致。
+
+**HPA 真实扩缩容。** 只对 identity 开启 HPA（`min=1 max=3`，CPU 目标 50%，
+缩容稳定窗口 30s），压测用 busybox Pod 直连 identity Service 持续做
+argon2 登录（绕开网关限流，单并发，避免把 CPU limit 打满）：
+
+```text
+22:30:45  cpu: 2%/50%    replicas 1
+22:31:15  cpu: 606%/50%  pods 3（扩容约 30s）
+22:31:25  cpu: 998%/50%  replicas 3
+          identity pods CPU 499m / 160m / 140m，内存各 134Mi
+22:31:25  停止压测
+22:32:37  cpu: 2%/50%（指标窗口滞后约 1 分钟）
+22:33:07  replicas 1（停止后约 1m40s 回落）
+HPA_SCALE_UP_OK
+HPA_SCALE_DOWN_OK
+```
+
+扩缩容事件在 HPA 的 Events 里可见（`SuccessfulRescale New size: 3`）。本轮
+没有制造节点级资源不足，也没有验证"扩容期间消费者再平衡/连接排空"；后者
+仍需要在有事件流的云环境里观察。
+
+**彩排暴露并修复的两个问题：**
+
+1. `smoke.sh` 连续跑两次时，第一轮用固定名字创建的 NetworkPolicy 测试 Pod
+   还在 Terminating，第二轮 `kubectl run` 直接 `AlreadyExists`。测试 Pod
+   名改为带 PID 后缀，删除逻辑同步使用变量；改完两轮连续 smoke 通过。
+2. 默认 `resources.limits.memory: 256Mi` 对 identity 不够：argon2id 每次
+   哈希固定占 64 MiB，两个并发登录就触发 `OOMKilled`（exit 137），随后
+   CrashLoopBackOff，HPA 连续报 `FailedGetResourceMetric`。把 chart 默认
+   上限调到 512 MiB（`0.3.1`），同一压测在 512 MiB 下单并发稳定在
+   134 MiB，扩缩容恢复正常。
+
+最终用 chart `0.3.1` 和验收 values 重新安装（不再显式设内存），确认 identity
+实际拿到 `limits.memory=512Mi`，再跑一次 smoke：`SMOKE_RESULT: PASS`。
+
 未执行（需要外部环境）：
 
 - 真实 EKS/AKS/GKE：托管 PostgreSQL / Redis / Kafka / 对象存储、各 CNI 的
-  NetworkPolicy 行为、负载均衡器；
+  NetworkPolicy 行为、负载均衡器；云上 HPA 的节点扩容延迟与事件消费再平衡；
 - cert-manager 的 ACME 签发与续期；
-- HPA 在 metrics-server 下的加压扩缩容；
 - 各云厂商 Kafka 端点的认证差异（MSK 的 SCRAM、Event Hubs 的连接串形态）；
   本地真实 broker 的 SASL/PLAIN + TLS 链路已覆盖；
 - 托管 PostgreSQL 的证书主机名、代理端点与 CA 轮换；本地真实 TLS 实例的
@@ -2962,7 +3016,7 @@ PostgreSQL 私有 CA 渲染（`database.tlsCA=true`、`sslmode=verify-full`，�
 | 托管云流程未执行 | 未解决 | 没有云账号与集群凭据；chart 渲染与 k3d 行为不能替代云上验证 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
 | 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
-| HPA 未做真实扩缩容 | 待验证 | 未验证扩缩容期间的事件消费再平衡与连接排空 |
+| HPA 未做真实扩缩容 | 已解决（k3d 实测） | identity 在 metrics-server 下实测 1→3→1：CPU 998%/50% 触发扩容约 30s，停压后约 1m40s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（`0.3.1` 起默认 512Mi）。扩缩容期间的事件消费再平衡与连接排空未验证，云上节点扩容行为仍需实测 |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
 | 云厂商 PostgreSQL 证书差异 | 待验证 | 证书主机名、代理端点与 CA 轮换需在目标环境实测 |
@@ -2978,7 +3032,8 @@ PostgreSQL 私有 CA 渲染（`database.tlsCA=true`、`sslmode=verify-full`，�
    Secret，跑 `deploy/cluster/acceptance/smoke.sh` 的断言，记录各 CNI 的
    NetworkPolicy 差异；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
-3. metrics-server 下的 HPA 加压测试（扩容、缩容、再平衡）；
+3. 云上 HPA：k3d 的 CPU 扩容/缩容已实测，剩下节点扩容延迟、事件消费
+   再平衡与连接排空；
 4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
 5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云

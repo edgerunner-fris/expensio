@@ -157,9 +157,9 @@ Chart 只部署无状态服务，PostgreSQL / Redis / Kafka / Secret / Collector
 k3d 集群上完成 `helm upgrade --install --wait` 与行为验收（迁移/建主题 Hook、
 Ingress、NetworkPolicy、RBAC、事件链路）。Chart 另提供 HPA、cert-manager
 注解与托管依赖的认证配置：Kafka TLS/SASL 与 PostgreSQL `verify-full` 都已对
-testcontainers 里的真实实例跑通正反向用例，HPA 与证书签发只做了渲染与负例
-校验；托管云集群、ACME 签发与真实扩缩容尚未验证，见
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+testcontainers 里的真实实例跑通正反向用例；HPA 在 k3d 的 metrics-server 下
+实测 1→3→1，`MANAGED_DEPS=1` 的 smoke 分支也实际执行。托管云集群、ACME
+签发与云上节点扩容行为尚未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 目录
 
@@ -187,7 +187,8 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 集群验收用的是 k3d（双节点 k3s）与单节点依赖；托管云（EKS/AKS/GKE）、
-  ACME 证书签发、HPA 真实扩缩容、PDB 驱逐演练与多可用区未验证。
+  ACME 证书签发、云上 HPA 的节点扩容与事件消费再平衡、PDB 驱逐演练与多可用区
+  未验证。HPA 的 CPU 扩缩容已在 k3d 实测。
   Kafka 的 TLS + SASL 与 PostgreSQL 的 `verify-full` 已在 testcontainers 的
   真实实例上跑通正反向用例，但各云厂商的认证端点与证书链仍需首次接入时验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
