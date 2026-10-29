@@ -13,7 +13,9 @@
 - 提交 → 审批 → Kafka → report 读模型的端到端事件链路；
 - NetworkPolicy：跨命名空间、同命名空间未打 release 标签的 Pod 被拒绝，
   同 release 的 Pod 与 ingress controller 被放行（k3s 由 kube-router 真正执行策略；
-  ACK 的 Terway 默认 `disable_network_policy=true`，需先开启策略再跑）；
+  ACK 的 Terway 默认关闭策略，且节点能力 `has_cilium_chainer=false` 是粘性的，
+  需重置节点能力、重启 `terway-eniip` 并重建 Pod 后再跑，见
+  [docs/PROGRESS.md](../../../docs/PROGRESS.md)）；
 - RBAC：ServiceAccount 没有 API 权限、Pod 不挂载令牌；
 - 容器安全上下文实际生效（非 root、只读根文件系统、禁止提权）。
 

@@ -42,9 +42,21 @@ kubectl -n kube-system get cm eni-config \
   -o jsonpath='{.data.disable_network_policy}{"\n"}'
 ```
 
-输出 `true` 时，需要集群管理员在 ACK 控制台的 Terway addon 里开启网络策略
-（或改 `disable_network_policy=false` 并重启 `terway-eniip`），否则 smoke 会在
-NetworkPolicy 拒绝断言处失败。这是环境结论，不是 chart 或脚本 bug。
+输出 `true` 时改成 `false` 并重启 `terway-eniip`。ACK 还有一层节点级粘性
+开关：节点能力文件里的 `has_cilium_chainer`。如果节点创建时策略是关闭的，
+这个值会被写成 `false` 并一直保留，仅改 ConfigMap 不会启动 cilium-agent
+（策略容器只会打开 9099 健康检查端口）。确认：
+
+```bash
+kubectl -n kube-system exec <terway-pod> -c terway -- \
+  cat /var/run/eni/node_capabilities
+```
+
+出现 `has_cilium_chainer = false` 时，需要删除每台节点的该文件并重启
+`terway-eniip`；节点会切到 DataPath V2 并追加 `cilium-cni`。随后必须重建
+业务 Pod 与 ingress-controller，让新 veth 挂上 eBPF 程序：旧 Pod 不在
+`CiliumEndpoint` 里，会因默认拒绝而超时。完整实测见第 9 节。这是环境结论，
+不是 chart 或脚本 bug。
 
 EKS 的 metrics-server 需要单独安装 managed add-on；AKS/GKE 默认自带，但仍要
 用上面的 `apiservice` 命令确认，而不是看控制台。
@@ -411,24 +423,20 @@ NAMESPACE=expensio INGRESS_HOST=expensio.test \
 结果：
 
 ```text
-helm STATUS: deployed（7 个 Deployment；gateway/web 各 2 副本）
+helm STATUS: deployed（7 个 Deployment；gateway/web 首装各 2 副本，启用 HPA 后 1/1）
 五个库 schema_migrations 版本数=1；四个业务主题已创建；成功 Hook Job 已清理
 GET /healthz -> 200
 注册→邀请→接受→费用→审批→Kafka→报表：通过
 HPA identity：1→3（约 60s，CPU 908%/50%）→1（停压后约 2m10s）
-NetworkPolicy：default -> identity 未被拒绝（SMOKE FAIL）
+NetworkPolicy：default -> identity 被拒；未打 release 标签的 Pod 被拒；同 release 放行
+SMOKE_RESULT: PASS
 ```
 
-NetworkPolicy 失败已定位为平台开关，而不是 chart 缺陷：
-
-```text
-$ kubectl -n kube-system get cm eni-config -o jsonpath='{.data.disable_network_policy}'
-true
-```
-
-本次没有修改共享 CNI 配置，所以 ACK 的 NetworkPolicy 仍是**未验证**项；
-k3d 上三种放行/拒绝断言已通过。要收口这一项，需要管理员开启 Terway 网络
-策略后重跑同一份 smoke。
+NetworkPolicy 最初失败，根因有两层：`disable_network_policy=true`；改成
+`false` 后仍不生效，因为节点能力 `has_cilium_chainer=false` 是粘性的。
+重置节点能力并重启 Terway 后，节点切到 DataPath V2 + cilium-cni；再重建
+7 个应用 Deployment 与 ingress-controller，三条断言全部通过。完整步骤与
+证据见 `docs/PROGRESS.md` 的「阿里云 ACK 阶段 A」。
 
 阶段 A 还暴露并修复了一个 chart 缺陷：主题 Hook 的 Kafka CLI 镜像原先硬编码
 `apache/kafka:3.9.2`，节点访问 Docker Hub 超时导致 `pre-install` Hook

@@ -7,9 +7,9 @@
 ServiceAccount 无 API 权限、事件链路在集群内跑通。验收清单与 smoke 脚本
 见 [`deploy/cluster/acceptance/`](../deploy/cluster/acceptance/)，实测输出见
 `docs/PROGRESS.md` 的 M14。阿里云 ACK 阶段 A 另验证了 ACR 镜像、公网 NLB
-Ingress、临时依赖下的安装与事件链路，以及 HPA 的真实扩缩容；ACK 的 Terway
-NetworkPolicy、托管 RDS/Tair/ApsaraMQ/OSS、cert-manager ACME 与云上节点扩容
-仍未验证，见文末「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险
+Ingress、临时依赖下的安装与事件链路、HPA 的真实扩缩容，以及切到 DataPath V2
+后的 Terway NetworkPolicy；ACK 的托管 RDS/Tair/ApsaraMQ/OSS、cert-manager
+ACME 与云上节点扩容仍未验证，见文末「已知限制」。这些状态也记录在 `docs/PROGRESS.md` 的风险
 清单里，不在这里含糊带过。
 
 ## 本地整栈（Docker Compose）
@@ -473,14 +473,18 @@ ENIMultiIP，ingress-nginx + 公网 NLB，metrics-server）上完成平台适配
 | 拉取凭据 | ACK 的 ACR 免密组件未实际注入；创建命名空间级 `acr-pull` Secret，并写入 values 的 `imagePullSecrets` |
 | Kafka CLI | Docker Hub 超时导致主题 Hook `ImagePullBackOff`；chart 0.3.2 起用 `kafka.cliImage` 指向 ACR 的 `kafka:3.9.2` |
 | 入口 | 没有域名：用 `nginx-ingress-lb` 的 NLB 主机名 + `Host: expensio.test` 访问；TLS/ACME 未配置 |
-| 网络策略 | Terway 默认 `eni-config.disable_network_policy=true`，NetworkPolicy 对象存在但不执行；本次未改共享 CNI，smoke 的拒绝断言未通过 |
+| 网络策略 | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力、重启 `terway-eniip` 后节点切到 DataPath V2 + cilium-cni；重建应用与 ingress 后 smoke 三条断言通过 |
 | 验收依赖 | `deps.yaml` 仅用于阶段 A；应用安装用 chart 0.3.2，`MANAGED_DEPS=0` 检查迁移与主题 |
 | HPA | identity 开启 `min=1/max=3`、CPU 50%，实测 1→3（约 60s）→1（停压后约 2m10s） |
 
-要在 ACK 上完成 NetworkPolicy 验证，先在控制台或 addon 配置中开启 Terway
-网络策略（`disable_network_policy=false` 并重启 `terway-eniip`），再重跑
-`deploy/cluster/acceptance/smoke.sh`。不要直接用 `kubectl patch` 改共享
-CNI 配置而不评估对现有工作负载的影响。
+要在 ACK 上开启 NetworkPolicy，先确认 `disable_network_policy=false`，再检查
+每台节点的 `/var/run/eni/node_capabilities` 是否被写成
+`has_cilium_chainer = false`。若是，需要在维护窗口删除该文件并重启
+`terway-eniip`（节点会切到 DataPath V2 并追加 `cilium-cni`），然后重建业务
+Pod 与 ingress-controller，让新 veth 挂上 eBPF 程序，最后重跑
+`deploy/cluster/acceptance/smoke.sh`。只改共享 CNI 配置而不重建工作负载，
+会出现“策略容器在跑、旧 Pod 流量仍放行”或反向的默认拒绝。完整步骤与实测
+证据见 `docs/PROGRESS.md`。
 
 ## 发布流程（tag → 镜像 → Helm）
 
@@ -574,9 +578,9 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
 ## 已知限制
 
 - **云上验证只做到 ACK 阶段 A**：k3d v5.8.3（k3s v1.31.5，双节点）与阿里云
-  ACK（4 节点，K8s 1.37，临时单副本依赖）已验证 chart 部署、Ingress、事件
-  链路与 HPA；ACK 的 RDS / Tair / ApsaraMQ / OSS、Terway NetworkPolicy、
-  cert-manager ACME、PDB 驱逐与多可用区仍未验证。
+  ACK（4 节点，K8s 1.37，临时单副本依赖，DataPath V2）已验证 chart 部署、
+  Ingress、事件链路、HPA 与 Terway NetworkPolicy；ACK 的 RDS / Tair /
+  ApsaraMQ / OSS、cert-manager ACME、PDB 驱逐与多可用区仍未验证。
 - **云上 HPA 的节点扩容未验证**：k3d 与 ACK 的 metrics-server 下都已实测
   identity 的 1→3→1；节点扩容延迟、扩缩容期间的事件消费再平衡与连接排空
   仍未覆盖。

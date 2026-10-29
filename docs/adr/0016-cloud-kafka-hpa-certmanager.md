@@ -102,8 +102,8 @@ Docker Hub 的 `apache/kafka` 卡在 `pending-install`。
 
 2026-10-29 的 ACK 阶段 A 实测证明“provider-neutral chart + values”这条路
 可用：ACR 镜像、公网 NLB、Terway CNI 与 metrics-server 都没有要求改模板；
-唯一的结构性缺口是 ACK 默认关闭 NetworkPolicy，以及临时依赖不能替代托管
-RDS/Tair/ApsaraMQ/OSS。
+唯一的结构性缺口是 ACK 默认关闭 NetworkPolicy（需要重置节点能力并切到
+DataPath V2 才能开启），以及临时依赖不能替代托管 RDS/Tair/ApsaraMQ/OSS。
 
 不引入 Terraform / Crossplane 的原因：本轮目标是可复用的 chart 与可执行手册，
 而不是为单一云维护 IaC；ACK 阶段 A 也只用 values 与验收脚本完成平台适配，
@@ -125,8 +125,10 @@ RDS/Tair/ApsaraMQ/OSS。
   包括换错 CA 必须失败；云厂商的证书主机名、代理端点与 CA 轮换仍需在目标
   环境实测。
 - 云厂商的 NetworkPolicy 实现差异真实存在；`smoke.sh` 的三种断言需要在
-  目标 CNI 上重跑。ACK 的 Terway 默认 `disable_network_policy=true`，策略
-  对象创建成功但拒绝断言失败；需管理员开启网络策略后重跑。
+  目标 CNI 上重跑。ACK 的 Terway 默认 `disable_network_policy=true`，且节点
+  能力 `has_cilium_chainer=false` 具有粘性：只改 ConfigMap 不会启动
+  cilium-agent。实测需重置节点能力、重启 Terway 切到 DataPath V2，并重建
+  业务 Pod 与 ingress-controller 后断言才通过。
 
 ## 测试
 
@@ -148,7 +150,8 @@ RDS/Tair/ApsaraMQ/OSS。
 - kubeconform（K8s 1.31 schema）：渲染结果全部 valid；
 - HPA 实际扩缩容：k3d 与 ACK 的 metrics-server 下 identity 均 1→3→1，
   扩缩容事件与 CPU 指标均已记录（见 `docs/PROGRESS.md` M20）；
-- ACK 阶段 A：ACR 镜像、公网 NLB Ingress、临时依赖下的安装、事件链路与
-  HPA 已执行；NetworkPolicy 因 Terway 默认关闭而标记为未验证；
+- ACK 阶段 A：ACR 镜像、公网 NLB Ingress、临时依赖下的安装、事件链路、
+  HPA 与 Terway NetworkPolicy 均已执行（NetworkPolicy 在节点切到 DataPath V2
+  并重建工作负载后，三条断言通过，`SMOKE_RESULT: PASS`）；
 - 未执行：真实托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上 HPA 节点扩容与
   事件消费再平衡、各云厂商 Kafka 与 PostgreSQL 端点。

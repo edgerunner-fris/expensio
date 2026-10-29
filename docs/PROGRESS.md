@@ -3018,7 +3018,7 @@ OSS：为了先验证 chart、Ingress、ACR、HPA 与平台网络，依赖仍是
 集群 ID   c772e4d3c99764bdf906ce05a63e559e0（cn-hangzhou）
 节点      4 × Alibaba Cloud Linux Lifsea 3 / containerd 2.1.9
 K8s       server v1.37.1-aliyun.1；本地 kubectl v1.31.0（存在版本偏差，命令可用）
-CNI       Terway v1.17.7，ENIMultiIP；eni-config.disable_network_policy=true
+CNI       Terway v1.17.7，ENIMultiIP；验收后 disable_network_policy=false，节点切到 DataPath V2 + cilium-cni
 入口      ingress-nginx（ACK 托管版 v1.14.5），Service nginx-ingress-lb 为公网 NLB
 指标      metrics-server v0.3.16
 应用镜像  ACR 个人版 crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/*:63a3707
@@ -3032,7 +3032,8 @@ chart     0.3.2
 $ helm -n expensio status expensio
 STATUS: deployed（revision 2，HPA 开启后）
 
-7 个 Deployment：gateway 2/2、web 2/2，其余 1/1；依赖 Pod 全部 Running
+7 个 Deployment：首次安装 gateway 2/2、web 2/2，其余 1/1；
+启用 HPA（identity min=1）后网关/web 缩为 1/1，当前共 7 个应用 Pod；依赖 Pod 全部 Running
 迁移 Job：五个库 schema_migrations 版本数均为 1
 主题 Job：四个业务主题均已创建，成功 Hook Job 已被清理
 GET /healthz（NLB 地址 + Host: expensio.test）-> 200
@@ -3043,22 +3044,43 @@ smoke 结果（同一份 `deploy/cluster/acceptance/smoke.sh`）：
 ```text
 Pod 就绪、7 个 Deployment、安全上下文、RBAC、五个库迁移、四个主题、Hook 清理、
 Ingress /healthz、注册→邀请→接受→费用→审批→Kafka→报表：通过
-NetworkPolicy：default -> identity 未被拒绝 -> SMOKE FAIL
+NetworkPolicy：default -> identity 被拒
+NetworkPolicy：未打 release 标签的 Pod 被拒
+NetworkPolicy：同 release 的 Pod 放行（identity 返回 200）
+SMOKE_RESULT: PASS
 ```
 
-失败原因不是 chart 渲染或脚本逻辑，而是 ACK 的 Terway 默认把 NetworkPolicy
-关闭：
+NetworkPolicy 的开启过程（本轮最费时的一项，按实际排查顺序记录）：
 
-```text
-$ kubectl -n kube-system get cm eni-config -o jsonpath='{.data.disable_network_policy}'
-true
-```
-
-ACK 的 Terway 网络策略需要在控制台或 addon 配置中显式开启（把
-`disable_network_policy` 改为 `false` 并重启 `terway-eniip`）。本次没有改动
-共享 CNI 配置，因此 **ACK 上 NetworkPolicy 仍未验证**；k3d 上三种放行/拒绝
-断言已通过，说明 chart 生成的策略符合预期。要完成这一项，需要集群管理员
-授权开启 Terway 策略后再跑一次 smoke。
+1. 首次 smoke 失败在 `default -> identity`，当时的
+   `eni-config.disable_network_policy` 为 `true`。
+2. 改为 `false` 并重启 `terway-eniip` 后仍然放行。根因不是 RBAC：被重启的
+   策略容器只打印 `Health check TCP server started on 127.0.0.1:9099`，
+   `/var/run/cilium` 为空，`cilium-dbg status` 报
+   `cilium.sock: no such file or directory`。节点能力文件
+   `/var/run/eni/node_capabilities` 记录的是
+   `datapath = veth`、`network_policy_provider = ebpf`、
+   `has_cilium_chainer = false`；Terway v1.17.7 的 `terway-cli policy` 在
+   veth + ebpf 但 `has_cilium_chainer=false` 时只启动健康检查服务器，
+   不会启动 cilium-agent。
+3. `terway-cli cni` 中的 `allowEBPFNetworkPolicy()` 对已有节点是粘性的：
+   节点能力一旦写成 `false`，之后即使关闭 `disable_network_policy` 也保持
+   veth 旧行为，不追加 `cilium-cni` 链路。这是 ACK 在“创建时未启用
+   NetworkPolicy”的节点上的设计，单个 ConfigMap 开关无法热开启。
+4. 处理方式（已获集群所有者确认）：备份每台节点的能力文件与 CNI 配置，
+   删除 4 台节点的 `/var/run/eni/node_capabilities`，滚动重启
+   `terway-eniip`。重新初始化后节点能力变为
+   `has_cilium_chainer = true`、`datapath = datapathv2`，主机
+   `/etc/cni/net.d/10-terway.conflist` 追加 `cilium-cni`，
+   策略容器开始运行
+   `cilium-agent --cni-chaining-mode=terway-chainer --enable-policy=default --datapath-mode=veth`。
+5. 切换到 DataPath V2 后，旧 Pod 的 veth 上没有 cilium 程序，也不会出现在
+   `CiliumEndpoint` 里：此时外部流量会因“未知来源 + 默认拒绝”而超时。因此
+   滚动重启了 7 个 `expensio-*` Deployment 与
+   `kube-system/nginx-ingress-controller`；重启后
+   `kubectl get ciliumendpoints -n expensio` 的 7 个端点全部 `ready`，
+   策略才真正生效。临时依赖（postgres/redis/kafka/minio）保持原状，
+   它们只作为访问目标，不参与 NetworkPolicy 断言。
 
 HPA 实测（identity，`min=1 max=3`，CPU 50%，缩容稳定窗口 60s，压测为两个
 busybox Pod 持续做 argon2id 登录）：
@@ -3093,7 +3115,6 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 
 - 阿里云 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS；本次是临时单副本
   依赖，不能据此宣称托管依赖已验证；
-- ACK Terway NetworkPolicy（默认关闭，本次未改共享 CNI）；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
 - 云上节点扩容、事件消费再平衡、连接排空、PDB 驱逐与多可用区；
 - 托管 PostgreSQL 的 `verify-full`、Kafka SASL、对象存储生命周期与 PITR/
@@ -3108,8 +3129,8 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 与临时依赖完成安装、全链路 smoke（除 NetworkPolicy）和 HPA 1→3→1；RDS/Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
-| ACK NetworkPolicy 未验证 | 未解决 | Terway `eni-config.disable_network_policy=true`，策略对象已创建但未被 CNI 执行；需管理员开启 Terway 网络策略并重启 addon 后重跑 smoke。k3d 的三种断言已通过 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 与临时依赖完成安装、全链路 smoke 和 HPA 1→3→1；RDS/Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
+| ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
@@ -3126,17 +3147,16 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
 证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-1. 在 ACK 上启用 Terway NetworkPolicy 后重跑 smoke，补齐三种放行/拒绝断言；
-2. 把 ACK 的临时依赖替换为 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS，
+1. 把 ACK 的临时依赖替换为 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS，
    按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
-3. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
-4. 云上 HPA：CPU 扩容/缩容已在 k3d 与 ACK 实测，剩下节点扩容延迟、事件消费
+2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
+3. 云上 HPA：CPU 扩容/缩容已在 k3d 与 ACK 实测，剩下节点扩容延迟、事件消费
    再平衡与连接排空；
-5. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
+4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
-6. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
+5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
    的证书主机名、代理端点与 CA 轮换实测；
-7. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
+6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 
 
 

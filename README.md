@@ -160,9 +160,9 @@ Ingress、NetworkPolicy、RBAC、事件链路）。Chart 另提供 HPA、cert-ma
 testcontainers 里的真实实例跑通正反向用例；HPA 在 k3d 与阿里云 ACK 的
 metrics-server 下均实测 1→3→1，`MANAGED_DEPS=1` 的 smoke 分支也实际执行。
 ACK 阶段 A 用 ACR 镜像、公网 NLB 与临时
-单副本依赖跑通安装和事件链路（chart 0.3.2），托管 RDS/Tair/ApsaraMQ/OSS、
-ACK 的 Terway NetworkPolicy 与 ACME 签发仍未验证，见
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+单副本依赖跑通安装、事件链路与 HPA，并把节点切到 DataPath V2 后验证了
+Terway NetworkPolicy（chart 0.3.2）；托管 RDS/Tair/ApsaraMQ/OSS 与 ACME
+签发仍未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 目录
 
@@ -190,9 +190,9 @@ docs/           架构、部署、进度与 ADR
 ## 已知限制
 
 - 集群验收用的是 k3d（双节点 k3s）与阿里云 ACK 阶段 A（4 节点，K8s 1.37，
-  临时单副本依赖）；ACK 的 RDS/Tair/ApsaraMQ/OSS、Terway NetworkPolicy、
-  ACME 证书签发、云上节点扩容与事件消费再平衡、PDB 驱逐演练与多可用区
-  未验证。HPA 的 CPU 扩缩容已在 k3d 与 ACK 实测。
+  临时单副本依赖，DataPath V2）；ACK 的 RDS/Tair/ApsaraMQ/OSS、ACME 证书
+  签发、云上节点扩容与事件消费再平衡、PDB 驱逐演练与多可用区未验证。
+  HPA 的 CPU 扩缩容与 Terway NetworkPolicy 已在 ACK 实测。
   Kafka 的 TLS + SASL 与 PostgreSQL 的 `verify-full` 已在 testcontainers 的
   真实实例上跑通正反向用例，但各云厂商的认证端点与证书链仍需首次接入时验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
