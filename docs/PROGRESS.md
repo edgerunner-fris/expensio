@@ -3253,7 +3253,9 @@ JPEG/PNG/WebP/PDF、列表返回 `data.items`）；`ack-expensio.yaml` 客户端
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair、ApsaraMQ 与 OSS 已全部接管（四套 verify/end-to-end PASS、迁移 no change、`MANAGED_DEPS=1` smoke PASS、附件链路在 MinIO 下线后仍 PASS）；ACME 仍未接入 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair、ApsaraMQ 与 OSS 已全部接管（四套 verify/end-to-end PASS、迁移 no change、`MANAGED_DEPS=1` smoke PASS、附件链路在 MinIO 下线后仍 PASS）；节点级自动扩容未实现，ACME 因无备案域名跳过（ClusterIssuer 已就绪） |
+| 节点级自动扩容 | 未实现（2026-10-30 实测） | `kube-system` 里没有任何 autoscaler 组件（`get deploy,ds,po \| grep -i autoscal` 为空），只有 Pod 级 HPA。两个节点池 `npd9556c…`（.116/.118，带 `CriticalAddonsOnly` taint，系统池）与 `np1ce4…`（.117/.119，应用池），每节点 3920m CPU / 6.4Gi 内存，全部在 `cn-hangzhou-j` 单可用区。HPA 扩到 2 副本即可能撞上节点容量上限，且节点池的 min/max 是控制台/OpenAPI 配置，集群内查不到 |
+| ACME 未走完整签发 | 跳过（无备案域名） | cert-manager 三 Pod Running；`ClusterIssuer letsencrypt-prod-cluster` `READY=True`，message 为 `The ACME account was registered with the ACME server`（2026-10-30 实测）。Ingress `expensio.test` 未加 `cert-manager.io/cluster-issuer` 注解、无 `spec.tls`，因此不会触发签发。有备案域名与公网入口后只需补注解 + DNS 解析 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
@@ -3262,7 +3264,7 @@ JPEG/PNG/WebP/PDF、列表返回 `data.items`）；`ack-expensio.yaml` 客户端
 | OSS S3 兼容差异 | 已解决（OSS 实测） | HeadBucket 即使授予 `oss:GetBucketInfo` 仍返回 403（EC 0003-00000001），启动探测改用 `MaxKeys=1` 的 ListObjects；OSS 拒绝路径风格（0003-00001401），必须虚拟主机风格，minio-go 对 `aliyuncs.com` 自动选择；`aws-chunked` 分片上传需退到 unsigned payload。内网接入点由 Pod 内 TLS 探针确认可用，release revision 14 已完成切换 |
 | HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。云上节点级扩容仍未验证 |
 | 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
-| cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
+| cert-manager 未走完整 ACME | 跳过（无备案域名） | 集群侧已就绪：cert-manager 三 Pod Running，`ClusterIssuer letsencrypt-prod-cluster` `READY=True`（ACME 账号注册成功）；Ingress 未加注解、无 `spec.tls`，不触发签发。模板负例已覆盖。解除条件：备案域名 + 公网入口 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
 | 云厂商 PostgreSQL 证书差异 | 已解决（RDS 实测） | 阿里云 RDS 内网域名与实例证书 SAN 一致，`verify-full` + ApsaraDB CA 链从 Pod 内建连成功；CA 链最早到期 2032-04，轮换仍需运维跟进 |
 | Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级。chart 0.3.3 起 report 也注入该键（此前只有 gateway 有，report 的仪表盘缓存会静默禁用） |

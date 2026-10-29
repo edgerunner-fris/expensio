@@ -446,6 +446,59 @@ curl -s -D - -o /dev/null -X OPTIONS \
 `OSS_LIST_BUCKETS=1` 会额外尝试 `ListBuckets`（策略没授权时打印
 `oss:ListBuckets` 被拒，属正常）。
 
+### 4.6 生命周期与跨区域复制（未执行）
+
+应用用的 RAM 用户只有 4.2 的对象级最小权限，`oss:PutBucketLifecycle` 与
+`oss:PutBucketReplication` 都不在其中。这两项要用账号级凭据（控制台或管理员
+RAM）操作；它们是桶级策略，不改变应用侧的权限模型，做完仍跑一遍 4.5 即可
+确认没有把自己锁在外面。
+
+**生命周期**（控制台：Bucket → 数据管理 → 生命周期）：
+
+| 规则 | 前缀 | 动作 | 理由 |
+| --- | --- | --- | --- |
+| `abort-multipart` | 空 | 清理未完成分片，3 天 | 附件走分片上传，中断的分片会一直占空间并计费 |
+| `expire-tmp` | `tmp/` | 过期删除 7 天 | 预留给临时导出；当前应用不写这个前缀，规则是空转的 |
+| `cold-tier` | `tenants/` | 30 天转低频（可选） | 附件写入后读取很少 |
+
+**不要给 `tenants/` 设过期**：对象键是
+`tenants/<tenant>/expenses/<expense>/<uuid>.<ext>`，过期即业务数据丢失。
+删除由应用接口显式完成（`DELETE .../attachments/:id` 会删对象），生命周期
+只做"清理未完成分片"这类兜底。
+
+CLI 等价（ossutil 2.x，需账号级 AK）：
+
+```bash
+ossutil api put-bucket-lifecycle --bucket expensio-test \
+  --lifecycle-configuration file://lifecycle.json
+ossutil api get-bucket-lifecycle --bucket expensio-test
+```
+
+`lifecycle.json` 的 `Rule` 是数组，每个元素含 `ID` / `Prefix` / `Status`
+以及 `Expiration` 或 `AbortMultipartUpload` 之一。
+
+**跨区域复制**（控制台：Bucket → 数据复制 → 创建规则）：
+
+1. 源桶与目标桶都开启版本控制——复制按 versionId 进行，关掉版本控制无法建规则；
+2. 目标桶建在另一个地域（例如 `expensio-dr` @ `oss-cn-beijing`），同账号可
+   用服务角色 `AliyunOSSRole`，跨账号需要在目标桶上单独授权；
+3. 规则选 `tenants/` 前缀；`HistoricalObjectReplication` 决定是否补传建规则
+   之前的对象（历史数据量大时单独用 `ossutil cp -r` 更可控）；
+4. 计费：跨地域复制流量单独计费；`TransferType=internal` 只在同地域有效，
+   跨地域必然是公网链路。
+
+```bash
+ossutil api put-bucket-versioning --bucket expensio-test \
+  --versioning-configuration file://versioning.json
+ossutil api put-bucket-replication --bucket expensio-test \
+  --replication-configuration file://replication.json
+ossutil api get-bucket-replication --bucket expensio-test
+```
+
+验证方式：往源桶 PUT 一个对象，目标桶出现同键同内容；删除源对象后确认目标桶
+的删除行为符合规则设定。复制状态、延迟与失败对象清单在控制台"数据复制"页
+可查，失败对象需要人工重试。
+
 ---
 
 ## 5. cert-manager 与 ACME
