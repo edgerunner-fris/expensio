@@ -372,6 +372,10 @@ Serverless 实例禁止客户端建 Topic，脚本第 6 步（临时主题自环
 | `minio.bucket` | `expensio-test` |
 | `minio.useSSL` | `true` |
 
+> 2026-10-30 已按上表切换：release revision 14，`ATTACHMENT_E2E: PASS`；
+> 集群内 MinIO 缩到 `replicas=0` 后同一脚本仍 PASS。实测记录见
+> `docs/EXTERNAL_VERIFICATION.md` §14。
+
 集群内用内网接入点可以完全不依赖节点出公网；浏览器直传/下载必须走公网
 接入点，所以两个字段不能写成同一个值。OSS 只接受**虚拟主机风格**
 （`<bucket>.<endpoint>`），路径风格返回 `0003-00001401 Please use virtual
