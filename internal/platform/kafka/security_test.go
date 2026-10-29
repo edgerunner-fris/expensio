@@ -5,9 +5,32 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSecurityFromConfigKeepsTLS 守住一次真实事故：四个 cmd 各自手拼
+// Security 时集体漏了 TLS，本地（明文 Kafka）全部通过，切到托管 Kafka
+// 后所有服务启动即报 "配置了 tls_ca_file 但没有开启 tls"。
+func TestSecurityFromConfigKeepsTLS(t *testing.T) {
+	got := SecurityFromConfig(config.Kafka{
+		Brokers:       []string{"b:9095"},
+		TLS:           true,
+		TLSCAFile:     "/etc/expensio/kafka/ca.pem",
+		SASLMechanism: "plain",
+		SASLUsername:  "u",
+		SASLPassword:  "p",
+	})
+	require.True(t, got.TLS, "TLS 必须在转换中保留")
+	assert.Equal(t, "/etc/expensio/kafka/ca.pem", got.TLSCAFile)
+	assert.Equal(t, "plain", got.SASLMechanism)
+	assert.Equal(t, "u", got.SASLUsername)
+	assert.Equal(t, "p", got.SASLPassword)
+
+	// 明文集群仍然保持零值语义。
+	assert.Equal(t, Security{}, SecurityFromConfig(config.Kafka{}))
+}
 
 func TestSecurityOptions(t *testing.T) {
 	tests := []struct {

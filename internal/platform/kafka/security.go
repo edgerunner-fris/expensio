@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/edgerunner-fris/expensio/internal/platform/config"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
@@ -22,6 +23,20 @@ type Security struct {
 	SASLMechanism string
 	SASLUsername  string
 	SASLPassword  string
+}
+
+// SecurityFromConfig 把配置层的 Kafka 参数翻译成连接参数。
+// 四个服务的 cmd 必须走这里：字段散在各处手写时漏掉一个 TLS，本地
+// （TLS=false）全绿，只在托管 Kafka 上启动即失败。这不是假想——2026-10-30
+// 切 ApsaraMQ 时四个服务都漏了 TLS，Pod 全部 CrashLoop。
+func SecurityFromConfig(c config.Kafka) Security {
+	return Security{
+		TLS:           c.TLS,
+		TLSCAFile:     c.TLSCAFile,
+		SASLMechanism: c.SASLMechanism,
+		SASLUsername:  c.SASLUsername,
+		SASLPassword:  c.SASLPassword,
+	}
 }
 
 // tlsConfig 构造客户端 TLS 配置。只有显式给了 CA 文件才覆盖 RootCAs，

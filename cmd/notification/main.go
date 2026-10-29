@@ -58,12 +58,7 @@ func setup(app *bootstrap.App) error {
 	}
 
 	// DLQ 与消费共用同一个生产者：两者对 acks=all 的要求一致。
-	sec := kafka.Security{
-		TLSCAFile:     cfg.Kafka.TLSCAFile,
-		SASLMechanism: cfg.Kafka.SASLMechanism,
-		SASLUsername:  cfg.Kafka.SASLUsername,
-		SASLPassword:  cfg.Kafka.SASLPassword,
-	}
+	sec := kafka.SecurityFromConfig(cfg.Kafka)
 	producer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Service, sec)
 	if err != nil {
 		return fmt.Errorf("notification: 初始化 Kafka 生产者失败: %w", err)
