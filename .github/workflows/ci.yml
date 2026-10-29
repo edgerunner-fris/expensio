@@ -88,6 +88,29 @@ jobs:
       - name: helm template
         run: helm template expensio deploy/helm/expensio > /tmp/expensio-manifests.yaml
 
+      # 渲染通过不代表配置正确：report 的仪表盘缓存与 gateway 的限流都要 Redis
+      # 口令，缺少注入时在托管 Redis 上启动即 NOAUTH、缓存被静默禁用（0.3.2
+      # 就漏了 report）。按 Deployment 断言这两个服务的容器里有该环境变量。
+      - name: 断言需要 Redis 的服务都注入了口令
+        run: |
+          python3 - <<'PY'
+          import sys
+          docs = open("/tmp/expensio-manifests.yaml", encoding="utf-8").read().split("\n---\n")
+          bad = []
+          for svc in ("gateway", "report"):
+              target = f"name: expensio-{svc}"
+              doc = next((d for d in docs
+                          if "\nkind: Deployment" in d and target + "\n" in d), None)
+              if doc is None:
+                  bad.append(f"{svc}: 没有找到 Deployment")
+              elif "EXPENSIO_REDIS_PASSWORD" not in doc:
+                  bad.append(f"{svc}: 缺少 EXPENSIO_REDIS_PASSWORD")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("gateway/report 均已注入 Redis 口令")
+          PY
+
       # helm lint / template 只证明模板能渲染，不证明字段符合 API schema。
       # kubeconform 用官方 OpenAPI schema 逐字段校验，挡掉拼错的字段名
       # （K8s 会静默忽略未知字段）。
