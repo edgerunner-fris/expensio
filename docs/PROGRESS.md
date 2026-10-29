@@ -3158,8 +3158,9 @@ DRILL_RESULT: PASS pdb
 仍未执行（需要托管依赖或集群管理员）。每一步的控制台参数、白名单网段、
 Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
-- OSS（S3 兼容接入点已实测通过，RAM 策略还缺 `GetBucketInfo` 与
-  `DeleteObject` 两条动作，补齐后才能把 release 切过去）；
+- OSS（S3 兼容接入点已实测通过，`OSS_VERIFY: PASS`；HeadBucket 在 OSS 上
+  恒为 403，启动探测已改用 `ListObjects`，见 `EXTERNAL_VERIFICATION` §13。
+  待集群恢复后把 release 切到 OSS 并跑完整 smoke）；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
 - 云上节点级扩容（cluster-autoscaler）与多可用区；
 - 对象存储生命周期与 PITR/备份恢复。
@@ -3227,12 +3228,13 @@ CrashLoop。修复为统一的 `kafka.SecurityFromConfig` 加回归测试。
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair 与 ApsaraMQ 已接管（三套 verify 脚本 PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS、Kafka 消费组由应用真实创建）；OSS 的 S3 兼容接入点实测通过，但 RAM 策略缺 `GetBucketInfo`/`DeleteObject`，尚未切到应用；ACME 仍未接入 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair 与 ApsaraMQ 已接管（三套 verify 脚本 PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS、Kafka 消费组由应用真实创建）；OSS 的 S3 兼容接入点与 CORS 已实测、`OSS_VERIFY: PASS`，待集群恢复后把 release 切过去；ACME 仍未接入 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
 | 云厂商 Kafka 端点差异 | 待验证 | 阿里云 ApsaraMQ 已实测：9093 无监听、9094 是 SASL_PLAINTEXT、9095 是 SASL_SSL 且证书签自私有 CA（CN=AliKafka），需 `tlsCA=true`；MSK 的 SCRAM 与 Event Hubs 的连接串形态仍未接入 |
+| OSS S3 兼容差异 | 已解决（OSS 实测） | HeadBucket 即使授予 `oss:GetBucketInfo` 仍返回 403（EC 0003-00000001），启动探测改用 `MaxKeys=1` 的 ListObjects；OSS 拒绝路径风格（0003-00001401），必须虚拟主机风格，minio-go 对 `aliyuncs.com` 自动选择；`aws-chunked` 分片上传需退到 unsigned payload |
 | HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。云上节点级扩容仍未验证 |
 | 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
@@ -3246,8 +3248,8 @@ CrashLoop。修复为统一的 `kafka.SecurityFromConfig` 加回归测试。
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
 证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-1. 把 ACK 剩下的临时依赖替换为 ApsaraMQ Kafka / OSS（RDS 与 Tair 已完成），
-   按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
+1. 把 ACK 最后一个临时依赖 MinIO 换成 OSS（ApsaraMQ 与 RDS/Tair 已完成；
+   OSS 验收已通过，剩余是改 `minio.*` values 并重跑 `MANAGED_DEPS=1`）；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
 3. 云上 HPA：CPU 扩缩容已在 k3d 与 ACK 实测，事件消费再平衡、连接排空与
    PDB 驱逐已在 ACK 实测，剩下节点级扩容（cluster-autoscaler）延迟与多可用区；

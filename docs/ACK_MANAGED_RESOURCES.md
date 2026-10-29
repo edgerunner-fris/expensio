@@ -333,7 +333,6 @@ Serverless 实例禁止客户端建 Topic，脚本第 6 步（临时主题自环
       "Effect": "Allow",
       "Action": [
         "oss:ListObjects",
-        "oss:GetBucketInfo",
         "oss:PutObject",
         "oss:GetObject",
         "oss:DeleteObject",
@@ -368,26 +367,33 @@ Serverless 实例禁止客户端建 Topic，脚本第 6 步（临时主题自环
 
 | values | 值 |
 | --- | --- |
-| `minio.endpoint` | `s3.oss-cn-hangzhou.aliyuncs.com`（不带 scheme） |
-| `minio.publicEndpoint` | 同上（浏览器可达的那个地址） |
+| `minio.endpoint` | `s3.oss-cn-hangzhou-internal.aliyuncs.com`（VPC 内网接入点，不带 scheme） |
+| `minio.publicEndpoint` | `s3.oss-cn-hangzhou.aliyuncs.com`（浏览器可达；presigned URL 按这个 Host 签名） |
 | `minio.bucket` | `expensio-test` |
 | `minio.useSSL` | `true` |
 
-OSS 的 S3 兼容接入点按**虚拟主机风格**（`<bucket>.<endpoint>`）访问。
-minio-go v7.0.99 的 `s3utils.IsVirtualHostSupported` 对 `aliyuncs.com`
-端点直接返回 true，因此应用不需要额外配置 lookup 方式；2026-10-30 在
-`expensio-test.s3.oss-cn-hangzhou.aliyuncs.com` 上实测：ListObjects、
+集群内用内网接入点可以完全不依赖节点出公网；浏览器直传/下载必须走公网
+接入点，所以两个字段不能写成同一个值。OSS 只接受**虚拟主机风格**
+（`<bucket>.<endpoint>`），路径风格返回 `0003-00001401 Please use virtual
+hosted style to access`。minio-go v7.0.99 的 `s3utils.IsVirtualHostSupported`
+对 `aliyuncs.com` 端点直接返回 true，因此应用不需要额外配置 lookup 方式；
+2026-10-30 在 `expensio-test.s3.oss-cn-hangzhou.aliyuncs.com` 上实测：ListObjects、
 PutObject、StatObject、GetObject、分片上传四步、预签名 GET/PUT 均通过。
 
 两点实测出来的权限细节：
 
-- `BucketExists`（HeadBucket）需要 `oss:GetBucketInfo`。缺这一条时错误是
-  `AccessDenied`，而应用启动时就会调用它，表现为 expense 直接起不来。
+- `BucketExists`（HeadBucket）在 OSS 上**不可用**：即使策略已授予
+  `oss:GetBucketInfo`，仍返回 `403 AccessDenied`（Message 为
+  `The bucket you access does not belong to you`，`x-oss-ec=0003-00000001`）。
+  同一凭据下 `GET /?bucketInfo` 与 `ListObjects` 都成功，说明这不是策略
+  缺项，而是 OSS 对 S3 HeadBucket 走了另一条权限检查。应用启动探测因此
+  改为 `MaxKeys=1` 的 `ListObjects`（`internal/platform/objectstore.ensureBucket`），
+  只要求已有的 `oss:ListObjects`。
 - 删除附件需要 `oss:DeleteObject`；缺它时返回
   `You have no right to access this object because of bucket acl`，
   上传/下载都正常，只有"删除附件"这一个功能静默失败。
 
-服务端只做 `BucketExists`、`StatObject`、`RemoveObject` 与**签发** URL，
+服务端只做 `ListObjects` 探测、`StatObject`、`RemoveObject` 与**签发** URL，
 不把对象字节经由 API 进程；因此不涉及 OSS 不支持的 `aws-chunked` 上传。
 
 > 若实测不兼容，退路是在集群内部署 MinIO（ACK 云盘 StorageClass
@@ -396,9 +402,10 @@ PutObject、StatObject、GetObject、分片上传四步、预签名 GET/PUT 均�
 > 该域名。这条路会多一个需要备份的有状态组件，只在 OSS 实测失败时启用。
 
 交给我的：Bucket 名、确认 CORS 已配、AccessKey 文件已就绪，并确认
-AccessKey 所属账号与 Bucket 所属账号**是同一个**——跨账号时 OSS 返回的是
-`The bucket you access does not belong to you`，与"策略写错"的普通
-`Access Denied` 不同，这个区分能省掉一轮排查。
+AccessKey 所属账号与 Bucket 所属账号**是同一个**。注意
+`The bucket you access does not belong to you` 并不是跨账号的专属提示：
+同一账号下缺少某个 bucket 级动作时也会返回它（HeadBucket 就是这样），
+要区分得靠"同一组的 `GetBucketInfo` / `ListObjects` 是否成功"。
 
 ### 4.5 验收
 
@@ -410,8 +417,10 @@ OSS_SK="$(cat ~/expensio-ack/creds/EXPENSIO_MINIO_SECRET_KEY)" \
 ```
 
 逐条打印 `[PASS]/[FAIL]`，最后一行 `OSS_VERIFY: PASS` 才算通过。它覆盖
-ListObjects、BucketExists、PutObject、StatObject、GetObject、分片上传四步、
-RemoveObject，并把预签名 GET/PUT 的 URL 写到 `/tmp`（不打印含签名的 URL）。
+ListObjects（同时就是应用的桶可达性探测）、PutObject、StatObject、
+GetObject、分片上传四步、RemoveObject，并把预签名 GET/PUT 的 URL 写到
+`/tmp`（不打印含签名的 URL）。HeadBucket 只打印 `[INFO]`、不计失败，
+因为它在 OSS 上恒为 403（见 4.4）。
 预签名链接用 `curl` 再验一次：
 
 ```bash

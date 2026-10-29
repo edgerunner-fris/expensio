@@ -551,7 +551,8 @@ SMOKE_RESULT: PASS
 SSL 与强口令，但公网可路由意味着口令泄露即可直连。建议收窄到三个 vSwitch
 网段 `10.75.0.0/16`（本集群的 Pod/节点网段），或至少移除 0.0.0.0/0。
 
-ApsaraMQ Kafka 的接管记录见 §12，OSS 见 §13（权限待补齐）。仍未执行：
+ApsaraMQ Kafka 的接管记录见 §12，OSS 见 §13（`OSS_VERIFY: PASS`，待切到
+release）。仍未执行：
 ACME 签发（需要已备案域名）、云上节点级扩容（cluster-autoscaler）与多可用区。
 
 ## 11. 已执行记录：Tair Redis 接管（2026-10-30）
@@ -643,7 +644,7 @@ SASL_SSL 后四个服务全部 CrashLoop，报
 镜像 tag 必须完整推送——`images.tag` 同时作用于七个服务与 migrate，少推
 migrate 或 web 会分别卡在迁移 Hook 与 `ImagePullBackOff`。
 
-## 13. 已执行记录：OSS S3 兼容接入点（2026-10-30，权限待补齐）
+## 13. 已执行记录：OSS S3 兼容接入点（2026-10-30，验收通过）
 
 Bucket `expensio-test`（华东1），endpoint `s3.oss-cn-hangzhou.aliyuncs.com`，
 `useSSL=true`。minio-go v7.0.99 对 `aliyuncs.com` 端点自动使用虚拟主机风格
@@ -652,36 +653,76 @@ Bucket `expensio-test`（华东1），endpoint `s3.oss-cn-hangzhou.aliyuncs.com`
 实测通过的项（真实请求）：
 
 ```text
-ListObjects             -> PASS
-PutObject               -> PASS
+ListObjects             -> PASS（前 5 个对象）
+PutObject               -> PASS（acceptance/<nano>.txt）
 StatObject              -> PASS（size/contentType 与上传一致）
 GetObject               -> PASS（内容逐字节一致）
 NewMultipartUpload      -> PASS
 PutObjectPart           -> PASS（5 MiB，ETag 返回）
 ListObjectParts         -> PASS（1 个分片）
 AbortMultipartUpload    -> PASS
-PresignedGetObject      -> 200，内容正确
+PresignedGetObject      -> 签发成功；curl 回 404 是因为对象随后已被删除
 PresignedPutObject      -> 200（curl 模拟浏览器直传）
+RemoveObject            -> PASS（补 oss:DeleteObject 之后）
 CORS 预检 OPTIONS       -> 200，Access-Control-Allow-Origin: *，
                            Allow-Methods 含 PUT，Expose-Headers: ETag
 实际 PUT 响应           -> 带 Origin 时同样回 CORS 头并暴露 ETag
 ```
 
-两个未通过项都是 RAM 策略缺动作，不是应用问题：
+### 13.1 HeadBucket 在 OSS 上不可用（代码已适配）
+
+`BucketExists`（HEAD Bucket）在策略**已授予** `oss:GetBucketInfo` 之后仍
+返回：
 
 ```text
-BucketExists(HeadBucket) -> AccessDenied      → 缺 oss:GetBucketInfo
-RemoveObject             -> AccessDenied（"because of bucket acl"）→ 缺 oss:DeleteObject
+status 403
+x-amz-bucket-region: oss-cn-hangzhou
+x-oss-ec: 0003-00000001
+<Code>AccessDenied</Code>
+<Message>The bucket you access does not belong to you.</Message>
 ```
 
-前者是启动路径：`objectstore.New` 第一件事就是 `BucketExists`，缺权限时
-expense 直接起不来，所以补齐前不能把 release 切到 OSS（仍用集群内 MinIO）。
+同一凭据下 `GET /?bucketInfo` 返回 200，`ListObjects` 也正常，说明不是
+策略缺项。继续用原生签名做对照：
 
-排查中还有一条经验值得记：一开始返回的是
-`The bucket you access does not belong to you`，与普通 `Access Denied`
-不同——它表示桶在另一个账号下（OSS 桶名全局唯一，通用名可能已被占用）。
-换成同账号后，对象级动作立刻通过，只剩上面两条桶级/删除权限。
+```text
+GET  /?bucketInfo   -> 200
+GET  /?acl          -> 403 AccessDenied
+GET  /?location     -> 403 AccessDenied
+GET  /（ListBuckets）-> 403 You are forbidden to oss:ListBuckets
+HEAD /（原生）       -> 403
+HEAD /（S3 虚拟主机） -> 403 ec=0003-00000001
+HEAD /（S3 路径风格） -> 403 ec=0003-00001401 Please use virtual hosted style
+```
 
-状态：**待补齐策略后重跑**，通过标准是 `OSS_VERIFY: PASS`，再把
-`minio.endpoint/bucket` 切到 OSS 并跑一次完整 smoke。
+结论：OSS 的 HeadBucket 走的是与 `GetBucketInfo` 不同的权限检查，补齐策略
+这条路走不通（两次策略修改后错误不变）。应用原本在 `objectstore.New`
+第一步就调 `BucketExists`，会让 expense 在 OSS 上启动即失败。
+
+修复：启动探测改为 `MaxKeys=1` 的 `ListObjects`（`bucketReachable`），
+桶不存在时仍返回 `NoSuchBucket` 并走 `MakeBucket`，本地 MinIO 行为不变；
+`ossverify` 把 HeadBucket 降为 `[INFO]`，不计入失败。提交 `aafcc98`。
+应用本来就需要 `oss:ListObjects` 做附件核对，没有新增权限要求。
+
+修复后：
+
+```text
+[PASS] ListObjects（前 5 个对象，实际返回 3）
+[INFO] HeadBucket 不可用（应用不依赖）: code=AccessDenied ...
+...（其余 10 项 PASS）
+OSS_VERIFY: PASS
+```
+
+### 13.2 排查留痕
+
+最初对象级动作也返回 `The bucket you access does not belong to you`，
+确实与"桶在另一个账号下"有关；但**这个提示并非跨账号专属**——同账号下
+缺少某个 bucket 级动作时（例如 HeadBucket）也会原样返回它。判断依据应换成
+"同组的 `GetBucketInfo` / `ListObjects` 是否成功"，而不是看错误文案。
+
+状态：**OSS 验收通过**。剩余动作是把 release 的
+`minio.endpoint/publicEndpoint/bucket/useSSL` 切到 OSS 并跑完整 smoke；
+该步骤依赖集群 API 可达，2026-10-30 重试时 `121.43.157.247:6443`
+返回 `connection refused`（NLB 主机名 NXDOMAIN），与 §11 记录的
+环境级中断一致，待集群恢复后执行。
 

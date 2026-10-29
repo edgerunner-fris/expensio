@@ -50,9 +50,11 @@ topics:
 
 minio:
   # OSS 的 S3 兼容接入点。不带 scheme，是否 TLS 由 useSSL 决定。
-  # 路径风格与虚拟主机风格在 s3.oss-cn-hangzhou.aliyuncs.com 上都实测可用。
-  endpoint: s3.oss-cn-hangzhou.aliyuncs.com
-  # 浏览器直传时看到的地址，必须公网可达；与 endpoint 相同时可留空。
+  # 集群内走 VPC 内网接入点，不依赖节点出公网；实测只支持虚拟主机风格，
+  # 路径风格返回 0003-00001401 "Please use virtual hosted style to access"。
+  endpoint: s3.oss-cn-hangzhou-internal.aliyuncs.com
+  # 浏览器看到的地址，必须公网可达。SigV4 把 Host 算进签名，签发
+  # presigned URL 用这个客户端；与 endpoint 不同时不能留空。
   publicEndpoint: s3.oss-cn-hangzhou.aliyuncs.com
   bucket: expensio-test
   useSSL: true
