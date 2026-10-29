@@ -1,9 +1,13 @@
 // ossverify 是 OSS（S3 兼容接入点）的验收工具，不参与服务运行。
 //
 // 它用与应用完全相同的 minio-go 版本，逐条验证 RAM 策略授权范围内的动作：
-// BucketExists、ListObjects、PutObject、StatObject、GetObject、
+// ListObjects、PutObject、StatObject、GetObject、
 // 分片上传的 NewMultipartUpload/PutObjectPart/ListObjectParts/Abort、
 // 以及预签名 GET/PUT 的 URL 生成。口令只从环境变量读，不打印。
+//
+// HeadBucket 只打印结果、不计入失败：阿里云 OSS 的 S3 兼容 HeadBucket
+// 即使授予 oss:GetBucketInfo 也返回 403，应用启动路径已经改用 ListObjects
+// 探测桶（见 internal/platform/objectstore.ensureBucket）。
 //
 // 用法见 docs/ACK_MANAGED_RESOURCES.md 第 4.5 节。
 package main
@@ -85,13 +89,14 @@ func main() {
 		pass("ListObjects（前 5 个对象，实际返回 %d）", n)
 	}
 
-	// 2. 桶存在性（HeadBucket / GetBucketInfo）
+	// 2. 桶可达性：应用启动用 ListObjects 探测，上面的列举已经覆盖；
+	// 这里再打一次 HeadBucket 仅作参考，403 不判失败（OSS 兼容行为）。
 	if exists, err := client.BucketExists(ctx, bucket); err != nil {
-		bad("BucketExists: %s", describe(err))
+		fmt.Printf("[INFO] HeadBucket 不可用（应用不依赖）: %s\n", describe(err))
 	} else if !exists {
-		bad("BucketExists: 桶不存在")
+		fmt.Println("[INFO] HeadBucket 返回不存在（以 ListObjects 结果为准）")
 	} else {
-		pass("BucketExists")
+		fmt.Println("[INFO] HeadBucket 可用")
 	}
 
 	key := fmt.Sprintf("acceptance/%d.txt", time.Now().UnixNano())

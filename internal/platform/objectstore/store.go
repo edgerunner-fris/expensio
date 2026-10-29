@@ -81,16 +81,48 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		}
 	}
 
-	exists, err := client.BucketExists(ctx, cfg.Bucket)
-	if err != nil {
-		return nil, fmt.Errorf("objectstore: 检查桶 %q 失败: %w", cfg.Bucket, err)
-	}
-	if !exists {
-		if err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
-			return nil, fmt.Errorf("objectstore: 创建桶 %q 失败: %w", cfg.Bucket, err)
-		}
+	if err := ensureBucket(ctx, client, cfg.Bucket); err != nil {
+		return nil, err
 	}
 	return &Store{client: client, signer: signer, bucket: cfg.Bucket}, nil
+}
+
+// ensureBucket 确认桶可读，不存在时创建（仅本地 MinIO 场景用得上）。
+//
+// 探测走 ListObjects 而不是 BucketExists（HEAD Bucket）：阿里云 OSS 的
+// S3 兼容 HeadBucket 即使 RAM 策略已授予 oss:GetBucketInfo 也返回
+// 403 AccessDenied（Message: The bucket you access does not belong to you，
+// EC 0003-00000001，2026-10-30 实测），而同样的凭据 ListObjects 正常。
+// 应用本来就需要 oss:ListObjects 做附件对账，用一次 MaxKeys=1 的列举
+// 既验证桶存在、也验证读权限，不额外索要 OSS 上不生效的权限。
+func ensureBucket(ctx context.Context, client *minio.Client, bucket string) error {
+	exists, err := bucketReachable(ctx, client, bucket)
+	if err != nil {
+		return fmt.Errorf("objectstore: 检查桶 %q 失败: %w", bucket, err)
+	}
+	if exists {
+		return nil
+	}
+	if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		return fmt.Errorf("objectstore: 创建桶 %q 失败: %w", bucket, err)
+	}
+	return nil
+}
+
+// bucketReachable 用空列举判断桶是否存在且可读。列举是惰性的：
+// 桶为空时通道直接关闭，没有任何对象，因此空循环也意味着成功。
+func bucketReachable(ctx context.Context, client *minio.Client, bucket string) (bool, error) {
+	for obj := range client.ListObjects(ctx, bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
+		if obj.Err == nil {
+			return true, nil
+		}
+		resp := minio.ToErrorResponse(obj.Err)
+		if resp.Code == "NoSuchBucket" || resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, obj.Err
+	}
+	return true, nil
 }
 
 // PresignPut 签发只允许 PUT 的上传 URL。Content-Type 进入签名：
