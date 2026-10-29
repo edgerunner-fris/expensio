@@ -26,6 +26,9 @@ KEYS=(
   EXPENSIO_DB_TLS_CA
   EXPENSIO_REDIS_PASSWORD
   EXPENSIO_KAFKA_SASL_PASSWORD
+  # 阿里云 Kafka 的 SSL 接入点证书签自私有 CA（CN=AliKafka），必须单独挂载；
+  # 少了这个键，chart 在 kafka.tlsCA=true 时会让 Pod 卡在 FailedMount。
+  EXPENSIO_KAFKA_TLS_CA
   EXPENSIO_MINIO_ACCESS_KEY
   EXPENSIO_MINIO_SECRET_KEY
 )
