@@ -169,24 +169,43 @@ func main() {
 		}
 	}
 
-	// 7. 预签名 URL（只写文件，不打印含签名的 URL）
+	// 7. 预签名 URL：签发后立刻用真实 HTTP 走一遍，避免"能签发、不能用"。
+	//    URL 同时写到文件方便 curl 复核；URL 本身不打印。
 	dir := os.Getenv("OSS_PRESIGN_DIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
+	httpc := &http.Client{Timeout: 30 * time.Second}
 	getURL, err := client.PresignedGetObject(ctx, bucket, key, 10*time.Minute, nil)
 	if err != nil {
 		bad("PresignedGetObject: %v", err)
 	} else {
 		_ = os.WriteFile(filepath.Join(dir, "oss-presign-get.txt"), []byte(getURL.String()), 0o600)
-		pass("PresignedGetObject（URL 写入 %s）", filepath.Join(dir, "oss-presign-get.txt"))
+		switch got, code, gerr := httpGet(httpc, getURL.String()); {
+		case gerr != nil:
+			bad("PresignedGetObject 实际下载: %v", gerr)
+		case code != http.StatusOK:
+			bad("PresignedGetObject 实际下载: http=%d", code)
+		case !bytes.Equal(got, body):
+			bad("PresignedGetObject 下载内容不一致")
+		default:
+			pass("PresignedGetObject 实际下载 200、内容一致（URL 写入 %s）",
+				filepath.Join(dir, "oss-presign-get.txt"))
+		}
 	}
 	putURL, err := client.PresignedPutObject(ctx, bucket, key+".presigned", 10*time.Minute)
 	if err != nil {
 		bad("PresignedPutObject: %v", err)
 	} else {
 		_ = os.WriteFile(filepath.Join(dir, "oss-presign-put.txt"), []byte(putURL.String()), 0o600)
-		pass("PresignedPutObject（URL 写入 %s）", filepath.Join(dir, "oss-presign-put.txt"))
+		if code, perr := httpPut(httpc, putURL.String(), "", body); perr != nil {
+			bad("PresignedPutObject 实际上传: %v", perr)
+		} else if code != http.StatusOK {
+			bad("PresignedPutObject 实际上传: http=%d", code)
+		} else {
+			pass("PresignedPutObject 实际上传 200（URL 写入 %s）",
+				filepath.Join(dir, "oss-presign-put.txt"))
+		}
 	}
 	// 应用实际上传时用 PresignHeader 把 Content-Type 签进 URL（附件类型
 	// 要参与校验），与上面不带头的 PresignedPutObject 是两条代码路径。
@@ -196,7 +215,24 @@ func main() {
 		bad("PresignHeader(PUT, Content-Type): %v", err)
 	} else {
 		_ = os.WriteFile(filepath.Join(dir, "oss-presign-put-ct.txt"), []byte(ctURL.String()), 0o600)
-		pass("PresignHeader(PUT, Content-Type)（URL 写入 %s）", filepath.Join(dir, "oss-presign-put-ct.txt"))
+		code, perr := httpPut(httpc, ctURL.String(), "text/plain", body)
+		switch {
+		case perr != nil:
+			bad("PresignHeader 带 Content-Type 上传: %v", perr)
+		case code != http.StatusOK:
+			bad("PresignHeader 带 Content-Type 上传: http=%d", code)
+		default:
+			// 少了被签进 URL 的头必须被拒，否则"类型进入签名"只是纸面约束。
+			noCT, perr2 := httpPut(httpc, ctURL.String(), "", body)
+			if perr2 != nil {
+				bad("PresignHeader 不带 Content-Type 上传: %v", perr2)
+			} else if noCT != http.StatusForbidden {
+				bad("PresignHeader 不带 Content-Type 应 403，实际 %d", noCT)
+			} else {
+				pass("PresignHeader(PUT, Content-Type)：带头 200、不带头 403（URL 写入 %s）",
+					filepath.Join(dir, "oss-presign-put-ct.txt"))
+			}
+		}
 	}
 
 	// 8. 删除（DeleteObject）
@@ -230,4 +266,32 @@ func describe(err error) string {
 		return fmt.Sprintf("code=%s message=%s requestID=%s", er.Code, er.Message, er.RequestID)
 	}
 	return err.Error()
+}
+
+// httpGet / httpPut 用真实 HTTP 走预签名 URL，模拟浏览器；返回状态码，
+// 由调用方判断，不把 URL 打到输出里。
+func httpGet(c *http.Client, url string) ([]byte, int, error) {
+	resp, err := c.Get(url)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return b, resp.StatusCode, err
+}
+
+func httpPut(c *http.Client, url, contentType string, payload []byte) (int, error) {
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
 }

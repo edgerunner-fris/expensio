@@ -418,10 +418,10 @@ OSS_SK="$(cat ~/expensio-ack/creds/EXPENSIO_MINIO_SECRET_KEY)" \
 
 逐条打印 `[PASS]/[FAIL]`，最后一行 `OSS_VERIFY: PASS` 才算通过。它覆盖
 ListObjects（同时就是应用的桶可达性探测）、PutObject、StatObject、
-GetObject、分片上传四步、RemoveObject、两种预签名 PUT（不带 Content-Type
-与把 Content-Type 签进 URL），并把预签名 GET/PUT 的 URL 写到 `/tmp`
-（不打印含签名的 URL）。HeadBucket 只打印 `[INFO]`、不计失败，
-因为它在 OSS 上恒为 403（见 4.4）。
+GetObject、分片上传四步、RemoveObject、两种预签名 PUT，并在工具内用真实
+HTTP 打开预签名 GET、上传两个预签名 PUT（带 Content-Type 必须 200，去掉
+则必须 403），URL 同时写到 `/tmp` 便于 curl 复核（不打印含签名的 URL）。
+HeadBucket 只打印 `[INFO]`、不计失败，因为它在 OSS 上恒为 403（见 4.4）。
 预签名链接用 `curl` 再验一次：
 
 ```bash
