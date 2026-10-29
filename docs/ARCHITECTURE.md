@@ -236,7 +236,7 @@ alpine），由 `internal/web` 提供静态文件与 `/api` 反代，详见 ADR-
 | M17 | 租户切换、个人设置、审计页与登录失败锁定 | 已完成（`self_membership_read` 策略、账号级锁定） |
 | M18 | 自动续费、模拟支付、租户删除、熔断与日志聚合 | 已完成（真实 PostgreSQL 续费/删除集成测试、Loki + Tempo 按 trace_id 联查实测） |
 | M19 | OpenAPI 契约、种子数据、安全扫描与 CD | 已完成（50 路径 / 62 操作 / 92 schema 与路由双向锁定；seed 重复执行 0 新建；govulncheck 0 可达漏洞；Trivy 扫描结果见 PROGRESS；`cd.yml` 的部署段未在真实集群执行） |
-| M20 | Kafka TLS/SASL、PostgreSQL `verify-full`、HPA、cert-manager 与托管云文档 | 部分完成（真实 SASL_SSL broker 与真实 TLS PostgreSQL 均跑通正反向用例；HPA 在 k3d 与阿里云 ACK 的 metrics-server 下实测 1→3→1，chart 0.3.1 起默认 512Mi；ACK 阶段 A 用 ACR + NLB + 临时依赖跑通部署与事件链路，chart 0.3.2 增加可覆盖的 Kafka CLI 镜像；ACK 节点切到 DataPath V2 后 NetworkPolicy 三条断言通过；再平衡、连接排空与 PDB 驱逐演练通过；托管 RDS/Tair/ApsaraMQ/OSS 与 ACME 签发仍未验证） |
+| M20 | Kafka TLS/SASL、PostgreSQL `verify-full`、HPA、cert-manager 与托管云文档 | 部分完成（真实 SASL_SSL broker 与真实 TLS PostgreSQL 均跑通正反向用例；HPA 在 k3d 与阿里云 ACK 的 metrics-server 下实测 1→3→1，chart 0.3.1 起默认 512Mi；ACK 阶段 A 用 ACR + NLB + 临时依赖跑通部署与事件链路，chart 0.3.2 增加可覆盖的 Kafka CLI 镜像；ACK 节点切到 DataPath V2 后 NetworkPolicy 三条断言通过；再平衡、连接排空与 PDB 驱逐演练通过；托管 RDS（verify-full、迁移幂等）与 Tair（口令 + 白名单）已实测接管，chart 0.3.3 修复 report 未注入 Redis 口令；ApsaraMQ/OSS 与 ACME 签发仍未验证） |
 
 ## ADR
 

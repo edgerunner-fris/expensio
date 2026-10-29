@@ -221,6 +221,23 @@ IMAGE=crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alp
 
 交给我的：内网地址 + 密码文件已就绪。
 
+### 2.1 验收（2026-10-30 实测）
+
+```bash
+HOST=r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:7.4.11-alpine \
+  bash deploy/cluster/ack/verify-redis.sh
+```
+
+脚本从集群内起临时 Pod，口令经 `REDISCLI_AUTH` 传入，断言 DNS、PING、
+版本/角色、无口令与错误口令两个负例、SET/GET/TTL。最后一行
+`REDIS_VERIFY: PASS` 才算通过。
+
+白名单没放行时现象是 **TCP 超时**（`Terminated`），不是认证失败：
+`redis-cli` 连内核超时都等不到。这时把 `10.75.0.0/16` 加入实例白名单。
+口令错误才是 `NOAUTH` / `WRONGPASS`。开了 SSL 则是握手失败——本项目的
+客户端不支持 TLS。
+
 ---
 
 ## 3. ApsaraMQ for Kafka

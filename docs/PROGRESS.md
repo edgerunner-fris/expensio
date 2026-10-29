@@ -3158,7 +3158,7 @@ DRILL_RESULT: PASS pdb
 仍未执行（需要托管依赖或集群管理员）。每一步的控制台参数、白名单网段、
 Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
-- Tair Redis / ApsaraMQ Kafka / OSS（RDS 已完成接管，见下）；
+- ApsaraMQ Kafka / OSS（RDS 与 Tair 已完成接管，见下）；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
 - 云上节点级扩容（cluster-autoscaler）与多可用区；
 - 对象存储生命周期与 PITR/备份恢复。
@@ -3178,6 +3178,23 @@ release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SS
 完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 10 节。**待用户处理**：RDS 白名单
 当前是"全部开放"（0.0.0.0/0），建议收窄到集群 vSwitch 网段。
 
+### 托管 Tair Redis 接管（2026-10-30）
+
+release revision 6 起 `redis.addr` 指向
+`r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com:6379`（Redis 7.0.15，standalone，
+SSL 关闭——客户端只支持明文 + 口令）。
+
+- `verify-redis.sh`：PING、版本/角色、无口令 `NOAUTH`、错误口令 `WRONGPASS`、
+  SET/GET/TTL 全部符合预期，`REDIS_VERIFY: PASS`；
+- 应用侧证据：smoke 之后实例里存在 `expensio:rl:ip:*`（gateway 令牌桶）与
+  `report:version:*`（report 仪表盘缓存），不是"进程起来了"；
+- 顺带修复 chart 缺陷：`services.report.redis` 原先没开，report 拿不到
+  `EXPENSIO_REDIS_PASSWORD`，托管 Redis 上启动即 `NOAUTH`、缓存被静默禁用。
+  chart 0.3.3 起默认打开。
+
+白名单最初没放行集群网段，现象是 TCP 超时而不是认证失败；加入
+`10.75.0.0/16` 后通过。完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 11 节。
+
 本轮保留了 ACK 现场便于复核：`expensio` 命名空间、四个临时依赖 Pod、
 `acr-pull` Secret 与 smoke 产生的测试租户都未删除。复核后先
 `helm -n expensio uninstall expensio`，再删除临时依赖清单与命名空间；
@@ -3187,7 +3204,7 @@ release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SS
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS 已接管（verify-rds PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS）；Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS 与 Tair 已接管（两套 verify 脚本 PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS、实例里有应用写入的键）；ApsaraMQ/OSS 与 ACME 仍未接入 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
@@ -3198,7 +3215,7 @@ release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SS
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
 | 云厂商 PostgreSQL 证书差异 | 已解决（RDS 实测） | 阿里云 RDS 内网域名与实例证书 SAN 一致，`verify-full` + ApsaraDB CA 链从 Pod 内建连成功；CA 链最早到期 2032-04，轮换仍需运维跟进 |
-| Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级 |
+| Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级。chart 0.3.3 起 report 也注入该键（此前只有 gateway 有，report 的仪表盘缓存会静默禁用） |
 
 ## 下一步
 
@@ -3206,7 +3223,7 @@ release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SS
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
 证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-1. 把 ACK 剩下的临时依赖替换为 Tair Redis / ApsaraMQ Kafka / OSS（RDS 已完成），
+1. 把 ACK 剩下的临时依赖替换为 ApsaraMQ Kafka / OSS（RDS 与 Tair 已完成），
    按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
 3. 云上 HPA：CPU 扩缩容已在 k3d 与 ACK 实测，事件消费再平衡、连接排空与

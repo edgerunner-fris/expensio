@@ -159,6 +159,10 @@ services:
     db: true
     jwt: true
     kafka: true
+    # report 的仪表盘缓存用 Redis（cmd/report/main.go 里 NeedsRedis=true）。
+    # 少这一行时地址仍从 ConfigMap 注入，但口令不会进容器，托管 Redis 上
+    # 启动即 NOAUTH，缓存被静默禁用——功能不坏，但缓存永远不命中。
+    redis: true
   notification:
     port: 8085
     replicas: 1

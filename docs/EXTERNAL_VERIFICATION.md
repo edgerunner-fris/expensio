@@ -551,6 +551,44 @@ SMOKE_RESULT: PASS
 SSL 与强口令，但公网可路由意味着口令泄露即可直连。建议收窄到三个 vSwitch
 网段 `10.75.0.0/16`（本集群的 Pod/节点网段），或至少移除 0.0.0.0/0。
 
-仍未执行：Tair（客户端不支持 TLS，实例不能开 SSL）、ApsaraMQ Kafka、OSS
-（CORS 与 S3 虚拟主机兼容性需实测）、ACME 签发（需要已备案域名）、云上节点级
-扩容（cluster-autoscaler）与多可用区。
+仍未执行：ApsaraMQ Kafka、OSS（CORS 与 S3 虚拟主机兼容性需实测）、ACME
+签发（需要已备案域名）、云上节点级扩容（cluster-autoscaler）与多可用区。
+
+## 11. 已执行记录：Tair Redis 接管（2026-10-30）
+
+实例 `r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com:6379`（Redis 7.0.15，
+standalone / master），口令在 `expensio-secrets` 的
+`EXPENSIO_REDIS_PASSWORD`，release revision 6 起 `redis.addr` 指向它。
+SSL 关闭——`internal/platform/redis` 只支持明文 + 口令。
+
+```bash
+HOST=r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:7.4.11-alpine \
+  bash deploy/cluster/ack/verify-redis.sh
+
+helm -n expensio upgrade expensio deploy/helm/expensio --reuse-values \
+  --set redis.addr=r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com:6379 \
+  --set services.report.redis=true --wait
+```
+
+结果：
+
+```text
+DNS：10.0.0.49  r-bp1vv55oefnvdvpvci.redis.rds.aliyuncs.com
+PING -> PONG
+redis_version:7.0.15  redis_mode:standalone  role:master
+无口令 -> NOAUTH Authentication required.
+错误口令 -> WRONGPASS invalid username-password pair or user is disabled.
+SET/GET/TTL -> OK/ok/ttl=58s，key 已删除
+REDIS_VERIFY: PASS
+```
+
+应用真的在用这个实例，不只是"进程起来了"：跑完 smoke 后扫描实例，
+`expensio:rl:ip:<client-ip>`（gateway 的令牌桶）与
+`report:version:<tenant-id>`（report 的仪表盘缓存版本）都存在。
+
+第一次接入时连接超时，原因是实例白名单没放行集群网段；加入 `10.75.0.0/16`
+后通过。这一步还暴露了一个 chart 缺陷：`services.report.redis` 默认没开，
+report 拿不到 `EXPENSIO_REDIS_PASSWORD`，托管 Redis 上启动即
+`NOAUTH`，仪表盘缓存被静默禁用（功能不坏，但永远不命中）。0.3.3 起
+`values.yaml` 为 report 打开 `redis: true`；自建/无口令 Redis 不受影响。
