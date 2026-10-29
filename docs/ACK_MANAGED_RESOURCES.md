@@ -418,8 +418,9 @@ OSS_SK="$(cat ~/expensio-ack/creds/EXPENSIO_MINIO_SECRET_KEY)" \
 
 逐条打印 `[PASS]/[FAIL]`，最后一行 `OSS_VERIFY: PASS` 才算通过。它覆盖
 ListObjects（同时就是应用的桶可达性探测）、PutObject、StatObject、
-GetObject、分片上传四步、RemoveObject，并把预签名 GET/PUT 的 URL 写到
-`/tmp`（不打印含签名的 URL）。HeadBucket 只打印 `[INFO]`、不计失败，
+GetObject、分片上传四步、RemoveObject、两种预签名 PUT（不带 Content-Type
+与把 Content-Type 签进 URL），并把预签名 GET/PUT 的 URL 写到 `/tmp`
+（不打印含签名的 URL）。HeadBucket 只打印 `[INFO]`、不计失败，
 因为它在 OSS 上恒为 403（见 4.4）。
 预签名链接用 `curl` 再验一次：
 
@@ -427,6 +428,11 @@ GetObject、分片上传四步、RemoveObject，并把预签名 GET/PUT 的 URL 
 curl -s -o /tmp/oss-get -w '%{http_code}\n' "$(cat /tmp/oss-presign-get.txt)"
 curl -s -o /dev/null -w '%{http_code}\n' -X PUT -H 'Content-Type: text/plain' \
   --data-binary 'x' "$(cat /tmp/oss-presign-put.txt)"
+# 带 Content-Type 签名的 URL：带头必须 200，不带头必须 403
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT -H 'Content-Type: text/plain' \
+  --data-binary 'x' "$(cat /tmp/oss-presign-put-ct.txt)"
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT \
+  --data-binary 'x' "$(cat /tmp/oss-presign-put-ct.txt)"
 curl -s -D - -o /dev/null -X OPTIONS \
   -H 'Origin: http://expensio.test' -H 'Access-Control-Request-Method: PUT' \
   https://expensio-test.s3.oss-cn-hangzhou.aliyuncs.com/acceptance/probe.txt \

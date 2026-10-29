@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -187,12 +188,27 @@ func main() {
 		_ = os.WriteFile(filepath.Join(dir, "oss-presign-put.txt"), []byte(putURL.String()), 0o600)
 		pass("PresignedPutObject（URL 写入 %s）", filepath.Join(dir, "oss-presign-put.txt"))
 	}
+	// 应用实际上传时用 PresignHeader 把 Content-Type 签进 URL（附件类型
+	// 要参与校验），与上面不带头的 PresignedPutObject 是两条代码路径。
+	ctURL, err := client.PresignHeader(ctx, http.MethodPut, bucket, key+".presigned-ct",
+		10*time.Minute, nil, http.Header{"Content-Type": []string{"text/plain"}})
+	if err != nil {
+		bad("PresignHeader(PUT, Content-Type): %v", err)
+	} else {
+		_ = os.WriteFile(filepath.Join(dir, "oss-presign-put-ct.txt"), []byte(ctURL.String()), 0o600)
+		pass("PresignHeader(PUT, Content-Type)（URL 写入 %s）", filepath.Join(dir, "oss-presign-put-ct.txt"))
+	}
 
 	// 8. 删除（DeleteObject）
 	if err := client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		bad("RemoveObject: %v", err)
 	} else {
 		pass("RemoveObject %s", key)
+	}
+	// 预签名 URL 由 curl 在外部写入对象，这里顺手清掉，避免桶里越积越多。
+	// 对象可能不存在（外部没跑 curl），失败不影响结论。
+	for _, k := range []string{key + ".presigned", key + ".presigned-ct"} {
+		_ = client.RemoveObject(ctx, bucket, k, minio.RemoveObjectOptions{})
 	}
 
 	printVerdict()

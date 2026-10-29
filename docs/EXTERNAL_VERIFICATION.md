@@ -663,6 +663,8 @@ ListObjectParts         -> PASS（1 个分片）
 AbortMultipartUpload    -> PASS
 PresignedGetObject      -> 签发成功；curl 回 404 是因为对象随后已被删除
 PresignedPutObject      -> 200（curl 模拟浏览器直传）
+PresignHeader(PUT, CT)  -> 不带 Content-Type 时 403，带上时 200
+                           （应用实际上传走的就是这条路径）
 RemoveObject            -> PASS（补 oss:DeleteObject 之后）
 CORS 预检 OPTIONS       -> 200，Access-Control-Allow-Origin: *，
                            Allow-Methods 含 PUT，Expose-Headers: ETag
