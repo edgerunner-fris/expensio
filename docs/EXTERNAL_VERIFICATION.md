@@ -715,6 +715,20 @@ HEAD /（S3 路径风格） -> 403 ec=0003-00001401 Please use virtual hosted st
 OSS_VERIFY: PASS
 ```
 
+2026-10-30 在 RAM 策略默认版本更新之后复测，`BucketExists` 仍然失败：
+
+```text
+[PASS] ListObjects（前 5 个对象，实际返回 0）
+[INFO] HeadBucket 不可用（应用不依赖）: code=AccessDenied message=Access Denied.
+       requestID=6AE3DCA52F88D636398C6D67
+...（其余 11 项 PASS）
+OSS_VERIFY: PASS
+```
+
+结论不变：**OSS 的 HeadBucket 不能作为桶可达性判断**，把 `oss:GetBucketInfo`
+或策略默认版本补齐都不会改变它。应用侧继续用 `ListObjects(MaxKeys=1)`，
+这也是它本来就要用到的权限。
+
 ### 13.2 排查留痕
 
 最初对象级动作也返回 `The bucket you access does not belong to you`，

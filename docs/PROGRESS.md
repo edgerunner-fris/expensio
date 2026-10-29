@@ -3176,8 +3176,8 @@ release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SS
 - 迁移 Job 重跑五个库全部 `no change`（version 5/5/3/2/2，dirty=false）；
 - `MANAGED_DEPS=1` 的 smoke 在 NLB 入口跑通：`SMOKE_RESULT: PASS`。
 
-完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 10 节。**待用户处理**：RDS 白名单
-当前是"全部开放"（0.0.0.0/0），建议收窄到集群 vSwitch 网段。
+完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 10 节。RDS 白名单已按建议收窄到
+集群 vSwitch 网段（2026-10-30 用户确认；本次未在集群内复测）。
 
 ### 托管 Tair Redis 接管（2026-10-30）
 
@@ -3249,19 +3249,73 @@ JPEG/PNG/WebP/PDF、列表返回 `data.items`）；`ack-expensio.yaml` 客户端
 `helm -n expensio uninstall expensio`，再删除临时依赖清单与命名空间；
 `creds.sh` 只保存在 WSL 本地（mode 600），没有进入仓库。
 
+### 节点伸缩试验与全部节点停机（2026-10-30 晚）
+
+**伸缩试验（记为未完成/跳过，不作为通过项）**
+
+GOATScaler 已按控制台"即时弹性"方案开启，应用节点池
+`np1ce4618a947e44c09b009801a31099bd` 已配置。压力试验
+（`kubectl -n expensio scale deploy expensio-report --replicas=20`）确实触发了
+扩容尝试：Pod 进入 Pending，GOATScaler 事件为
+`InvalidAccountStatus.NotEnoughBalance`——账户余额不足，无法创建按量付费节点。
+决定不充值，因此拿不到"Pending→Ready 耗时"，本项不写成通过。
+
+缩容侧同样受限，`kubectl get events` 中可见：
+
+```text
+Warning  ScaleDownLimited  node/cn-hangzhou.10.75.255.117  Scale-down blocked by nodepool minsize limit
+Warning  ScaleDownLimited  node/cn-hangzhou.10.75.255.118  Scale-down blocked by nodepool minsize limit
+Warning  ScaleDownLimited  node/cn-hangzhou.10.75.255.119  Scale-down blocked by nodepool minsize limit
+```
+
+节点池 `minSize` 让空闲节点无法回收，"缩容释放节点"因此也没有实测数据。
+集群内 `kube-system` 没有 autoscaler 组件（实测 `get deploy,ds,po | grep -i
+autoscal` 为空），伸缩动作全部在管理侧完成。
+
+**全部节点停机（单独立项）**
+
+试验期间四台节点同时进入 `NotReady`（约 07:43 CST）：
+
+```text
+cn-hangzhou.10.75.255.116   NotReady
+cn-hangzhou.10.75.255.117   NotReady
+cn-hangzhou.10.75.255.118   NotReady
+cn-hangzhou.10.75.255.119   NotReady
+
+Ready=Unknown(NodeStatusUnknown)                since 2026-10-29T23:43:41Z
+EcsInstanceState=True(Stopped)                  since 2026-10-29T23:43:18Z   ← 四台一致
+事件：NodeNotReady ×4
+```
+
+`EcsInstanceState=Stopped` 指向 ECS 实例本身被停止，形态与欠费停机一致
+（待账号侧确认），不是 kubelet 或网络抖动——`Ready=Unknown` 只是结果。
+此刻 `kubectl get pods` 仍显示 `Running`，那是 apiserver 里保留的旧状态：
+Pod 的 `Ready` 条件已经是 `False`，七个 HPA 全部报
+`FailedGetResourceMetric: unable to fetch metrics from resource metrics API`。
+即控制面可用、工作负载实际不可用。
+
+这条与伸缩试验**分开记录、分开排查**：先确认停机原因，恢复后验证节点重新
+加入、Pod 自愈与 NetworkPolicy/Ingress 是否仍按预期工作。
+
+**对既有证据的影响**：OSS 切换的集群内证据（revision 14、smoke、附件闭环）
+完成于 06:32–06:55 CST，早于停机约 50 分钟，仍然有效；停机之后无法再做
+任何集群内验证。
+
 ### 风险
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair、ApsaraMQ 与 OSS 已全部接管（四套 verify/end-to-end PASS、迁移 no change、`MANAGED_DEPS=1` smoke PASS、附件链路在 MinIO 下线后仍 PASS）；节点级自动扩容未实现，ACME 因无备案域名跳过（ClusterIssuer 已就绪） |
-| 节点级自动扩容 | 未实现（2026-10-30 实测） | `kube-system` 里没有任何 autoscaler 组件（`get deploy,ds,po \| grep -i autoscal` 为空），只有 Pod 级 HPA。两个节点池 `npd9556c…`（.116/.118，带 `CriticalAddonsOnly` taint，系统池）与 `np1ce4…`（.117/.119，应用池），每节点 3920m CPU / 6.4Gi 内存，全部在 `cn-hangzhou-j` 单可用区。HPA 扩到 2 副本即可能撞上节点容量上限，且节点池的 min/max 是控制台/OpenAPI 配置，集群内查不到 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair、ApsaraMQ 与 OSS 已全部接管（四套 verify/end-to-end PASS、迁移 no change、`MANAGED_DEPS=1` smoke PASS、附件链路在 MinIO 下线后仍 PASS）；节点级自动扩容因余额不足未取得实证（记为跳过），ACME 因无备案域名跳过（ClusterIssuer 已就绪）。2026-10-30 晚四台节点 ECS 实例被停止，集群当前不可用，单独排查 |
+| 节点级自动扩容 | 未完成/跳过（2026-10-30 实测） | GOATScaler 已按控制台"即时弹性"开启、应用节点池 `np1ce4618a947e44c09b009801a31099bd` 已配置；`scale deploy expensio-report --replicas=20` 触发扩容尝试但 Pod 停在 Pending，事件 `InvalidAccountStatus.NotEnoughBalance`（余额不足，无法创建按量付费节点）。未充值，**拿不到 Pending→Ready 耗时，不作为通过项**。缩容侧 `ScaleDownLimited … nodepool minsize limit`。`kube-system` 内无 autoscaler 组件（实测），伸缩全部在管理侧 |
+| 全部节点 NotReady（EcsInstanceState=Stopped） | 未解决（2026-10-30 实测） | 四台节点 `Ready=Unknown(NodeStatusUnknown)` since 2026-10-29T23:43:41Z、`EcsInstanceState=True(Stopped)` since 23:43:18Z，事件 NodeNotReady ×4。Pod 显示 `Running` 是 apiserver 旧状态（`Ready` 条件已是 `False`），七个 HPA 报 `FailedGetResourceMetric`。按"停机"单独立项排查，与伸缩试验分开：先确认停机原因，恢复后验证节点重新加入、Pod 自愈与 NetworkPolicy/Ingress |
+| 跨区域复制 | 跳过（2026-10-30 决定） | 不建目标桶、不建复制规则；步骤保留在 `ACK_MANAGED_RESOURCES.md` §4.6 备用。生命周期规则同样未创建 |
 | ACME 未走完整签发 | 跳过（无备案域名） | cert-manager 三 Pod Running；`ClusterIssuer letsencrypt-prod-cluster` `READY=True`，message 为 `The ACME account was registered with the ACME server`（2026-10-30 实测）。Ingress `expensio.test` 未加 `cert-manager.io/cluster-issuer` 注解、无 `spec.tls`，因此不会触发签发。有备案域名与公网入口后只需补注解 + DNS 解析 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
 | 云厂商 Kafka 端点差异 | 待验证 | 阿里云 ApsaraMQ 已实测：9093 无监听、9094 是 SASL_PLAINTEXT、9095 是 SASL_SSL 且证书签自私有 CA（CN=AliKafka），需 `tlsCA=true`；MSK 的 SCRAM 与 Event Hubs 的连接串形态仍未接入 |
-| OSS S3 兼容差异 | 已解决（OSS 实测） | HeadBucket 即使授予 `oss:GetBucketInfo` 仍返回 403（EC 0003-00000001），启动探测改用 `MaxKeys=1` 的 ListObjects；OSS 拒绝路径风格（0003-00001401），必须虚拟主机风格，minio-go 对 `aliyuncs.com` 自动选择；`aws-chunked` 分片上传需退到 unsigned payload。内网接入点由 Pod 内 TLS 探针确认可用，release revision 14 已完成切换 |
+| OSS S3 兼容差异 | 已解决（OSS 实测） | HeadBucket 即使授予 `oss:GetBucketInfo` 仍返回 403（EC 0003-00000001），启动探测改用 `MaxKeys=1` 的 ListObjects；OSS 拒绝路径风格（0003-00001401），必须虚拟主机风格，minio-go 对 `aliyuncs.com` 自动选择；`aws-chunked` 分片上传需退到 unsigned payload。内网接入点由 Pod 内 TLS 探针确认可用，release revision 14 已完成切换。RAM 策略默认版本更新后复测：HeadBucket 仍 `AccessDenied`（requestID `6AE3DCA52F88D636398C6D67`），其余 11 项 PASS，`OSS_VERIFY: PASS` |
 | HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。云上节点级扩容仍未验证 |
 | 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
 | cert-manager 未走完整 ACME | 跳过（无备案域名） | 集群侧已就绪：cert-manager 三 Pod Running，`ClusterIssuer letsencrypt-prod-cluster` `READY=True`（ACME 账号注册成功）；Ingress 未加注解、无 `spec.tls`，不触发签发。模板负例已覆盖。解除条件：备案域名 + 公网入口 |
@@ -3275,15 +3329,19 @@ JPEG/PNG/WebP/PDF、列表返回 `data.items`）；`ack-expensio.yaml` 客户端
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
 证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
+0. **节点停机排查（优先）**：四台节点 `EcsInstanceState=Stopped`，确认是欠费
+   停机还是其他原因；恢复后验证节点重新加入、Pod 自愈、NetworkPolicy 与
+   Ingress 仍按预期工作。在此之前任何集群内验证都做不了；
 1. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
 2. 云上 HPA：CPU 扩缩容已在 k3d 与 ACK 实测，事件消费再平衡、连接排空与
-   PDB 驱逐已在 ACK 实测，剩下节点级扩容（cluster-autoscaler）延迟与多可用区；
+   PDB 驱逐已在 ACK 实测。节点级扩容因账户余额不足**跳过**（GOATScaler 已开启、
+   确实触发过扩容尝试，但没有 Pending→Ready 实证），多可用区也未配置；
 3. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
 4. 托管 PostgreSQL 的 `verify-full` 已在阿里云 RDS 实测通过；剩下 CA 轮换与
    备份恢复；
 5. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练
-   （OSS 生命周期规则与跨区域复制一并纳入）。
+   （OSS 生命周期规则仍未创建；跨区域复制已决定跳过）。
 
 对象存储已于 2026-10-30 切到 OSS（revision 14，`ATTACHMENT_E2E: PASS`），
 `deps.yaml` 里的 MinIO 仍保留为 `replicas=0` 便于对比回滚。
