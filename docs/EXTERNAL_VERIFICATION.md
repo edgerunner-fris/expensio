@@ -722,9 +722,119 @@ OSS_VERIFY: PASS
 缺少某个 bucket 级动作时（例如 HeadBucket）也会原样返回它。判断依据应换成
 "同组的 `GetBucketInfo` / `ListObjects` 是否成功"，而不是看错误文案。
 
-状态：**OSS 验收通过**。剩余动作是把 release 的
-`minio.endpoint/publicEndpoint/bucket/useSSL` 切到 OSS 并跑完整 smoke；
-该步骤依赖集群 API 可达，2026-10-30 重试时 `121.43.157.247:6443`
-返回 `connection refused`（NLB 主机名 NXDOMAIN），与 §11 记录的
-环境级中断一致，待集群恢复后执行。
+状态：**OSS 验收通过**，release 已在 2026-10-30 切到 OSS，见 §14。
+
+## 14. 已执行记录：release 切到 OSS（2026-10-30，验收通过）
+
+Release revision 14，镜像 tag `667b633`，`helm upgrade --reuse-values` 叠加
+只含对象存储键的 overlay：
+
+```text
+images.tag             = 667b633
+minio.endpoint         = s3.oss-cn-hangzhou-internal.aliyuncs.com
+minio.publicEndpoint   = s3.oss-cn-hangzhou.aliyuncs.com
+minio.bucket           = expensio-test
+minio.useSSL           = true
+```
+
+`endpoint` 给 Pod 用（走内网、不出公网）；`publicEndpoint` 只参与 presigned
+URL 的签名——SigV4 把 Host 签进去，两者不能互换。
+
+### 14.1 内网接入点先单独探一遍
+
+在 `expensio` 命名空间起一个 busybox Pod（用 ACR 里的 `busybox:1.36`，
+继承 `acr-pull`），只验证网络与 TLS，不带凭据：
+
+```text
+nslookup expensio-test.s3.oss-cn-hangzhou-internal.aliyuncs.com
+  -> 100.118.28.44 / 100.118.28.49        （OSS 内网 VIP）
+wget https://expensio-test.s3.oss-cn-hangzhou-internal.aliyuncs.com/
+  -> HTTP/1.1 403 Forbidden
+```
+
+未签名请求返回 403 是预期；能走到 403 说明 DNS、TCP、TLS 全通（否则会是
+`certificate signed by unknown authority` 或连接超时）。这一步把"内网端点
+证书是否被 Pod 信任"从部署后才发现，提前到部署前。
+
+### 14.2 升级结果
+
+```text
+helm -n expensio history expensio
+14   Fri Oct 30 06:32:58 2026   deployed   expensio-0.3.3   Upgrade complete
+
+configmap expensio-config
+EXPENSIO_MINIO_BUCKET=expensio-test
+EXPENSIO_MINIO_ENDPOINT=s3.oss-cn-hangzhou-internal.aliyuncs.com
+EXPENSIO_MINIO_PUBLIC_ENDPOINT=s3.oss-cn-hangzhou.aliyuncs.com
+EXPENSIO_MINIO_USE_SSL=true
+```
+
+七个服务均为 `…:667b633 Running 0 restarts`（identity / expense / report /
+billing / notification / gateway / web）。
+
+启动探测本身就是证据：`objectstore.New` 先 `ListObjects(MaxKeys=1)` 再
+`MakeBucket`，探测失败会直接返回错误、进程退出。expense 升级后首个日志就是
+`http server started`，说明它在 Pod 内对 OSS 内网接入点的列举是成功的
+（§13.1 记录过 HeadBucket 在 OSS 上恒 403，若还用旧探测就会启动即失败）。
+
+### 14.3 功能验收
+
+`MANAGED_DEPS=1 smoke.sh`：
+
+```text
+GET /healthz -> 200
+members=4
+expense 756234fc-9e49-492b-9042-288eba8c9fc0 submitted and approved
+report currency_totals=1
+default -> identity: blocked
+unlabeled -> identity: blocked
+labeled -> identity: {"status":"ok","service":"identity","version":"667b633"}
+SMOKE_RESULT: PASS
+```
+
+附件闭环 `oss-e2e.sh`（走 NLB + `Host: expensio.test`；presign 由公网接入点
+签名，PUT/GET 从集群外走公网真实链路）：
+
+```text
+presign ok object_key=tenants/<tenant>/expenses/<expense>/<uuid>.png
+browser-style PUT -> 200
+confirmed attachment=1fa451cc-b267-4f5a-b5b4-9fed059748ca
+download verified (70 bytes)
+ATTACHMENT_E2E: PASS
+```
+
+覆盖的动作与 §13 的逐项验收一一对应：`PresignHeader(PUT, image/png)` 签发 →
+带 `Content-Type` 的 PUT 200 → confirm → 列表现签 GET URL → 下载逐字节比对 →
+DELETE → 列表回到 0 条。
+
+再把集群内 MinIO 缩到 0 复跑同一个脚本：
+
+```text
+kubectl -n expensio scale deploy minio --replicas=0
+…
+ATTACHMENT_E2E: PASS
+NO_MINIO_POD
+```
+
+这一步是为了排除"改了 values、实际仍打到 MinIO Service"的假通过：MinIO Pod
+不存在时链路仍然 PASS，对象存储就只剩 OSS 一条路径。
+
+### 14.4 收尾与踩到的脚本问题
+
+- Secret 里的 `EXPENSIO_MINIO_ACCESS_KEY/SECRET_KEY` 与本地 RAM AK/SK 文件
+  做过 base64 逐字节比对（输出只有 `MATCH`，不打印值）；
+- 验收结束后桶内 `objects=0`，没有残留；
+- 切换过程中修了三个脚本侧问题，都不涉及应用代码：
+  1. `patch-oss-secret.sh` 用了 `jsonpath='{range $k,$v := .data}'`，kubectl
+     的 jsonpath 不支持这种写法，改为 `go-template`；
+  2. `oss-e2e.sh` 三处与 API 契约不符：`occurred_at` 必须是 RFC3339（`time.Time`
+     直接反序列化，`2026-10-30` 会 400）；附件白名单只收 JPEG/PNG/WebP/PDF，
+     改用真实的 1×1 PNG；列表返回 `data.items` 而不是 `data[]`；
+  3. `~/.kube/ack-expensio.yaml` 里的客户端凭据已失效（`the server has asked
+     for the client to provide credentials`），换成可用 kubeconfig 的副本后
+     所有验收脚本恢复工作。
+
+未做：把 MinIO 从 `deps.yaml` 里删掉——现场保留为 `replicas=0` 便于回滚对比；
+OSS 生命周期规则与跨区域复制仍属"下一步"。
+
 

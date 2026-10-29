@@ -26,6 +26,7 @@
 | `deps.yaml` | 单节点 PostgreSQL / Redis / Kafka / MinIO（**仅验收用**，emptyDir，无备份/TLS） |
 | `values.yaml` | 指向集群内依赖、Traefik、关闭 TLS 与邮件、主题单副本 |
 | `smoke.sh` | 安装后的验收断言，失败即非零退出；托管依赖加 `MANAGED_DEPS=1` 跳过两条直连检查 |
+| `oss-e2e.sh` | 对象存储附件闭环：presign → 带 Content-Type 的 PUT → confirm → 下载比对 → 删除；换对象存储供应商（MinIO ↔ OSS）后必跑 |
 | `drills/lib.sh` | 三个演练共用的环境变量与辅助函数（HPA/Deployment 两种扩缩方式） |
 | `drills/rebalance.sh` | 消费者再平衡：扩/缩副本期间 4 条真实事件不丢、LAG 归零 |
 | `drills/drain.sh` | 连接排空：滚动重启 gateway 时经 Ingress 的请求不中断 |
