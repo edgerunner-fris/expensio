@@ -111,18 +111,23 @@ func ensureBucket(ctx context.Context, client *minio.Client, bucket string) erro
 
 // bucketReachable 用空列举判断桶是否存在且可读。列举是惰性的：
 // 桶为空时通道直接关闭，没有任何对象，因此空循环也意味着成功。
+// 必须把通道读到关闭：minio-go 用一个生产协程喂结果，提前 return 会让它
+// 永久阻塞在发送上（启动时的 ctx 没有超时）。
 func bucketReachable(ctx context.Context, client *minio.Client, bucket string) (bool, error) {
+	exists := true
+	var err error
 	for obj := range client.ListObjects(ctx, bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
 		if obj.Err == nil {
-			return true, nil
+			continue
 		}
 		resp := minio.ToErrorResponse(obj.Err)
 		if resp.Code == "NoSuchBucket" || resp.StatusCode == http.StatusNotFound {
-			return false, nil
+			exists = false
+			continue
 		}
-		return false, obj.Err
+		err = obj.Err
 	}
-	return true, nil
+	return exists, err
 }
 
 // PresignPut 签发只允许 PUT 的上传 URL。Content-Type 进入签名：
