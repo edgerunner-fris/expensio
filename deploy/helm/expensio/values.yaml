@@ -78,9 +78,11 @@ kafka:
 # 附件对象存储。chart 不部署 MinIO：桶由平台提供，启动时自动创建。
 # publicEndpoint 是浏览器地址，只影响 presigned URL 的 Host 与签名；
 # 它必须指向用户能访问的入口（通常是对象存储的 Ingress / 负载均衡域名）。
+# 与 endpoint 一样**不带 scheme**：写 https:// 会让 expense 启动时直接失败，
+# 是否 TLS 由 useSSL 决定。
 minio:
   endpoint: minio.example.internal:9000
-  publicEndpoint: https://files.expensio.example.com
+  publicEndpoint: files.expensio.example.com
   bucket: expensio-invoices
   useSSL: true
 

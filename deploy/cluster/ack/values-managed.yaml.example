@@ -1,0 +1,64 @@
+# 接托管依赖时的 values 覆盖示例。
+#
+# 复制成 ~/expensio-ack/values-managed.yaml 后把 <...> 换成控制台里的实际值：
+#   cp deploy/cluster/ack/values-managed.yaml.example ~/expensio-ack/values-managed.yaml
+#
+# 与 deploy/cluster/acceptance/values.yaml 的区别：那个文件指向命名空间内的
+# 临时依赖（deps.yaml），本文件指向 RDS / Tair / ApsaraMQ / OSS。
+#
+# 这个文件里没有、也不应该有口令：全部通过 expensio-secrets 注入，
+# 键名见 deploy/helm/expensio/values.yaml 的 secretKeys。
+
+images:
+  # ACR 个人版地址；tag 用不可变的提交 SHA。
+  registry: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio
+  tag: <commit-sha>
+  migrate: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio-migrate
+imagePullSecrets:
+  - name: acr-pull
+
+database:
+  # 内网地址，不是公网地址。
+  host: pgm-<id>.pg.rds.aliyuncs.com
+  port: 5432
+  # RDS 的证书签自阿里云自建 CA，不在系统根证书里，所以必须带 CA。
+  sslmode: verify-full
+  tlsCA: true
+
+redis:
+  addr: r-<id>.redis.rds.aliyuncs.com:6379
+
+kafka:
+  # 控制台「接入点信息」里 VPC 网络、端口 9093（SASL_SSL）的那一行。
+  brokers: alikafka-<id>-<n>.alikafka.aliyuncs.com:9093
+  # Hook 关闭时用不到，但保留：升级时若临时打开 topics 不必再改。
+  cliImage: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/kafka:3.9.2
+  tls: true
+  # ApsaraMQ 的证书是公有 CA，不需要私有 CA。
+  tlsCA: false
+  saslMechanism: plain
+  saslUsername: expensio
+
+topics:
+  # 托管 Kafka 的 SASL 用户通常没有建 Topic 的权限；四个 Topic 与三个消费组
+  # 在控制台预先创建，因此关掉 Hook。
+  enabled: false
+
+minio:
+  # OSS 的 S3 兼容接入点。不带 scheme，是否 TLS 由 useSSL 决定。
+  # OSS 只接受虚拟主机风格，minio-go 会按 <bucket>.<endpoint> 访问。
+  endpoint: s3.oss-cn-hangzhou.aliyuncs.com
+  # 浏览器直传时看到的地址，必须公网可达；与 endpoint 相同时可留空。
+  publicEndpoint: s3.oss-cn-hangzhou.aliyuncs.com
+  bucket: expensio-invoices
+  useSSL: true
+
+otel:
+  enabled: false
+
+notification:
+  # 没有 SMTP 时保持 false：邀请仍落库并返回链接，只是不发信。
+  emailEnabled: false
+
+invite:
+  baseURL: https://<你的域名>

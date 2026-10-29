@@ -487,6 +487,12 @@ Pod 与 ingress-controller，让新 veth 挂上 eBPF 程序，最后重跑
 会出现“策略容器在跑、旧 Pod 流量仍放行”或反向的默认拒绝。完整步骤与实测
 证据见 `docs/PROGRESS.md`。
 
+阶段 A 之后仍未接入托管依赖。要接 RDS / Tair / ApsaraMQ / OSS、签发 ACME
+证书、开启节点级扩容与多可用区，按
+[ACK_MANAGED_RESOURCES.md](ACK_MANAGED_RESOURCES.md) 逐项操作：每项都写明
+控制台参数、vSwitch 白名单、Secret 键名、`values` 片段与验收命令。那份文档
+是**操作手册**，在执行并回填证据之前，不改变本节列出的"未验证"状态。
+
 ## 发布流程（tag → 镜像 → Helm）
 
 `.github/workflows/cd.yml` 在推送 `v*` tag 时触发，分三段：

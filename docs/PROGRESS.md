@@ -3155,7 +3155,8 @@ DRILL_RESULT: PASS pdb
    `acr-pull` Secret，应用 Pod 通过 `imagePullSecrets` 继承，验收依赖的
    `expensio/default` ServiceAccount 也挂载该 Secret。凭据不写入仓库。
 
-仍未执行（需要托管依赖或集群管理员）：
+仍未执行（需要托管依赖或集群管理员）。每一步的控制台参数、白名单网段、
+Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
 - 阿里云 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS；本次是临时单副本
   依赖，不能据此宣称托管依赖已验证；
