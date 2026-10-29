@@ -30,31 +30,49 @@ KEYS=(
   EXPENSIO_MINIO_SECRET_KEY
 )
 
-bad=0
+# 资源是分步开通的，密钥也就会分步到位：默认只同步已就绪的键，
+# 缺失的列在末尾作为提醒。STRICT=1 用于"马上要 helm install"前的最终检查。
+present=()
+missing=()
 for k in "${KEYS[@]}"; do
-  if [ ! -s "$DIR/$k" ]; then
-    echo "缺少或为空：$DIR/$k" >&2
-    bad=1
-    continue
+  if [ -s "$DIR/$k" ]; then
+    present+=("$k")
+  else
+    missing+=("$k")
   fi
+done
+
+if [ "${#present[@]}" -eq 0 ]; then
+  echo "没有任何可同步的键：$DIR 里没有非空文件" >&2
+  exit 3
+fi
+
+for k in "${present[@]}"; do
   case "$k" in
     *TLS_CA) ;; # PEM 末尾的换行无害，x509 会忽略空白
     *)
       # 口令文件末尾的换行会被当作口令的一部分，是最常见的"明明填对了却认证失败"。
-      if [ -n "$(tail -c1 "$DIR/$k")" ]; then :; else
+      if [ -z "$(tail -c1 "$DIR/$k")" ]; then
         echo "警告：$k 末尾有换行，会被当成口令的一部分" >&2
       fi
       ;;
   esac
 done
-[ "$bad" -eq 0 ] || exit 3
+
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "未写入（文件缺失或为空）：${missing[*]}" >&2
+  if [ "${STRICT:-0}" = "1" ]; then
+    echo "STRICT=1：要求全部键就绪，已中止" >&2
+    exit 3
+  fi
+fi
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 {
   printf '{"data":{'
   first=1
-  for k in "${KEYS[@]}"; do
+  for k in "${present[@]}"; do
     if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
     printf '"%s":"%s"' "$k" "$(base64 -w0 <"$DIR/$k")"
   done
@@ -66,8 +84,8 @@ $KUBECTL -n "$NS" get secret "$SECRET" >/dev/null 2>&1 \
 
 $KUBECTL -n "$NS" patch secret "$SECRET" --type=merge --patch-file="$tmp" >/dev/null
 
-echo "已更新 $NS/$SECRET，键与大小："
-for k in "${KEYS[@]}"; do
+echo "已更新 $NS/$SECRET，本次写入的键与大小："
+for k in "${present[@]}"; do
   printf '  %-32s %6s bytes\n' "$k" "$(wc -c <"$DIR/$k")"
 done
 echo "依赖这些键的 Pod 需要重启才会读到新值："

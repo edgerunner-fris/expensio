@@ -69,6 +69,8 @@ bash deploy/cluster/ack/sync-secret.sh
 ```
 
 脚本只回显键名与字节数，不打印值；末尾会提示需要 `rollout restart`。
+资源是分步开通的，所以脚本默认只同步已就绪的键，把缺失的列在 stderr；
+`STRICT=1 bash ...` 才会要求七个键全部齐全（正式部署前用它做最终检查）。
 **不要把任何密钥贴进对话或提交到仓库**——我不需要看到值，只需要你确认
 `sync-secret.sh` 成功。
 
@@ -498,9 +500,21 @@ helm -n expensio upgrade --install expensio deploy/helm/expensio \
 ### 9.1 依赖连通性
 
 ```bash
-# 五个库都能以 migrator 连上，且 schema_migrations 有记录
-for db in identity expense billing report notification; do ...; done
+HOST=pgm-<id>.pg.rds.aliyuncs.com bash deploy/cluster/ack/verify-rds.sh
 ```
+
+脚本起一个临时 Pod（口令从 Secret 以文件挂载，不进命令行参数），断言：
+
+1. Pod 内能解析并连上 RDS——白名单按 vSwitch 网段放行，跳板机能连不代表
+   Pod 能连；
+2. 五个库的 `*_app` 账号都能用 `sslmode=verify-full` 建连，且会话里 `ssl=on`；
+3. 五个库的 `*_migrator` 账号能连，且库属主是它自己；
+4. `identity_app` 不能建表、`rolbypassrls=f`；
+5. 打印 `identity_db` 的迁移记录数（部署前应为 0 或表不存在）。
+
+最后一行是 `RDS_VERIFY: PASS` 才算通过。集群访问不到 Docker Hub 时用
+`IMAGE=crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alpine`
+指向 ACR 的同版本镜像。
 
 ### 9.2 完整链路（托管依赖模式）
 
