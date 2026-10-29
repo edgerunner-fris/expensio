@@ -12,9 +12,14 @@
 --   1. RDS 没有真正的超级用户。高权限账号（pg_rds_superuser）可以建角色，
 --      但 PostgreSQL 16 起 CREATE DATABASE ... OWNER 还要求执行者能
 --      SET ROLE 到目标属主，所以先显式 GRANT 成员关系。
---   2. schema、默认权限、库级 search_path 不在这里做——五个库的 000001
---      基线迁移会以 migrator 身份完成（它是库属主，有权 ALTER DATABASE）。
---      在这里重复一份，一旦两边不一致，迁移记录和实际 search_path 就会分叉。
+--   2. schema、默认权限、库级 search_path 不在这里做，但**也不能留给迁移
+--      自己做**：golang-migrate 在应用第一个迁移之前就建版本表
+--      schema_migrations，用的是连接当时的 search_path。若 search_path 到
+--      000001 才设置，版本表会落在 public 而业务表落在 app，下一次 migrate
+--      在 app 里找不到版本表，会把所有迁移重跑一遍。
+--      所以顺序是：先跑完本脚本，再跑 init-rds-schema.sh 建 app schema 与
+--      库级 search_path，最后才执行迁移。init-rds-schema.sh 也负责把已经
+--      落在 public 的版本表移回 app。
 --
 -- 幂等：角色或库已存在时跳过；口令不会被回显，但也不会被修改。
 

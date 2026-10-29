@@ -162,12 +162,33 @@ else
 fi
 
 say
-say "== 5. 迁移记录（部署前应为 0 或表不存在）=="
-out=$($KUBECTL -n "$NS" exec -i "$POD" -- sh -s 2>&1 <<EOF
-PGPASSWORD=\$(cat /secrets/migrator) psql "host=$HOST port=$PORT dbname=identity_db user=identity_migrator sslmode=verify-full sslrootcert=/certs/ca.pem connect_timeout=10" -tAc "select count(*) from app.schema_migrations"
+say "== 5. 迁移记录表的位置（必须在 app schema）=="
+# golang-migrate 在建版本表时用连接的 search_path。若库级 search_path 是
+# 迁移过程中才设置的，表会落在 public；下一次 migrate 到 app 里找不到它，
+# 会把所有迁移重跑一遍。位置不对就是失败，不是提示。
+for db in $DBS; do
+  role=${db%_db}
+  out=$($KUBECTL -n "$NS" exec -i "$POD" -- sh -s 2>&1 <<EOF
+PGPASSWORD=\$(cat /secrets/migrator) psql "host=$HOST port=$PORT dbname=$db user=${role}_migrator sslmode=verify-full sslrootcert=/certs/ca.pem connect_timeout=10" -tAc "select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'schema_migrations'"
 EOF
 )
-say "  identity_db: $(printf '%s' "$out" | tr -d '\n')"
+  loc=$(printf '%s' "$out" | tr -d '[:space:]')
+  case "$loc" in
+    "")
+      say "  $db: 版本表不存在（尚未迁移）"
+      ;;
+    app)
+      ver=$($KUBECTL -n "$NS" exec -i "$POD" -- sh -s 2>&1 <<EOF
+PGPASSWORD=\$(cat /secrets/migrator) psql "host=$HOST port=$PORT dbname=$db user=${role}_migrator sslmode=verify-full sslrootcert=/certs/ca.pem connect_timeout=10" -tAc "select version || '|dirty=' || dirty from app.schema_migrations"
+EOF
+)
+      say "  $db: app（version=$(printf '%s' "$ver" | tr -d '[:space:]')）"
+      ;;
+    *)
+      bad "$db: schema_migrations 在 $loc，应在 app——下一次 migrate 会把所有迁移重跑"
+      ;;
+  esac
+done
 
 say
 if [ "$fail" -eq 0 ]; then

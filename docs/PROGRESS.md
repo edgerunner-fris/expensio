@@ -3158,12 +3158,25 @@ DRILL_RESULT: PASS pdb
 仍未执行（需要托管依赖或集群管理员）。每一步的控制台参数、白名单网段、
 Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
-- 阿里云 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS；本次是临时单副本
-  依赖，不能据此宣称托管依赖已验证；
+- Tair Redis / ApsaraMQ Kafka / OSS（RDS 已完成接管，见下）；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
 - 云上节点级扩容（cluster-autoscaler）与多可用区；
-- 托管 PostgreSQL 的 `verify-full`、Kafka SASL、对象存储生命周期与 PITR/
-  备份恢复。
+- 对象存储生命周期与 PITR/备份恢复。
+
+### 托管 RDS PostgreSQL 接管（2026-10-29）
+
+release revision 4 起数据库指向阿里云 RDS（`pgm-bp122vf7jr65sz8y`，SSL
+`verify-full`，库与角色由 `bootstrap-rds.sql` 建立）。证据链：
+
+- `verify-rds.sh`：五个库的 `*_app` / `*_migrator` 都能用阿里云 CA 建连并
+  `ssl=on`；`identity_app` 建表被拒、`rolbypassrls=f`；
+- `init-rds-schema.sh`：修复"版本表落在 public"的缺陷后，五个库均为
+  `schema=app search_path=app, public version_table=app`；
+- 迁移 Job 重跑五个库全部 `no change`（version 5/5/3/2/2，dirty=false）；
+- `MANAGED_DEPS=1` 的 smoke 在 NLB 入口跑通：`SMOKE_RESULT: PASS`。
+
+完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 10 节。**待用户处理**：RDS 白名单
+当前是"全部开放"（0.0.0.0/0），建议收窄到集群 vSwitch 网段。
 
 本轮保留了 ACK 现场便于复核：`expensio` 命名空间、四个临时依赖 Pod、
 `acr-pull` Secret 与 smoke 产生的测试租户都未删除。复核后先
@@ -3174,7 +3187,7 @@ Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 与临时依赖完成安装、全链路 smoke 和 HPA 1→3→1；RDS/Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS 已接管（verify-rds PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS）；Tair/ApsaraMQ/OSS 与 ACME 仍未接入 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
@@ -3184,7 +3197,7 @@ Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 | 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
-| 云厂商 PostgreSQL 证书差异 | 待验证 | 证书主机名、代理端点与 CA 轮换需在目标环境实测 |
+| 云厂商 PostgreSQL 证书差异 | 已解决（RDS 实测） | 阿里云 RDS 内网域名与实例证书 SAN 一致，`verify-full` + ApsaraDB CA 链从 Pod 内建连成功；CA 链最早到期 2032-04，轮换仍需运维跟进 |
 | Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级 |
 
 ## 下一步
@@ -3193,15 +3206,15 @@ Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、
 证据模板与常见失败见 [EXTERNAL_VERIFICATION.md](EXTERNAL_VERIFICATION.md)。
 
-1. 把 ACK 的临时依赖替换为 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS，
+1. 把 ACK 剩下的临时依赖替换为 Tair Redis / ApsaraMQ Kafka / OSS（RDS 已完成），
    按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
 3. 云上 HPA：CPU 扩缩容已在 k3d 与 ACK 实测，事件消费再平衡、连接排空与
    PDB 驱逐已在 ACK 实测，剩下节点级扩容（cluster-autoscaler）延迟与多可用区；
 4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
-5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云
-   的证书主机名、代理端点与 CA 轮换实测；
+5. 托管 PostgreSQL 的 `verify-full` 已在阿里云 RDS 实测通过；剩下 CA 轮换与
+   备份恢复；
 6. 生产备份：对象存储 + PITR，把 `scripts/backup-drill.sh` 扩展为云端恢复演练。
 
 

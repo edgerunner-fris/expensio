@@ -479,5 +479,78 @@ PDB 驱逐（pdb.sh）
   DRILL_RESULT: PASS pdb
 ```
 
-仍未执行：托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上节点级扩容
-（cluster-autoscaler）与多可用区。
+## 10. 已执行记录：RDS PostgreSQL 接管（2026-10-29）
+
+第一个真正接入的托管依赖。实例在 cn-hangzhou，内网地址
+`pgm-bp122vf7jr65sz8y.pg.rds.aliyuncs.com`（解析到 10.225.76.4，
+与节点同 VPC），SSL 已开启，库与角色由 `bootstrap-rds.sql` 建立。
+
+执行顺序（与 `docs/ACK_MANAGED_RESOURCES.md` 1.4–1.4.1 一致）：
+
+```bash
+# 1) 口令与 CA 写进 Secret（只同步已就绪的键，不打印值）
+bash deploy/cluster/ack/sync-secret.sh
+
+# 2) 第一次迁移之前：建 app schema 与库级 search_path
+HOST=pgm-bp122vf7jr65sz8y.pg.rds.aliyuncs.com \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alpine \
+  bash deploy/cluster/ack/init-rds-schema.sh
+
+# 3) 连通性、TLS、权限边界、版本表位置
+HOST=pgm-bp122vf7jr65sz8y.pg.rds.aliyuncs.com \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alpine \
+  bash deploy/cluster/ack/verify-rds.sh
+
+# 4) 切换 release 到 RDS（沿用原 values，只改连接三件套）
+helm -n expensio upgrade expensio deploy/helm/expensio --reuse-values \
+  --set database.host=pgm-bp122vf7jr65sz8y.pg.rds.aliyuncs.com \
+  --set database.sslmode=verify-full --set database.tlsCA=true \
+  --wait --timeout 20m
+```
+
+结果：
+
+```text
+DNS 解析：通过（Pod 内 getent hosts 解析到 10.225.76.4）
+五个库 *_app 登录：sslmode=verify-full + 阿里云 CA，会话 ssl=on
+五个库 *_migrator 登录：成功，库属主即 migrator
+identity_app: create table 被拒；rolbypassrls=f
+schema_migrations 位置：identity=5 expense=5 billing=3 report=2 notification=2，
+  全部在 app schema，dirty=false
+RDS_VERIFY: PASS
+```
+
+迁移 Hook 的幂等性单独取过证据：把 chart 渲染出的 migrate Job 去掉 Hook 注解
+重跑一次，五个库的日志全部是 `no change`，版本号不变——这是"版本表位置正确、
+下一次升级不会重跑迁移"的直接证据。
+
+切换后完整链路（托管依赖模式）在 NLB 入口上跑通：
+
+```text
+MANAGED_DEPS=1 NAMESPACE=expensio INGRESS_HOST=expensio.test \
+  BASE_URL=http://nlb-jhmprt2f1ov8ufn74r.cn-hangzhou.nlb.aliyuncsslb.com \
+  BUSYBOX_IMAGE=registry.cn-hangzhou.aliyuncs.com/google_containers/busybox:1.27 \
+  bash deploy/cluster/acceptance/smoke.sh
+
+7 个 Deployment 1/1，runAsNonRoot/seccomp/只读根/不允许提权 全部生效
+SA 无 API 权限、不挂载令牌
+GET /healthz -> 200
+注册→邀请→接受→费用→审批→Kafka→报表：通过（report currency_totals=1）
+NetworkPolicy：default -> identity 被拒；未打标签 Pod 被拒；同 release 放行
+SMOKE_RESULT: PASS
+```
+
+这一步暴露并修复了一个真实缺陷：`bootstrap-rds.sql` 原先把 `search_path` 留给
+`000001_baseline` 迁移设置，但 golang-migrate 在第一个迁移之前就建
+`schema_migrations`，导致版本表落在 `public`、业务表落在 `app`，下一次 migrate
+会重跑全部迁移。修复是新增 `init-rds-schema.sh`（建 schema、设库级
+`search_path`、把已跑歪的版本表移回 `app`），并把"必须在首次迁移之前执行"
+写进文档与脚本头部。
+
+**安全提示（待处理）**：实例白名单当前是「全部开放」（0.0.0.0/0）。实例虽有
+SSL 与强口令，但公网可路由意味着口令泄露即可直连。建议收窄到三个 vSwitch
+网段 `10.75.0.0/16`（本集群的 Pod/节点网段），或至少移除 0.0.0.0/0。
+
+仍未执行：Tair（客户端不支持 TLS，实例不能开 SSL）、ApsaraMQ Kafka、OSS
+（CORS 与 S3 虚拟主机兼容性需实测）、ACME 签发（需要已备案域名）、云上节点级
+扩容（cluster-autoscaler）与多可用区。

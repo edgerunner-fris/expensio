@@ -146,8 +146,8 @@ unset APP_PW MIGRATOR_PW
 发我——这是需要记录的环境差异，不是可以静默跳过的。
 
 脚本只做三件事：建 5 个 `_migrator`、5 个 `_app`（`NOBYPASSRLS`）、
-5 个库（属主是 migrator）。schema、默认权限与库级 `search_path` 由每个库的
-`000001_baseline` 迁移以 migrator 身份完成，不在脚本里重复。
+5 个库（属主是 migrator）。**它不建 schema，也不设 `search_path`**——见下一节，
+这一步必须发生在第一次迁移之前。
 
 预期回执（最后两条 SELECT 的输出）：
 
@@ -157,6 +157,29 @@ identity_db | identity_migrator
 expense_db  | expense_migrator
 ...
 ```
+
+#### 1.4.1 第一次迁移之前：建 schema 与库级 `search_path`
+
+```bash
+HOST=pgm-<id>.pg.rds.aliyuncs.com \
+IMAGE=crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alpine \
+  bash deploy/cluster/ack/init-rds-schema.sh
+```
+
+这一步不能省，原因是一个真实的踩坑：golang-migrate 在应用**第一个**迁移之前
+就建版本表 `schema_migrations`，用的是连接当时的 `search_path`。`search_path`
+若由 `000001_baseline` 迁移自己设置，版本表已经先落在 `public`，而业务表落
+在 `app`；下一次 migrate 在 `app` 里找不到版本表，会把所有迁移重跑一遍，
+多数在 `CREATE TABLE` 处失败并把库标成 `dirty`。本地 compose 没暴露这个
+问题，因为它的初始化脚本先设了 `search_path`。
+
+脚本以 `*_migrator` 身份执行（库属主，有权 `CREATE SCHEMA` 与
+`ALTER DATABASE`），幂等：建 `app` schema、把库级 `search_path` 设为
+`app, public`，并把**已经跑歪**的 `public.schema_migrations` 移回 `app`。
+最后一行 `RDS_SCHEMA_INIT: PASS` 才算就绪。
+
+脚本必须在集群里跑，因为 RDS 白名单只放行 vSwitch 网段，跳板机上执行
+`CREATE SCHEMA` 会连不上；口令同样只以文件形式挂进临时 Pod。
 
 ### 1.5 开启 SSL 并下载 CA
 
@@ -510,11 +533,19 @@ HOST=pgm-<id>.pg.rds.aliyuncs.com bash deploy/cluster/ack/verify-rds.sh
 2. 五个库的 `*_app` 账号都能用 `sslmode=verify-full` 建连，且会话里 `ssl=on`；
 3. 五个库的 `*_migrator` 账号能连，且库属主是它自己；
 4. `identity_app` 不能建表、`rolbypassrls=f`；
-5. 打印 `identity_db` 的迁移记录数（部署前应为 0 或表不存在）。
+5. 五个库的 `schema_migrations` 都必须在 `app` schema，并打印
+   `version|dirty=false`。落在 `public` 直接判失败——那正是 1.4.1 描述的
+   "下一次升级重跑迁移"故障。
 
 最后一行是 `RDS_VERIFY: PASS` 才算通过。集群访问不到 Docker Hub 时用
 `IMAGE=crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/postgres:16.15-alpine`
 指向 ACR 的同版本镜像。
+
+顺序是：`bootstrap-rds.sql` → `sync-secret.sh` → `init-rds-schema.sh` →
+`verify-rds.sh` → `helm upgrade --wait`。迁移 Hook 跑完后再执行一次
+`verify-rds.sh`，状态应为 `version=5/5/3/2/2`（identity/expense/billing/
+report/notification）、`dirty=false`；再 `helm upgrade` 一次，migrate Job 的
+日志应当五个库全部 `no change`——这是"版本表位置正确"的最终证据。
 
 ### 9.2 完整链路（托管依赖模式）
 
