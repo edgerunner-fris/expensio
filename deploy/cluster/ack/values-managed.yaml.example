@@ -13,7 +13,7 @@ images:
   # ACR 个人版地址；tag 用不可变的提交 SHA。
   registry: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio
   tag: <commit-sha>
-  migrate: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio-migrate
+  migrate: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/migrate
 imagePullSecrets:
   - name: acr-pull
 
@@ -29,28 +29,32 @@ redis:
   addr: r-<id>.redis.rds.aliyuncs.com:6379
 
 kafka:
-  # 控制台「接入点信息」里 VPC 网络、端口 9093（SASL_SSL）的那一行。
-  brokers: alikafka-<id>-<n>.alikafka.aliyuncs.com:9093
+  # 控制台「接入点信息」里 VPC 网络、SASL_SSL 的那一行。
+  # 本例（Serverless 实例）是 9095；9094 是 SASL_PLAINTEXT（口令明文过网，
+  # 配置层会拒绝），9092 是 PLAINTEXT，9093 没有监听。
+  brokers: alikafka-<id>-<n>.alikafka.aliyuncs.com:9095
   # Hook 关闭时用不到，但保留：升级时若临时打开 topics 不必再改。
   cliImage: crpi-<id>.cn-hangzhou.personal.cr.aliyuncs.com/expensio/kafka:3.9.2
   tls: true
-  # ApsaraMQ 的证书是公有 CA，不需要私有 CA。
-  tlsCA: false
+  # 阿里云 Kafka 的 9095 证书签自私有 CA（CN=AliKafka），控制台可下载；
+  # 值为 true 时从 expensio-secrets 的 EXPENSIO_KAFKA_TLS_CA 挂载。
+  tlsCA: true
   saslMechanism: plain
-  saslUsername: expensio
+  saslUsername: expensio_test
 
 topics:
   # 托管 Kafka 的 SASL 用户通常没有建 Topic 的权限；四个 Topic 与三个消费组
-  # 在控制台预先创建，因此关掉 Hook。
+  # 在控制台预先创建，因此关掉 Hook。Serverless 实例还禁止客户端建 Topic，
+  # 打开时 Hook 会 30×5s 重试并卡住 helm upgrade。
   enabled: false
 
 minio:
   # OSS 的 S3 兼容接入点。不带 scheme，是否 TLS 由 useSSL 决定。
-  # OSS 只接受虚拟主机风格，minio-go 会按 <bucket>.<endpoint> 访问。
+  # 路径风格与虚拟主机风格在 s3.oss-cn-hangzhou.aliyuncs.com 上都实测可用。
   endpoint: s3.oss-cn-hangzhou.aliyuncs.com
   # 浏览器直传时看到的地址，必须公网可达；与 endpoint 相同时可留空。
   publicEndpoint: s3.oss-cn-hangzhou.aliyuncs.com
-  bucket: expensio-invoices
+  bucket: expensio-test
   useSSL: true
 
 otel:

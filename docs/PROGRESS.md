@@ -3158,7 +3158,8 @@ DRILL_RESULT: PASS pdb
 仍未执行（需要托管依赖或集群管理员）。每一步的控制台参数、白名单网段、
 Secret 键名与验收命令见 `docs/ACK_MANAGED_RESOURCES.md`：
 
-- ApsaraMQ Kafka / OSS（RDS 与 Tair 已完成接管，见下）；
+- OSS（S3 兼容接入点已实测通过，RAM 策略还缺 `GetBucketInfo` 与
+  `DeleteObject` 两条动作，补齐后才能把 release 切过去）；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
 - 云上节点级扩容（cluster-autoscaler）与多可用区；
 - 对象存储生命周期与 PITR/备份恢复。
@@ -3195,6 +3196,28 @@ SSL 关闭——客户端只支持明文 + 口令）。
 白名单最初没放行集群网段，现象是 TCP 超时而不是认证失败；加入
 `10.75.0.0/16` 后通过。完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 11 节。
 
+### 托管 ApsaraMQ Kafka 接管（2026-10-30）
+
+release revision 13 起四个 `EXPENSIO_KAFKA_*` 指向 Serverless 实例的
+SASL_SSL 接入点（9095，三台 broker），`tls=true`、`tlsCA=true`（私有 CA
+`CN=AliKafka`）、`saslMechanism=plain`、`saslUsername=expensio_test`。
+
+- 端口按实测选：9093 无监听；9094 是 SASL_PLAINTEXT（口令明文过网，配置层
+  拒绝）；9095 是 SASL_SSL，必须挂控制台下载的 CA；
+- `verify-kafka.sh`（TLS_CA=1）：认证通过、错误口令被拒、四个业务 Topic
+  齐全、三个消费组由应用真实 join，`KAFKA_VERIFY: PASS`；
+- 切换后 `MANAGED_DEPS=1` smoke 通过（`report currency_totals=1`），链路为
+  提交费用 → outbox → Kafka → report 读模型；
+- Serverless 禁止客户端建 Topic，`topics.enabled=true` 会让 Hook 30×5s
+  重试并把 `helm upgrade` 卡成 `pending-upgrade`，托管环境必须设为 false。
+
+这一步暴露并修复了一个只在托管 Kafka 上出现的代码缺陷：四个服务的
+`cmd/*/main.go` 手拼 `kafka.Security` 时漏了 `TLS`，本地明文 Kafka 恰好
+`tls=false`，单测与本地联调都发现不了，切 SASL_SSL 后四个服务全部
+CrashLoop。修复为统一的 `kafka.SecurityFromConfig` 加回归测试。
+
+完整输出见 `docs/EXTERNAL_VERIFICATION.md` 第 12 节。
+
 本轮保留了 ACK 现场便于复核：`expensio` 命名空间、四个临时依赖 Pod、
 `acr-pull` Secret 与 smoke 产生的测试租户都未删除。复核后先
 `helm -n expensio uninstall expensio`，再删除临时依赖清单与命名空间；
@@ -3204,12 +3227,12 @@ SSL 关闭——客户端只支持明文 + 口令）。
 
 | 风险 | 状态 | 说明 |
 | --- | --- | --- |
-| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS 与 Tair 已接管（两套 verify 脚本 PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS、实例里有应用写入的键）；ApsaraMQ/OSS 与 ACME 仍未接入 |
+| 托管云只完成 ACK 阶段 A | 待验证 | ACK 上已用真实 ACR 镜像、NLB Ingress、metrics-server 完成安装、全链路 smoke 与 HPA 1→3→1；RDS、Tair 与 ApsaraMQ 已接管（三套 verify 脚本 PASS、迁移 no change、MANAGED_DEPS=1 smoke PASS、Kafka 消费组由应用真实创建）；OSS 的 S3 兼容接入点实测通过，但 RAM 策略缺 `GetBucketInfo`/`DeleteObject`，尚未切到应用；ACME 仍未接入 |
 | ACK NetworkPolicy 未生效 | 已解决（ACK 实测） | 初始 `disable_network_policy=true`；关闭后仍不生效，根因是节点能力 `has_cilium_chainer=false` 的粘性设计。重置节点能力并重启 Terway 后节点切到 DataPath V2 + cilium-cni；重启应用与 ingress 后 smoke 三条断言全部通过（`SMOKE_RESULT: PASS`） |
 | ACK 主题 Hook 拉不到 Docker Hub | 已解决 | chart `0.3.2` 新增 `kafka.cliImage`，指向 ACR 镜像后安装成功；默认值仍是 `apache/kafka:3.9.2` |
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
-| 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
+| 云厂商 Kafka 端点差异 | 待验证 | 阿里云 ApsaraMQ 已实测：9093 无监听、9094 是 SASL_PLAINTEXT、9095 是 SASL_SSL 且证书签自私有 CA（CN=AliKafka），需 `tlsCA=true`；MSK 的 SCRAM 与 Event Hubs 的连接串形态仍未接入 |
 | HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。云上节点级扩容仍未验证 |
 | 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |

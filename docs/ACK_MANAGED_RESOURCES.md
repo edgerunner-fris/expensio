@@ -247,8 +247,20 @@ IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:
 
 配置要点：
 
-1. **VPC 接入点**：实例详情 → 接入点信息，找「VPC 网络」+ 端口 **9093**
-   （SASL_SSL）的那一行。不要用公网接入点。
+1. **VPC 接入点**：实例详情 → 接入点信息，取「VPC 网络」+ **SASL_SSL** 的
+   那一行，不要用公网接入点。端口随实例类型不同，必须按控制台列出的来：
+
+   | 端口 | 协议 | 实测 |
+   | --- | --- | --- |
+   | 9092 | PLAINTEXT | 能连，但事件与口令裸奔；项目配置层不接受 |
+   | 9093 | — | 本实例（Serverless）**没有监听** |
+   | 9094 | SASL_PLAINTEXT | 认证能过，口令明文过网；配置层拒绝（SASL 必须配 TLS） |
+   | 9095 | SASL_SSL | 可用；证书签自私有 CA `CN=AliKafka`，必须挂 CA |
+
+   因此 values 用 `brokers: ...:9095`、`tls: true`、`tlsCA: true`。
+   CA 从控制台「接入点信息 → 下载 CA 证书」取，写到
+   `~/expensio-ack/creds/EXPENSIO_KAFKA_TLS_CA`，由 `sync-secret.sh` 同步。
+   不挂 CA 的现象是 `PKIX path building failed`，不是认证失败。
 2. **SASL 用户**：实例 → 用户管理 → 创建用户，类型选 **PLAIN**
    （对应 chart 的 `saslMechanism: plain`；SCRAM-SHA-256 也支持，两者必须一致）。
 3. **Topic**（4 个，分区 6；实例支持副本 3 就用 3，否则 1）：
@@ -269,7 +281,26 @@ IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:
 > 如果实例开了 IP 白名单，同样加 0.1 节的三个 vSwitch 网段。
 
 交给我的：VPC 接入点（含端口）、SASL 用户名与机制、确认 4 Topic + 3 Group
-已建并授权、密码文件已就绪。
+已建并授权、密码文件与 CA 文件已就绪。
+
+### 3.1 验收（2026-10-30 实测）
+
+```bash
+BROKERS='alikafka-serverless-...-1000-vpc...:9095,...-2000-vpc...:9095,...-3000-vpc...:9095' \
+SASL_USERNAME=expensio_test TLS_CA=1 \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/kafka:3.9.2 \
+  bash deploy/cluster/ack/verify-kafka.sh
+```
+
+脚本从集群内起临时 Pod（口令经 `--command-config` 传，不进 argv），断言
+接入点 DNS、SASL_SSL 认证、错误口令负例、四个业务 Topic、三个消费组，
+最后一行 `KAFKA_VERIFY: PASS` 才算通过。
+
+`IMAGE` 必须指向集群能拉到的镜像：ACK 节点直连 Docker Hub 会超时，
+默认的 `apache/kafka:3.9.2` 在这种环境下拉不下来。
+
+Serverless 实例禁止客户端建 Topic，脚本第 6 步（临时主题自环）会跳过；
+生产/消费的真实证明是 smoke 里的「提交费用 → 事件 → report 读模型」。
 
 ---
 
@@ -281,7 +312,7 @@ IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:
 
 | 项 | 值 |
 | --- | --- |
-| 名称 | `expensio-invoices` |
+| 名称 | `expensio-test` |
 | 地域 | 华东1（杭州） |
 | 存储类型 | 标准存储 |
 | 读写权限 | **私有** |
@@ -310,8 +341,8 @@ IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:
         "oss:ListParts"
       ],
       "Resource": [
-        "acs:oss:*:*:expensio-invoices",
-        "acs:oss:*:*:expensio-invoices/*"
+        "acs:oss:*:*:expensio-test",
+        "acs:oss:*:*:expensio-test/*"
       ]
     }
   ]
@@ -339,13 +370,22 @@ IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/redis:
 | --- | --- |
 | `minio.endpoint` | `s3.oss-cn-hangzhou.aliyuncs.com`（不带 scheme） |
 | `minio.publicEndpoint` | 同上（浏览器可达的那个地址） |
-| `minio.bucket` | `expensio-invoices` |
+| `minio.bucket` | `expensio-test` |
 | `minio.useSSL` | `true` |
 
-OSS 的 S3 兼容接入点**只接受虚拟主机风格**（`<bucket>.<endpoint>`），
-路径风格会返回 `403 SecondLevelDomainForbidden`。minio-go 会按
-`<bucket>.<endpoint>` 访问；该域名已确认有 DNS 解析，但 OSS 是否接受
-S3 接入点下的这种主机名，需要在真实 Bucket 上实测（第 9 节第 3 步）。
+OSS 的 S3 兼容接入点按**虚拟主机风格**（`<bucket>.<endpoint>`）访问。
+minio-go v7.0.99 的 `s3utils.IsVirtualHostSupported` 对 `aliyuncs.com`
+端点直接返回 true，因此应用不需要额外配置 lookup 方式；2026-10-30 在
+`expensio-test.s3.oss-cn-hangzhou.aliyuncs.com` 上实测：ListObjects、
+PutObject、StatObject、GetObject、分片上传四步、预签名 GET/PUT 均通过。
+
+两点实测出来的权限细节：
+
+- `BucketExists`（HeadBucket）需要 `oss:GetBucketInfo`。缺这一条时错误是
+  `AccessDenied`，而应用启动时就会调用它，表现为 expense 直接起不来。
+- 删除附件需要 `oss:DeleteObject`；缺它时返回
+  `You have no right to access this object because of bucket acl`，
+  上传/下载都正常，只有"删除附件"这一个功能静默失败。
 
 服务端只做 `BucketExists`、`StatObject`、`RemoveObject` 与**签发** URL，
 不把对象字节经由 API 进程；因此不涉及 OSS 不支持的 `aws-chunked` 上传。
@@ -355,7 +395,37 @@ S3 接入点下的这种主机名，需要在真实 Bucket 上实测（第 9 节
 > `minio.endpoint` 指到 `minio.expensio.svc:9000`、`publicEndpoint` 指到
 > 该域名。这条路会多一个需要备份的有状态组件，只在 OSS 实测失败时启用。
 
-交给我的：Bucket 名、确认 CORS 已配、AccessKey 文件已就绪。
+交给我的：Bucket 名、确认 CORS 已配、AccessKey 文件已就绪，并确认
+AccessKey 所属账号与 Bucket 所属账号**是同一个**——跨账号时 OSS 返回的是
+`The bucket you access does not belong to you`，与"策略写错"的普通
+`Access Denied` 不同，这个区分能省掉一轮排查。
+
+### 4.5 验收
+
+```bash
+OSS_ENDPOINT=s3.oss-cn-hangzhou.aliyuncs.com OSS_BUCKET=expensio-test \
+OSS_AK="$(cat ~/expensio-ack/creds/EXPENSIO_MINIO_ACCESS_KEY)" \
+OSS_SK="$(cat ~/expensio-ack/creds/EXPENSIO_MINIO_SECRET_KEY)" \
+  go run ./cmd/ossverify
+```
+
+逐条打印 `[PASS]/[FAIL]`，最后一行 `OSS_VERIFY: PASS` 才算通过。它覆盖
+ListObjects、BucketExists、PutObject、StatObject、GetObject、分片上传四步、
+RemoveObject，并把预签名 GET/PUT 的 URL 写到 `/tmp`（不打印含签名的 URL）。
+预签名链接用 `curl` 再验一次：
+
+```bash
+curl -s -o /tmp/oss-get -w '%{http_code}\n' "$(cat /tmp/oss-presign-get.txt)"
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT -H 'Content-Type: text/plain' \
+  --data-binary 'x' "$(cat /tmp/oss-presign-put.txt)"
+curl -s -D - -o /dev/null -X OPTIONS \
+  -H 'Origin: http://expensio.test' -H 'Access-Control-Request-Method: PUT' \
+  https://expensio-test.s3.oss-cn-hangzhou.aliyuncs.com/acceptance/probe.txt \
+  | grep -i access-control
+```
+
+`OSS_LIST_BUCKETS=1` 会额外尝试 `ListBuckets`（策略没授权时打印
+`oss:ListBuckets` 被拒，属正常）。
 
 ---
 

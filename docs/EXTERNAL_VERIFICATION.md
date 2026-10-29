@@ -551,8 +551,8 @@ SMOKE_RESULT: PASS
 SSL 与强口令，但公网可路由意味着口令泄露即可直连。建议收窄到三个 vSwitch
 网段 `10.75.0.0/16`（本集群的 Pod/节点网段），或至少移除 0.0.0.0/0。
 
-仍未执行：ApsaraMQ Kafka、OSS（CORS 与 S3 虚拟主机兼容性需实测）、ACME
-签发（需要已备案域名）、云上节点级扩容（cluster-autoscaler）与多可用区。
+ApsaraMQ Kafka 的接管记录见 §12，OSS 见 §13（权限待补齐）。仍未执行：
+ACME 签发（需要已备案域名）、云上节点级扩容（cluster-autoscaler）与多可用区。
 
 ## 11. 已执行记录：Tair Redis 接管（2026-10-30）
 
@@ -592,3 +592,96 @@ REDIS_VERIFY: PASS
 report 拿不到 `EXPENSIO_REDIS_PASSWORD`，托管 Redis 上启动即
 `NOAUTH`，仪表盘缓存被静默禁用（功能不坏，但永远不命中）。0.3.3 起
 `values.yaml` 为 report 打开 `redis: true`；自建/无口令 Redis 不受影响。
+
+## 12. 已执行记录：ApsaraMQ Kafka 接管（2026-10-30）
+
+实例为 Serverless 版，VPC 接入点三台 broker。端口先测后选：
+
+```text
+9093  —— 本实例没有监听
+9094  —— SASL_PLAINTEXT：认证能过，但口令明文过网，配置层拒绝（SASL 必须配 TLS）
+9095  —— SASL_SSL：可用；证书签自私有 CA CN=AliKafka，需挂控制台下载的 CA
+```
+
+release revision 13 起 `kafka.brokers` 指向三台 broker 的 9095，`tls=true`、
+`tlsCA=true`、`saslMechanism=plain`、`saslUsername=expensio_test`，
+CA 来自 `expensio-secrets` 的 `EXPENSIO_KAFKA_TLS_CA`。
+
+```bash
+BROKERS='alikafka-serverless-...-1000-vpc...:9095,...-2000-vpc...:9095,...-3000-vpc...:9095' \
+SASL_USERNAME=expensio_test TLS_CA=1 \
+IMAGE=crpi-0z2i4q13886a2ief.cn-hangzhou.personal.cr.aliyuncs.com/expensio/kafka:3.9.2 \
+  bash deploy/cluster/ack/verify-kafka.sh
+```
+
+结果：
+
+```text
+SASL_SSL 认证通过；kafka-broker-api-versions 只返回 1 个 broker（Serverless
+的引导节点），Produce/Metadata 等 API 均可用
+错误口令 -> Authentication failed: Invalid username or password
+四个主题：expensio.expense.events.v1(.dlq)、expensio.billing.events.v1(.dlq)
+三个消费组：report-expense-v1、notification-expense-v1、notification-billing-v1
+            （应用启动后自行 join，不是控制台预建）
+KAFKA_VERIFY: PASS
+```
+
+Serverless 禁止客户端建 Topic，自环步骤跳过；生产/消费由 smoke 证明。切换后
+`MANAGED_DEPS=1` smoke 通过，`report currency_totals=1`，链路为
+提交费用 → outbox → Kafka → report 读模型。
+
+这一次暴露并修复了一个**只在托管 Kafka 上才会出现**的代码缺陷：四个服务的
+`cmd/*/main.go` 各自手拼 `kafka.Security`，只填了 CA/机制/用户名/口令，漏了
+`TLS`。本地 compose 的明文 Kafka 恰好 `tls=false`，单测与本地联调全绿；切到
+SASL_SSL 后四个服务全部 CrashLoop，报
+`kafka: 配置了 tls_ca_file 但没有开启 tls`。修复是统一的
+`kafka.SecurityFromConfig`（`internal/platform/kafka/security.go`）加回归测试，
+四个调用点改为一行。
+
+其它两个运维事实：`topics.enabled=true` 时 Hook 在 Serverless 上会 30×5s
+重试建 Topic，把 `helm upgrade` 卡成 `pending-upgrade`，托管环境必须关掉；
+镜像 tag 必须完整推送——`images.tag` 同时作用于七个服务与 migrate，少推
+migrate 或 web 会分别卡在迁移 Hook 与 `ImagePullBackOff`。
+
+## 13. 已执行记录：OSS S3 兼容接入点（2026-10-30，权限待补齐）
+
+Bucket `expensio-test`（华东1），endpoint `s3.oss-cn-hangzhou.aliyuncs.com`，
+`useSSL=true`。minio-go v7.0.99 对 `aliyuncs.com` 端点自动使用虚拟主机风格
+（`s3utils.IsVirtualHostSupported`），应用侧不需要额外配置。
+
+实测通过的项（真实请求）：
+
+```text
+ListObjects             -> PASS
+PutObject               -> PASS
+StatObject              -> PASS（size/contentType 与上传一致）
+GetObject               -> PASS（内容逐字节一致）
+NewMultipartUpload      -> PASS
+PutObjectPart           -> PASS（5 MiB，ETag 返回）
+ListObjectParts         -> PASS（1 个分片）
+AbortMultipartUpload    -> PASS
+PresignedGetObject      -> 200，内容正确
+PresignedPutObject      -> 200（curl 模拟浏览器直传）
+CORS 预检 OPTIONS       -> 200，Access-Control-Allow-Origin: *，
+                           Allow-Methods 含 PUT，Expose-Headers: ETag
+实际 PUT 响应           -> 带 Origin 时同样回 CORS 头并暴露 ETag
+```
+
+两个未通过项都是 RAM 策略缺动作，不是应用问题：
+
+```text
+BucketExists(HeadBucket) -> AccessDenied      → 缺 oss:GetBucketInfo
+RemoveObject             -> AccessDenied（"because of bucket acl"）→ 缺 oss:DeleteObject
+```
+
+前者是启动路径：`objectstore.New` 第一件事就是 `BucketExists`，缺权限时
+expense 直接起不来，所以补齐前不能把 release 切到 OSS（仍用集群内 MinIO）。
+
+排查中还有一条经验值得记：一开始返回的是
+`The bucket you access does not belong to you`，与普通 `Access Denied`
+不同——它表示桶在另一个账号下（OSS 桶名全局唯一，通用名可能已被占用）。
+换成同账号后，对象级动作立刻通过，只剩上面两条桶级/删除权限。
+
+状态：**待补齐策略后重跑**，通过标准是 `OSS_VERIFY: PASS`，再把
+`minio.endpoint/bucket` 切到 OSS 并跑一次完整 smoke。
+
