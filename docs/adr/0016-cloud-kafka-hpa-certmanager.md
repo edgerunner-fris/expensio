@@ -118,8 +118,9 @@ DataPath V2 才能开启），以及临时依赖不能替代托管 RDS/Tair/Apsa
   `Ping` 与一条端到端事件。
 - HPA 已在 k3d 与阿里云 ACK 的 metrics-server 下实测 1→3→1（ACK identity，
   CPU 908%/50%，扩容约 60s、停压后约 2m10s 回落），并据此把 chart 默认内存
-  上限从 256Mi 提到 512Mi；扩缩容期间消费者再平衡、网关连接排空
-  （`terminationGracePeriodSeconds=30`）与云上节点扩容仍未实测。
+  上限从 256Mi 提到 512Mi；扩缩容期间的消费者再平衡、网关连接排空
+  （`terminationGracePeriodSeconds=30`）与 PDB 驱逐已在 ACK 用
+  `deploy/cluster/acceptance/drills/` 补测，云上节点级扩容仍未实测。
 - cert-manager 的 ACME 流程依赖真实域名与公网入口，CI 无法覆盖。
 - PostgreSQL `verify-full` 已对 testcontainers 启动的真实 TLS 实例验证，
   包括换错 CA 必须失败；云厂商的证书主机名、代理端点与 CA 轮换仍需在目标
@@ -153,5 +154,9 @@ DataPath V2 才能开启），以及临时依赖不能替代托管 RDS/Tair/Apsa
 - ACK 阶段 A：ACR 镜像、公网 NLB Ingress、临时依赖下的安装、事件链路、
   HPA 与 Terway NetworkPolicy 均已执行（NetworkPolicy 在节点切到 DataPath V2
   并重建工作负载后，三条断言通过，`SMOKE_RESULT: PASS`）；
-- 未执行：真实托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上 HPA 节点扩容与
-  事件消费再平衡、各云厂商 Kafka 与 PostgreSQL 端点。
+- ACK 阶段 B：`deploy/cluster/acceptance/drills/` 的再平衡、连接排空与 PDB
+  驱逐三条演练均 `DRILL_RESULT: PASS`：report 1→2→1 时 3 个分区在两个
+  consumer 间重新分配且 produced=4/consumed=4；gateway 滚动重启期间
+  78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200；
+- 未执行：真实托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上节点级扩容与
+  多可用区、各云厂商 Kafka 与 PostgreSQL 端点。

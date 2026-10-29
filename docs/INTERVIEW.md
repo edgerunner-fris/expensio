@@ -157,8 +157,9 @@ Helm lint + template + kubeconform、OpenAPI lint；main 分支额外用刚推�
 和行为断言（Hook、Ingress、NetworkPolicy、RBAC、事件链路）。
 
 **Q：哪些没做完？**
-A：托管云集群（EKS/AKS/GKE）、Ingress TLS/cert-manager、PDB 驱逐演练、
-多可用区、跨地域容灾未验证；生产 SMTP 供应商的配额与退信处理属于运维配置；
+A：托管云依赖（RDS/Tair/ApsaraMQ/OSS）、Ingress TLS/cert-manager、
+云上节点级扩容、多可用区、跨地域容灾未验证；PDB 驱逐、消费者再平衡与连接
+排空已在阿里云 ACK 实测。生产 SMTP 供应商的配额与退信处理属于运维配置；
 STARTTLS/证书校验已在真实第三方 SMTP 实测，但 DKIM/SPF 未做。
 `golang.org/x/crypto` 有一条无修复版本的公告，代码未调用受影响路径，
 记录在安全扫描结果里。这些都列在 README 的"已知限制"和 PROGRESS 风险清单中。

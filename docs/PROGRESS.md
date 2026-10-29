@@ -2984,7 +2984,7 @@ HPA_SCALE_DOWN_OK
 
 扩缩容事件在 HPA 的 Events 里可见（`SuccessfulRescale New size: 3`）。本轮
 没有制造节点级资源不足，也没有验证"扩容期间消费者再平衡/连接排空"；后者
-仍需要在有事件流的云环境里观察。
+已在本文件后面的「滚动与中断演练」中用 ACK 现场补测。
 
 **彩排暴露并修复的两个问题：**
 
@@ -3096,7 +3096,51 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 ```
 
 扩容约 60s、停压后约 2m10s 回落；扩容期间 3 个 identity Pod 均 Ready。
-节点级扩容、事件消费再平衡与连接排空仍未覆盖。
+
+#### 滚动与中断演练（2026-10-29）
+
+Docker 在本机 WSL 不可用，k3d 彩排无法进行，因此三项演练直接在 ACK 现场
+执行。脚本在 `deploy/cluster/acceptance/drills/`（`lib.sh` +
+`rebalance.sh` / `drain.sh` / `pdb.sh`），与 smoke 共用
+`NAMESPACE` / `INGRESS_HOST` / `BASE_URL`；HPA 开启时通过 patch HPA 调整
+副本数，未开启时直接 scale Deployment，两种部署方式都能跑。
+
+**消费者再平衡**（`rebalance.sh`）。主题 3 分区，report 消费组从 1 副本扩到 2：
+
+```text
+baseline        parts=3 consumers=1 current=10 end=10 lag=0
+扩到 2 副本     readyReplicas=2 -> consumers=2，分区 2/1 分配，min per consumer=1
+造 4 条事件     produced=4 consumed=4 lag=0
+报表读模型      CNY amount_minor=24690（2 × 12345，无丢失/重复）
+缩回 1 副本     consumers=1，current=14 end=14 lag=0
+DRILL_RESULT: PASS rebalance
+```
+
+**连接排空**（`drain.sh`）。滚动重启 gateway，100ms 间隔经 NLB →
+ingress → gateway → identity 请求 `/api/v1/me`：
+
+```text
+strategy=RollingUpdate maxUnavailable=0 maxSurge=1 grace=30
+probe requests=78 ok=78 bad=0（前后三次运行 71/71、77/77、78/78 均为 200）
+Pod UID 前后不同：8cfc556f7-x28kh -> 65fd466dc6-kvv72
+DRILL_RESULT: PASS drain
+```
+
+**PDB 驱逐**（`pdb.sh`）。Eviction 是 Pod 子资源，`kubectl create -f` 无法
+映射，脚本通过 `kubectl proxy` 并发 POST 驱逐请求：
+
+```text
+1 副本   currentHealthy=1 disruptionsAllowed=0
+         Eviction HTTP 429 "Cannot evict pod as it would violate the pod's disruption budget."
+2 副本   currentHealthy=2 disruptionsAllowed=1
+并发驱逐 1 × 201 + 1 × 429（429 原因为 DisruptionBudget）
+驱逐期间 probe requests=43 ok=43 bad=0；副本补齐后 allowed=1
+恢复 1 副本 allowed=0
+DRILL_RESULT: PASS pdb
+```
+
+仍未覆盖的是云上节点级扩容（cluster-autoscaler 加节点）、多可用区与托管
+依赖；消费者再平衡、连接排空与 PDB 驱逐已在本集群实测。
 
 **ACK 暴露并修复的问题：**
 
@@ -3116,7 +3160,7 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 - 阿里云 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS；本次是临时单副本
   依赖，不能据此宣称托管依赖已验证；
 - cert-manager / ACME 与 TLS；本次 Ingress 只走 HTTP；
-- 云上节点扩容、事件消费再平衡、连接排空、PDB 驱逐与多可用区；
+- 云上节点级扩容（cluster-autoscaler）与多可用区；
 - 托管 PostgreSQL 的 `verify-full`、Kafka SASL、对象存储生命周期与 PITR/
   备份恢复。
 
@@ -3135,7 +3179,8 @@ HPA Events: SuccessfulRescale New size: 3；SuccessfulRescale New size: 1
 | ACK ACR 免密组件未生效 | 已解决 | 没有 credential provider DaemonSet/Webhook；使用命名空间级 `acr-pull` Secret 与 `imagePullSecrets`，凭据不入库 |
 | Kafka SASL 未连过真实 broker | 已解决 | testcontainers 启动真实 `apache/kafka:3.9.2`（SASL/PLAIN + TLS），握手、生产、消费、位点提交与两个负例均通过 |
 | 云厂商 Kafka 端点差异 | 待验证 | MSK SCRAM / Event Hubs 的连接串与端点行为不同；首次接入时验证 `Ping` 与一条事件 |
-| HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。扩缩容期间的事件消费再平衡、连接排空与云上节点扩容仍未验证 |
+| HPA 未做真实扩缩容 | 已解决（k3d + ACK 实测） | identity 在 k3d 与 ACK 的 metrics-server 下均实测 1→3→1：ACK 上 CPU 908%/50% 触发扩容约 60s，停压后约 2m10s 回落；压测还暴露并修复了 256Mi 内存上限导致的 OOMKilled（0.3.1 起默认 512Mi）。云上节点级扩容仍未验证 |
+| 滚动与中断行为未实测 | 已解决（ACK 实测） | 三项演练均通过：report 1→2→1 触发分区再平衡（3 分区、2 消费者，produced=4/consumed=4，报表金额 24690）；gateway 滚动重启期间 78/78 请求 200；并发驱逐 1×201 + 1×429，驱逐期间 43/43 请求 200。脚本在 `deploy/cluster/acceptance/drills/` |
 | cert-manager 未走完整 ACME | 待验证 | 需要真实域名与公网入口；模板负例已覆盖 |
 | PostgreSQL `verify-full` 未连过真实实例 | 已解决 | testcontainers 启动真实 TLS PostgreSQL（自签 CA），`verify-full` 建连与错误 CA 拒绝均通过；chart 的 CA 挂载与迁移 DSN 已渲染校验 |
 | 云厂商 PostgreSQL 证书差异 | 待验证 | 证书主机名、代理端点与 CA 轮换需在目标环境实测 |
@@ -3150,8 +3195,8 @@ M20 之后剩下的都是需要外部资源的验证工作，继续做必须提�
 1. 把 ACK 的临时依赖替换为 RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS，
    按 `docs/DEPLOYMENT.md` 的对照表准备 Secret，并用 `MANAGED_DEPS=1` 重跑；
 2. 真实域名 + cert-manager：验证 ACME HTTP-01/DNS-01 的签发与续期；
-3. 云上 HPA：CPU 扩容/缩容已在 k3d 与 ACK 实测，剩下节点扩容延迟、事件消费
-   再平衡与连接排空；
+3. 云上 HPA：CPU 扩缩容已在 k3d 与 ACK 实测，事件消费再平衡、连接排空与
+   PDB 驱逐已在 ACK 实测，剩下节点级扩容（cluster-autoscaler）延迟与多可用区；
 4. 各云厂商 Kafka 端点（MSK SCRAM / Event Hubs PLAIN）的连接与事件链路；
    本地真实 broker 的 SASL/PLAIN + TLS 已验证，供应商差异仍需实测；
 5. 托管 PostgreSQL 的 `verify-full`：本地链路与 chart 已完成，剩下是目标云

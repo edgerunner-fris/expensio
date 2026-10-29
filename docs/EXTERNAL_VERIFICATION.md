@@ -240,8 +240,20 @@ kubectl -n expensio get hpa,pods -w
 metrics-server。
 
 k3d 与阿里云 ACK 已用这组参数实测 identity 的 1→3→1（见
-`docs/PROGRESS.md` M20）；云上还需要额外关注节点扩容延迟、事件消费再平衡与
-连接排空。
+`docs/PROGRESS.md` M20）；云上还需要额外关注节点级扩容延迟。扩缩容期间的
+消费者再平衡、连接排空与 PDB 驱逐用下面三条演练覆盖。
+
+```bash
+# HPA 开启时脚本会 patch HPA 的 minReplicas，关闭时直接 scale Deployment
+for d in rebalance drain pdb; do
+  NAMESPACE=expensio INGRESS_HOST=expensio.test BASE_URL=https://expensio.example.com \
+    bash "deploy/cluster/acceptance/drills/$d.sh"
+done
+```
+
+判据：三条都以 `DRILL_RESULT: PASS` 结尾。`rebalance` 要求位点前移量等于
+日志增量、LAG 归零且报表金额正确；`drain` 与 `pdb` 要求探针期间没有非 200。
+阿里云 ACK 已实测通过（见第 9 节）。
 
 ### 5.3 Kafka 供应商差异
 
@@ -393,7 +405,7 @@ expensio-gateway   Deployment/gateway    63%/60%   2       20      4
 - 不要在验证环境使用生产域名与生产 Secret；
 - 不要把「渲染通过」写成「云上验证通过」。
 
-## 9. 已执行记录：阿里云 ACK 阶段 A（2026-10-29）
+## 9. 已执行记录：阿里云 ACK 阶段 A/B（2026-10-29）
 
 这一阶段验证的是**平台适配**，不是托管依赖：集群是阿里云 ACK 托管集群
 （ID `c772e4d3c99764bdf906ce05a63e559e0`，cn-hangzhou，4 个 Lifsea 节点，
@@ -442,3 +454,30 @@ NetworkPolicy 最初失败，根因有两层：`disable_network_policy=true`；�
 `apache/kafka:3.9.2`，节点访问 Docker Hub 超时导致 `pre-install` Hook
 `ImagePullBackOff`、Helm 停在 `pending-install`。0.3.2 起可用
 `kafka.cliImage` 指向 ACR 镜像，默认值不变。
+
+阶段 B 在同一集群补做滚动与中断演练，脚本是仓库里的
+`deploy/cluster/acceptance/drills/`（本机 Docker 不可用，无法用 k3d 彩排）：
+
+```text
+消费者再平衡（rebalance.sh）
+  baseline parts=3 consumers=1 current=10 end=10 lag=0
+  扩到 2 副本 -> consumers=2，分区 2/1 分配，min per consumer=1
+  造 4 条真实事件 -> produced=4 consumed=4 lag=0
+  报表读模型 CNY amount_minor=24690（2 × 12345）
+  缩回 1 副本 -> consumers=1 current=14 end=14 lag=0
+  DRILL_RESULT: PASS rebalance
+
+连接排空（drain.sh）
+  滚动重启 gateway，100ms 间隔经 NLB 请求 /api/v1/me
+  probe requests=78 ok=78 bad=0；Pod UID 前后不同
+  DRILL_RESULT: PASS drain
+
+PDB 驱逐（pdb.sh）
+  1 副本：disruptionsAllowed=0，Eviction 429（DisruptionBudget）
+  2 副本：disruptionsAllowed=1；并发驱逐 1×201 + 1×429
+  驱逐期间 probe requests=43 ok=43 bad=0；恢复后 allowed=0
+  DRILL_RESULT: PASS pdb
+```
+
+仍未执行：托管 RDS/Tair/ApsaraMQ/OSS、ACME 签发、云上节点级扩容
+（cluster-autoscaler）与多可用区。

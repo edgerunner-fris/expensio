@@ -26,6 +26,10 @@
 | `deps.yaml` | 单节点 PostgreSQL / Redis / Kafka / MinIO（**仅验收用**，emptyDir，无备份/TLS） |
 | `values.yaml` | 指向集群内依赖、Traefik、关闭 TLS 与邮件、主题单副本 |
 | `smoke.sh` | 安装后的验收断言，失败即非零退出；托管依赖加 `MANAGED_DEPS=1` 跳过两条直连检查 |
+| `drills/lib.sh` | 三个演练共用的环境变量与辅助函数（HPA/Deployment 两种扩缩方式） |
+| `drills/rebalance.sh` | 消费者再平衡：扩/缩副本期间 4 条真实事件不丢、LAG 归零 |
+| `drills/drain.sh` | 连接排空：滚动重启 gateway 时经 Ingress 的请求不中断 |
+| `drills/pdb.sh` | PDB 驱逐：1 副本拒绝驱逐，2 副本并发驱逐恰好 1 个成功 |
 
 ## 前提
 
@@ -73,6 +77,35 @@ bash deploy/cluster/acceptance/smoke.sh
 
 本地与 CI 的差异只有镜像来源：CI 用本次提交推送到 GHCR 的镜像，
 本地用导入到 containerd 的 `expensio/*:dev`。
+
+## 滚动与中断演练
+
+`smoke.sh` 只证明“装起来能用”，不覆盖副本变化时的行为。三个演练补上这部分：
+
+```bash
+for d in rebalance drain pdb; do
+  NAMESPACE=expensio INGRESS_HOST=expensio.test BASE_URL=http://127.0.0.1:8080 \
+    bash "deploy/cluster/acceptance/drills/$d.sh"
+done
+```
+
+- `rebalance.sh`：把 report 从 1 副本扩到 2、再造 4 条真实事件（2 张费用单的
+  提交与审批），断言分区重新分配、`produced == consumed`、LAG 归零、报表
+  金额为 2 × 12345 CNY；最后缩回 1 副本再验证一次分配。
+- `drain.sh`：滚动重启 gateway，以 100ms 间隔经 Ingress 请求 `/api/v1/me`
+  （gateway → identity），断言没有非 200 且 Pod 确实被替换。
+- `pdb.sh`：1 副本时 Eviction 必须返回 429；扩到 2 副本后并发驱逐两个 Pod，
+  断言恰好 1 个 201 + 1 个 429，期间探针全部 200。
+
+三者都通过 HPA 状态自动选择扩缩方式：HPA 存在时 patch `minReplicas`，
+不存在时直接 `kubectl scale`。`pdb.sh` 用 `kubectl proxy` 调 Eviction 子资源
+（该子资源不在 discovery 里，`kubectl create -f` 无法映射），端口可用
+`PROXY_PORT` 覆盖。端点 URL 需要能被 `curl` 从执行脚本的主机访问；
+在 ACK 上用了公网 NLB 地址。
+
+阿里云 ACK 的实测结果见
+[docs/EXTERNAL_VERIFICATION.md](../../../docs/EXTERNAL_VERIFICATION.md) 第 9 节：
+三条演练均以 `DRILL_RESULT: PASS` 结束。
 
 ## 不要用于生产
 

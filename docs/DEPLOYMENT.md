@@ -306,7 +306,8 @@ kubectl -n expensio describe hpa expensio-gateway
 > k3d（metrics-server）已实测 identity 的"加压 → 1→3 → 减压 → 3→1"：
 > 998%/50% 触发扩容约 30s，停压后约 1m40s 回落。压测同时暴露了 256Mi 内存
 > 上限下两个并发 argon2 登录会 OOMKilled，chart `0.3.1` 起默认上限改为 512Mi。
-> 云上节点扩容延迟、事件消费再平衡与连接排空仍未验证。
+> 阿里云 ACK 已补测扩缩容期间的事件消费再平衡、网关连接排空与 PDB 驱逐
+> （`deploy/cluster/acceptance/drills/`）；云上节点级扩容延迟仍未验证。
 
 ## Ingress TLS 与 cert-manager
 
@@ -577,13 +578,14 @@ Alloy 用 DaemonSet + `loki.source.kubernetes`，只采集
 
 ## 已知限制
 
-- **云上验证只做到 ACK 阶段 A**：k3d v5.8.3（k3s v1.31.5，双节点）与阿里云
+- **云上验证做到 ACK 阶段 A/B**：k3d v5.8.3（k3s v1.31.5，双节点）与阿里云
   ACK（4 节点，K8s 1.37，临时单副本依赖，DataPath V2）已验证 chart 部署、
-  Ingress、事件链路、HPA 与 Terway NetworkPolicy；ACK 的 RDS / Tair /
-  ApsaraMQ / OSS、cert-manager ACME、PDB 驱逐与多可用区仍未验证。
+  Ingress、事件链路、HPA 与 Terway NetworkPolicy，并补测验收再平衡、连接
+  排空与 PDB 驱逐；ACK 的 RDS / Tair / ApsaraMQ / OSS、cert-manager ACME
+  与多可用区仍未验证。
 - **云上 HPA 的节点扩容未验证**：k3d 与 ACK 的 metrics-server 下都已实测
-  identity 的 1→3→1；节点扩容延迟、扩缩容期间的事件消费再平衡与连接排空
-  仍未覆盖。
+  identity 的 1→3→1；节点级扩容延迟仍未覆盖，扩缩容期间的事件消费再平衡、
+  连接排空与 PDB 驱逐已在 ACK 实测。
 - **cert-manager 未走完整 ACME**：注解与 Issuer 二选一、缺少 TLS 时模板
   直接失败；但签发与续期依赖真实域名，未在 CI 中执行。
 - **Kafka SASL 只对本地真实 broker 验证过**：testcontainers 启的
