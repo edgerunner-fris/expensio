@@ -474,7 +474,7 @@ M2 完成。预算预占只在提交事务内发生，审批通过时 `reserved 
 | 1 | MinIO 官方镜像下架（Docker Hub 仓库 404，quay 需鉴权，ghcr 403） | **已解决** | 改用 `bitnamilegacy/minio`，其中是真实 MinIO 构建（DEVELOPMENT.2025-05-24），并用 digest 固定：`sha256:451fe685...`。代价是依赖第三方命名空间的镜像，已在 compose 注释与 ADR 中说明 |
 | 2 | 原记录称保留 google/wire，但项目实际从未引入 | **已解决（偏差已记录）** | 核对 `go.mod` 与源码：没有 `google/wire`，identity 与 expense 都是手写装配。原记录与事实不符，已删除该表述；决策与后续评估时点写入 ADR-0002 |
 | 3 | Makefile 在不同平台使用错误的 shell | **已解决** | Windows 需要 bash.exe 全路径；Linux/WSL 的 `/bin/sh` 是 dash，不支持 `.SHELLFLAGS` 里的 `-o pipefail`，会导致所有目标启动即失败。现按平台固定 bash，并补 `scripts/preflight.sh`；`make help/preflight` 已在 WSL2 实测 |
-| 4 | Go 模块代理在本机不可直连 | **已解决（WSL2 已固化）** | `~/.config/go/env` 写入 `GOPROXY=https://goproxy.cn,direct`、`GOTOOLCHAIN=local`；Go 1.27.0 位于 `/usr/local/go`，PATH 由 `~/.bashrc` 追加。换机器需重做 |
+| 4 | Go 模块代理在本机不可直连 | **已解决（WSL2 已固化）** | `~/.config/go/env` 写入 `GOPROXY=https://goproxy.cn,direct`、`GOTOOLCHAIN=auto`；Go 1.27.0 位于 `/usr/local/go`，PATH 由 `~/.bashrc` 追加。换机器需重做 |
 | 5 | Docker 拉取镜像受网络代理影响 | **已解决（WSL2 环境已复核）** | Docker Desktop WSL 集成可用，daemon 29.5.3；测试镜像已本地缓存。Ryuk 默认关闭，见风险 25。网络或代理变化时仍需复核 |
 | 6 | 优雅关闭偶发耗时 5 秒 | **已解决** | 根因是 net/http 把"已连接但未发请求"的连接（StateNew）视作活跃直到满 5 秒（golang/go#22682）。已在 `server.Run` 中关闭 keep-alive、超时后强制 Close，并在配置校验里禁止 `shutdown_timeout <= 5s`。测试改用禁用 keep-alive 的专用 client，40 次重复稳定 |
 | 7 | 本机无法运行 `-race` | **已解决** | WSL2 具备 cgo/gcc。2026-10-26 实测 `go test ./... -race -count=5 -timeout=15m` 全部通过（identity 31.461s、gateway 4.109s），并用临时竞争用例做过 `DATA RACE` 反向验证 |
@@ -550,7 +550,11 @@ M5 期间发现并修掉：
 - WSL2 Ubuntu 24.04，项目位于 `/home/edgerunner/projects/expensio`；
   Windows 下 `C:\Users\74021\expensio` 仅作备份。
 - Go 1.27.0 安装在 `/usr/local/go`，`~/.bashrc` 追加该目录到 PATH。
-- `~/.config/go/env`：`GOPROXY=https://goproxy.cn,direct`、`GOTOOLCHAIN=local`。
+- `~/.config/go/env`：`GOPROXY=https://goproxy.cn,direct`、`GOTOOLCHAIN=auto`
+  （本机 `/usr/local/go` 是 1.27.0，`go.mod` 要求 1.27.3，构建时自动取
+  1.27.3；2026-10-30 复核，此前文档写的 `local` 已不成立）。
+- 非交互 shell（`bash -lc`）不会读 `~/.bashrc`，因此脚本里要显式
+  `export PATH=/usr/local/go/bin:$PATH`；交互终端不受影响。
 - `CGO_ENABLED=1`（race detector 依赖 gcc）。
 - Docker Desktop 启用 WSL 集成，当前用户在 `docker` 组；
   测试容器镜像 `postgres:16.15-alpine`、`redis:7.4.11-alpine`。
@@ -3330,7 +3334,25 @@ kubelet 最后心跳停在 23:37–23:42Z；NLB 两个公网 IP 的 `/healthz` �
 | 云厂商 PostgreSQL 证书差异 | 已解决（RDS 实测） | 阿里云 RDS 内网域名与实例证书 SAN 一致，`verify-full` + ApsaraDB CA 链从 Pod 内建连成功；CA 链最早到期 2032-04，轮换仍需运维跟进 |
 | Redis 口令为可选键 | 设计如此 | 本地/验收无认证；托管 Redis 缺键时请求会显式失败，不会静默降级。chart 0.3.3 起 report 也注入该键（此前只有 gateway 有，report 的仪表盘缓存会静默禁用） |
 
-## 下一步
+## 交付前本机整栈复核（2026-10-30 上午）
+
+按"交付一个能跑起来的完整项目"的要求，在本机重跑了一遍从零启动路径，并修掉
+两处**只影响本机环境、不影响代码**的问题：
+
+| 步骤 | 实测结果 |
+| --- | --- |
+| Docker 引擎 | Docker Desktop 的 WSL 集成丢失（`docker: command not found`、`accessing specified distro mount service … ubuntu-24-04.sock`），在 Settings → Resources → WSL integration 重新勾选 `Ubuntu-24.04` 后恢复，`/var/run/docker.sock` 存在，server 29.5.3 |
+| 脚本执行位 | `make up` 报 `./scripts/env.sh: Permission denied`：14 个 `.sh` 在仓库里是 `100644`。全部改为 `100755` 后 `make env` / `make migrate` 正常 |
+| `make up` | 依赖 11 个容器全部 healthy，四个 Kafka 主题创建完成 |
+| `make app-up` | 退出码 0；`expensio-migrate-1`、`expensio-topics-1` 为 `Exited (0)`；gateway / identity / expense / billing / report / notification / web 全部 healthy |
+| `make smoke` | `OK gateway :8080` … `OK notification :8085`，`冒烟通过：6/6`，退出码 0 |
+| 宿主探针 | `8080/healthz` → 200，`5173/` → 200（HTML 标题 `Expensio · 费用管理`）；identity 等五个服务按设计不发布宿主端口 |
+| `go run ./cmd/seed` | 返回 `tenant.slug_taken`（HTTP 409，带 request_id），说明演示租户此前已建、API 在线 |
+
+同一时段 ACK 侧仍不可用（四台节点 `EcsInstanceState=Stopped`），云上复验顺延，
+见上一节与本表"全部节点 NotReady"一行。
+
+
 
 项目的代码、文档、本地/k3d 验收与阿里云 ACK 阶段 A（平台适配）已收口。
 M20 之后剩下的都是需要外部资源的验证工作，继续做必须提供相应环境。执行顺序、

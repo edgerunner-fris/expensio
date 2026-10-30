@@ -99,6 +99,16 @@ make app-up    # 构建并启动完整栈（含迁移、建主题、管理台）
 停止：`make app-down`。只起依赖、服务用宿主进程跑：
 `make up` + `make run-expense`（需要 `.env` 中的数据库配置）。
 
+### 起不来先看这几条
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| `./scripts/env.sh: Permission denied` | 脚本执行位丢了。`chmod +x scripts/*.sh deploy/cluster/acceptance/*.sh deploy/cluster/ack/*.sh`（仓库里已全部提交为 `100755`） |
+| WSL 里 `docker: command not found` | Docker Desktop → Settings → Resources → WSL integration，打开 `Ubuntu-24.04` 后 Apply & restart |
+| `accessing specified distro mount service: … ubuntu-24-04.sock` | 同上：WSL 集成没生效，容器挂不上 WSL 里的配置文件。修好后重跑 `make up` |
+| 端口被占用（8080/8081…/5173/5432/6379/9092） | `make down` 清掉旧容器再起；compose 只绑 `127.0.0.1` |
+| 管理台白屏、`/api` 502 | 六个后端还没 healthy：`docker compose --profile app ps`，再 `S=gateway make logs` |
+
 ### 演示数据
 
 ```bash
@@ -162,8 +172,11 @@ metrics-server 下均实测 1→3→1，`MANAGED_DEPS=1` 的 smoke 分支也实�
 ACK 阶段 A 用 ACR 镜像、公网 NLB 与临时
 单副本依赖跑通安装、事件链路与 HPA，并把节点切到 DataPath V2 后验证了
 Terway NetworkPolicy（chart 0.3.2）；阶段 B 在同一集群补测了消费者再平衡、
-网关连接排空与 PDB 驱逐。托管 RDS/Tair/ApsaraMQ/OSS 与 ACME
-签发仍未验证，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+网关连接排空与 PDB 驱逐。托管 RDS / Tair / ApsaraMQ / OSS 已全部接管并在
+同一集群完成 verify 与端到端验收（切到 OSS 后 `MANAGED_DEPS=1` smoke 与附件
+E2E 均 PASS）；ACME 签发、云上节点级扩容、多可用区与备份/PITR 仍未验证，
+见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 与
+[docs/EXTERNAL_VERIFICATION.md](docs/EXTERNAL_VERIFICATION.md)。
 
 ## 目录
 
@@ -180,6 +193,7 @@ docs/           架构、部署、进度与 ADR
 
 ## 文档
 
+- [docs/DELIVERY.md](docs/DELIVERY.md) —— 交付清单与三档启动（本机 / k3d / ACK）
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 当前真实结构与边界
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) —— 本地与 Helm 部署
 - [docs/EXTERNAL_VERIFICATION.md](docs/EXTERNAL_VERIFICATION.md) —— 云上验证顺序、证据模板与常见失败
@@ -191,13 +205,20 @@ docs/           架构、部署、进度与 ADR
 
 ## 已知限制
 
-- 集群验收用的是 k3d（双节点 k3s）与阿里云 ACK 阶段 A/B（4 节点，K8s 1.37，
-  临时单副本依赖，DataPath V2）；ACK 的 RDS/Tair/ApsaraMQ/OSS、ACME 证书
-  签发、云上节点级扩容与多可用区未验证。HPA 的 CPU 扩缩容、Terway
-  NetworkPolicy、事件消费再平衡、网关连接排空与 PDB 驱逐已在 ACK 实测，
-  演练脚本在 `deploy/cluster/acceptance/drills/`。
-  Kafka 的 TLS + SASL 与 PostgreSQL 的 `verify-full` 已在 testcontainers 的
-  真实实例上跑通正反向用例，但各云厂商的认证端点与证书链仍需首次接入时验证。
+- 集群验收用 k3d（双节点 k3s）与阿里云 ACK（4 节点，K8s 1.37，DataPath V2）。
+  ACK 上已完成：ACR 镜像安装、NLB Ingress、metrics-server、HPA 1→3→1、
+  Terway NetworkPolicy、事件消费再平衡、网关连接排空、PDB 驱逐，以及
+  RDS PostgreSQL / Tair Redis / ApsaraMQ Kafka / OSS 四套托管依赖的接管与
+  端到端验收。未完成：ACME 证书签发（无备案域名）、云上节点级自动扩容
+  （账户余额不足，只有扩容尝试无 Pending→Ready 实证）、多可用区、OSS
+  生命周期规则与跨区域复制、托管 PostgreSQL 备份/PITR 恢复演练、云端
+  可观测性后端与全量压测。
+- **2026-10-30 起 ACK 集群四台节点 ECS 实例处于 Stopped，集群暂不可用**，
+  恢复步骤与复验清单见 `docs/PROGRESS.md` 的风险表；本机无云依赖，本地
+  整栈不受影响。
+- Kafka 的 TLS + SASL 与 PostgreSQL 的 `verify-full` 已在 testcontainers 的
+  真实实例上跑通正反向用例，阿里云对应产品也已接入；但 MSK 的 SCRAM、
+  Event Hubs 的连接串形态仍需首次接入时验证。
 - CI 在 GitHub runner 上全绿；main 分支额外用刚推送的镜像跑整栈
   Playwright 与真实 k3d 集群验收（PR 不跑，本地用 `make e2e`）。
 - 邀请链接是 bearer 凭据：拿到链接的人可以为**新邮箱**设置密码入组；
