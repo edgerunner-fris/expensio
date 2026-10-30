@@ -3297,6 +3297,13 @@ Pod 的 `Ready` 条件已经是 `False`，七个 HPA 全部报
 这条与伸缩试验**分开记录、分开排查**：先确认停机原因，恢复后验证节点重新
 加入、Pod 自愈与 NetworkPolicy/Ingress 是否仍按预期工作。
 
+08:03 CST 复测（用户报"节点已恢复"之后）：四台仍是
+`EcsInstanceState=True(Stopped)`，条件时间戳与停机时一致、没有发生状态转换；
+kubelet 最后心跳停在 23:37–23:42Z；NLB 两个公网 IP 的 `/healthz` 均连不上
+（curl 返回 `000`）；`kube-system` 全部 Pod `Ready=False`；GOATScaler 仍在报
+`ScaleDownLimited … nodepool minsize limit`。即此刻 ECS 侧实例仍处于停止状态，
+集群内验证无法进行。
+
 **对既有证据的影响**：OSS 切换的集群内证据（revision 14、smoke、附件闭环）
 完成于 06:32–06:55 CST，早于停机约 50 分钟，仍然有效；停机之后无法再做
 任何集群内验证。
