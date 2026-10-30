@@ -35,6 +35,10 @@ make app-up     # 构建并启动：依赖 + 六个服务 + 迁移 + 建主题 +
 `make app-up` 会等到全部容器 healthy 才返回（`--wait --wait-timeout 420`）。
 整个过程不需要手工创建数据库、主题或账号。
 
+等价的一键脚本：`bash scripts/start-local.sh`（会先检查 Docker 引擎，必要时
+尝试拉起 Docker Desktop，然后执行 `make app-up`；幂等）。Windows 桌面快捷方式
+「Expensio 启动 / 停止」调用的就是它，生成器在 `C:\Users\74021\expensio-launcher\`。
+
 | 入口 | 地址 | 说明 |
 | --- | --- | --- |
 | 管理台 | <http://127.0.0.1:5173/> | 直接注册新租户，第一个用户是 owner |

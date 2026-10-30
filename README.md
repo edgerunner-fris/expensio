@@ -88,6 +88,11 @@ make env       # 生成 .env：随机本地口令，权限 600，不入仓
 make app-up    # 构建并启动完整栈（含迁移、建主题、管理台）
 ```
 
+也可以直接跑 `bash scripts/start-local.sh`：它会先确认 Docker 引擎（没起来就
+尝试拉起 Docker Desktop），再执行 `make app-up`，幂等，已经起来时几十秒返回。
+Windows 桌面上的「Expensio 启动 / 停止」快捷方式就是调用它（生成脚本见
+`C:\Users\74021\expensio-launcher\`）。
+
 启动后：
 
 - 管理台 <http://127.0.0.1:5173/> —— 直接注册新租户，第一个用户是 owner
